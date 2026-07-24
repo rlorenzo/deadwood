@@ -77,6 +77,46 @@ fn path_attr_module_children_resolve_in_stem_directory() {
     );
 }
 
+/// When a module file cannot be parsed, both detectors must skip instead of
+/// reporting findings from incomplete data: the broken file could declare
+/// `mod`s (so no dead-file findings) and could use any item (so no
+/// unused-pub findings).
+#[test]
+fn detectors_skip_when_module_resolution_is_incomplete() {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/broken");
+    let analysis = analyze(&fixture).expect("analysis should succeed on the fixture");
+
+    assert!(
+        analysis.findings.is_empty(),
+        "incomplete data must produce no findings: {:?}",
+        analysis.findings
+    );
+    assert!(
+        analysis
+            .warnings
+            .iter()
+            .any(|w| w.contains("could not parse")),
+        "the parse failure must be surfaced: {:?}",
+        analysis.warnings
+    );
+    assert!(
+        analysis
+            .warnings
+            .iter()
+            .any(|w| w.contains("dead-file check skipped")),
+        "the dead-file skip must be surfaced: {:?}",
+        analysis.warnings
+    );
+    assert!(
+        analysis
+            .warnings
+            .iter()
+            .any(|w| w.contains("unused-pub check skipped")),
+        "the unused-pub skip must be surfaced: {:?}",
+        analysis.warnings
+    );
+}
+
 /// A file included by several workspace members via `#[path]` enters the
 /// identifier census exactly once, so its dead pub items are still reported
 /// (and reported once, not per including package).

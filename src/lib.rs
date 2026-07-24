@@ -50,7 +50,11 @@ pub struct Analysis {
     pub workspace_root: PathBuf,
     pub findings: Vec<Finding>,
     /// Non-fatal problems hit during analysis (unparsable files, unresolved
-    /// `mod` declarations). These make results incomplete, not wrong.
+    /// `mod` declarations). Whenever a warning could cause a detector to
+    /// report false positives — incomplete module resolution for dead files,
+    /// an incomplete usage census for unused pub items — that detector is
+    /// skipped for the affected scope, so findings stay trustworthy but the
+    /// analysis is incomplete until the warnings are resolved.
     pub warnings: Vec<String>,
 }
 
@@ -73,6 +77,7 @@ pub fn analyze(path: &Path) -> Result<Analysis> {
             .parent()
             .context("manifest path has no parent directory")?;
 
+        let warnings_before = warnings.len();
         let mut package_reachable: HashSet<PathBuf> = HashSet::new();
         for target in &package.targets {
             let tree = modtree::resolve(&target.src_path, &mut warnings);
@@ -82,6 +87,17 @@ pub fn analyze(path: &Path) -> Result<Analysis> {
                     reachable.push(file);
                 }
             }
+        }
+
+        // An unparsable file or unresolved `mod` means the reachable set is
+        // incomplete, and files it would have reached would be reported as
+        // false-positive dead files — skip the check for this package.
+        if warnings.len() > warnings_before {
+            warnings.push(format!(
+                "dead-file check skipped for package `{}`: module resolution was incomplete (see warnings above)",
+                package.name
+            ));
+            continue;
         }
 
         // Dead-file detection only covers src/: tests/, examples/, and

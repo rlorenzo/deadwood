@@ -19,6 +19,10 @@
 //!
 //! Items carrying `#[no_mangle]`, `#[used]`, `#[export_name]`, or an
 //! `allow`/`expect` for `dead_code`/`unused` are skipped, as is `fn main`.
+//!
+//! If any file fails to tokenize, the census is incomplete and could produce
+//! false positives, so the whole check is skipped for that run (with a
+//! warning) instead of reporting unreliable findings.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -48,15 +52,29 @@ pub fn find_unused_pub_items(
         }
     }
 
+    // The census must see every file: a file that fails to tokenize would
+    // undercount usages and turn missing data into false positives, so in
+    // that case the whole check is skipped rather than reported unreliably.
     let mut counts: HashMap<String, usize> = HashMap::new();
+    let mut census_complete = true;
     for file in files {
         match tokenize(&file.source) {
             Ok(tokens) => count_idents(tokens, &mut counts),
-            Err(err) => warnings.push(format!(
-                "could not tokenize `{}` for usage counting: {err}",
-                file.path.display()
-            )),
+            Err(err) => {
+                census_complete = false;
+                warnings.push(format!(
+                    "could not tokenize `{}` for usage counting: {err}",
+                    file.path.display()
+                ));
+            }
         }
+    }
+    if !census_complete {
+        warnings.push(
+            "unused-pub check skipped: usage counts would be unreliable with untokenizable files"
+                .to_string(),
+        );
+        return Vec::new();
     }
 
     items.retain(|item| counts.get(&item.name).copied().unwrap_or(0) <= 1);
@@ -187,6 +205,28 @@ mod tests {
         )];
         let mut warnings = Vec::new();
         assert!(find_unused_pub_items(&files, &mut warnings).is_empty());
+    }
+
+    #[test]
+    fn check_is_skipped_when_a_file_cannot_be_tokenized() {
+        let files = vec![
+            parsed("/ws/src/lib.rs", "pub fn dead() {}\n"),
+            // Unbalanced delimiter: fails both parsing and tokenization, so
+            // the census cannot see this file's usages.
+            parsed("/ws/src/broken.rs", "fn oops( {\n"),
+        ];
+        let mut warnings = Vec::new();
+        let unused = find_unused_pub_items(&files, &mut warnings);
+        assert!(
+            unused.is_empty(),
+            "an incomplete census must not report findings"
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("unused-pub check skipped")),
+            "the skip must be surfaced as a warning: {warnings:?}"
+        );
     }
 
     #[test]
