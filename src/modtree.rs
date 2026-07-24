@@ -107,7 +107,11 @@ fn collect_mod_decls(
                 if let Some(explicit) = path_attr(&m.attrs) {
                     let target = file_dir.join(explicit);
                     if target.is_file() {
-                        queue.push((target, true));
+                        // Only a file literally named `mod.rs` owns its parent
+                        // directory; any other `#[path]` target keeps the
+                        // stem-based rule for its own children.
+                        let owns_dir = target.file_name().is_some_and(|n| n == "mod.rs");
+                        queue.push((target, owns_dir));
                     } else {
                         warnings.push(format!(
                             "`mod {}` in `{}` points at missing file `{}`",

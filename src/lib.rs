@@ -61,7 +61,11 @@ pub fn analyze(path: &Path) -> Result<Analysis> {
     let mut warnings = Vec::new();
 
     // Parse every reachable file once; both detectors share the results.
+    // Dedup is workspace-wide, not per-package: a file shared by several
+    // packages (e.g. via `#[path]`) must enter the identifier census exactly
+    // once, or its definitions would count as uses and hide dead items.
     let mut reachable: Vec<modtree::ParsedFile> = Vec::new();
+    let mut seen: HashSet<PathBuf> = HashSet::new();
 
     for package in &meta.packages {
         let manifest_dir = package
@@ -73,7 +77,8 @@ pub fn analyze(path: &Path) -> Result<Analysis> {
         for target in &package.targets {
             let tree = modtree::resolve(&target.src_path, &mut warnings);
             for file in tree {
-                if package_reachable.insert(file.path.clone()) {
+                package_reachable.insert(file.path.clone());
+                if seen.insert(file.path.clone()) {
                     reachable.push(file);
                 }
             }

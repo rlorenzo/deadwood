@@ -45,3 +45,59 @@ fn detects_dead_file_and_unused_pub_item() {
     assert_eq!(dead_fn.line, Some(7));
     assert_eq!(dead_fn.file, PathBuf::from("src/lib.rs"));
 }
+
+/// A module loaded via `#[path]` keeps the stem-based directory rule for its
+/// own children: `#[path = "renamed_file.rs"] mod alias;` with `mod child;`
+/// inside must find `src/renamed_file/child.rs`, not `src/child.rs`.
+#[test]
+fn path_attr_module_children_resolve_in_stem_directory() {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/pathmod");
+    let analysis = analyze(&fixture).expect("analysis should succeed on the fixture");
+
+    assert!(
+        analysis.warnings.is_empty(),
+        "unexpected warnings: {:?}",
+        analysis.warnings
+    );
+    assert!(
+        !analysis
+            .findings
+            .iter()
+            .any(|f| f.kind == FindingKind::DeadFile),
+        "no file in the fixture is dead: {:?}",
+        analysis.findings
+    );
+    // `seven` is called through the aliased module, so it must not be flagged.
+    assert!(
+        !analysis
+            .findings
+            .iter()
+            .any(|f| f.name.as_deref() == Some("seven")),
+        "seven is referenced and must not be reported"
+    );
+}
+
+/// A file included by several workspace members via `#[path]` enters the
+/// identifier census exactly once, so its dead pub items are still reported
+/// (and reported once, not per including package).
+#[test]
+fn file_shared_between_packages_is_counted_once() {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/shared");
+    let analysis = analyze(&fixture).expect("analysis should succeed on the fixture");
+
+    assert!(
+        analysis.warnings.is_empty(),
+        "unexpected warnings: {:?}",
+        analysis.warnings
+    );
+    let shared_dead_reports = analysis
+        .findings
+        .iter()
+        .filter(|f| f.name.as_deref() == Some("shared_dead"))
+        .count();
+    assert_eq!(
+        shared_dead_reports, 1,
+        "shared_dead is unused and must be reported exactly once: {:?}",
+        analysis.findings
+    );
+}

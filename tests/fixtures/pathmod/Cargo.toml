@@ -1,0 +1,9 @@
+# Test fixture: a module loaded via `#[path]` that declares its own child
+# module. The child must resolve in the stem-named directory of the `#[path]`
+# target, not the crate root.
+[package]
+name = "pathmod"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]

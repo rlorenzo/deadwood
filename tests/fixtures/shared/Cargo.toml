@@ -1,0 +1,6 @@
+# Test fixture: two workspace members include the same source file via
+# `#[path]`. The shared file must enter the identifier census exactly once,
+# so its dead pub items are still reported.
+[workspace]
+resolver = "2"
+members = ["member_a", "member_b"]
