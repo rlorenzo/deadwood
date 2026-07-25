@@ -79,7 +79,8 @@
 //! This also means the acceptance-critical cases fall out directly: a
 //! dev-dependency used only in `tests/`, and a build-dependency used only in
 //! `build.rs`, are both seen, because those targets are scanned like any
-//! other.
+//! other. Reporting the wrong table as its own finding is tracked in
+//! <https://github.com/rlorenzo/deadwood/issues/10>.
 //!
 //! # Known limitations
 //!
@@ -87,7 +88,8 @@
 //!   dependency (the `getrandom = { features = ["js"] }` idiom) is not
 //!   referenced by any code or by this package's `[features]` table, and is
 //!   reported. There is no syntactic signal that distinguishes it from a
-//!   stale entry; an ignore list in the config file is the intended answer.
+//!   stale entry; an allowlist in the config file is the intended answer
+//!   (<https://github.com/rlorenzo/deadwood/issues/9>).
 //! - A dependency reachable only through a glob import of another crate's
 //!   prelude (a derive macro re-exported by a facade crate) is invisible.
 //! - Only the source tree in front of us counts. A crate unpacked from a

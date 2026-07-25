@@ -146,14 +146,14 @@ toolchain is pinned to `stable` with `clippy` and `rustfmt` via
   macro input and doc comments. Findings are lost, never invented.
 - A dependency declared to turn on a feature of a *transitive* dependency
   (`getrandom = { features = ["js"] }`) is named by no code and no
-  `[features]` entry, and is reported. An ignore list in the planned config
-  file is the intended answer ([#4]).
+  `[features]` entry, and is reported. An allowlist in the planned config
+  file is the intended answer ([#9]).
 - The dependency check judges the source tree in front of it. A crate
   unpacked from a published `.crate` archive usually has `tests/` and
   `benches/` stripped, so the dev-dependencies they used are reported —
   correctly for that tree, not for the repository it came from.
 
-[#4]: https://github.com/rlorenzo/deadwood/issues/4
+[#9]: https://github.com/rlorenzo/deadwood/issues/9
 
 ## License
 

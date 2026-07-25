@@ -71,7 +71,8 @@ that were actually implemented, since several were judgement calls:
 
 Known gap: a dependency declared only to enable a feature of a transitive
 dependency (`getrandom = { features = ["js"] }`) is named by nothing and is
-reported. The intended answer is the ignore list in the config file (item 1).
+reported. The intended answer is an allowlist in the config file (item 1),
+tracked in [#9](https://github.com/rlorenzo/deadwood/issues/9).
 
 ## Next (sequenced, one slice at a time)
 
@@ -92,7 +93,8 @@ reported. The intended answer is the ignore list in the config file (item 1).
 6. **Misplaced dependency kinds** — a `[dependencies]` entry used only by
    tests belongs in `[dev-dependencies]`. Deliberately not folded into the
    unused-dependency check, whose question is whether an entry is named at
-   all; this is a separate finding with its own noise profile.
+   all; this is a separate finding with its own noise profile, tracked in
+   [#10](https://github.com/rlorenzo/deadwood/issues/10).
 
 ## Explicitly out of scope for now
 
