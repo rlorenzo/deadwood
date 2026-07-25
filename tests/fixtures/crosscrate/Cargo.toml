@@ -1,0 +1,7 @@
+# Test fixture: paths that cross workspace members. `app` refers to
+# `engine-core` by its crate name (`engine_core`, dashes normalized), so
+# resolution has to reach into another package's module tree — and has to
+# keep reporting the items over there that nobody reaches.
+[workspace]
+resolver = "2"
+members = ["engine-core", "app"]

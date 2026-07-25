@@ -252,6 +252,28 @@ mod tests {
         );
     }
 
+    /// Module paths come from the `mod` declarations that led to a file, not
+    /// from its name: `#[path = "renamed_file.rs"] mod alias;` puts the file's
+    /// items under `alias`, which is what paths in the crate spell.
+    #[test]
+    fn module_paths_follow_declarations_not_file_names() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/pathmod/src/lib.rs");
+        let mut warnings = Vec::new();
+        let files = resolve(&root, &mut warnings);
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+
+        let mut modules: Vec<Vec<String>> = files.iter().map(|f| f.module.clone()).collect();
+        modules.sort();
+        assert_eq!(
+            modules,
+            vec![
+                vec![],
+                vec!["alias".to_string()],
+                vec!["alias".to_string(), "child".to_string()],
+            ]
+        );
+    }
+
     #[test]
     fn path_attr_reads_string_literal() {
         let file: syn::File = syn::parse_str("#[path = \"other.rs\"]\nmod x;").unwrap();

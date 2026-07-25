@@ -1,21 +1,42 @@
-//! End-to-end test: run the full analysis on the fixture package in
-//! `tests/fixtures/simple` and check the findings. Requires `cargo` on PATH
-//! (used for `cargo metadata`), which is a given anywhere `cargo test` runs.
+//! End-to-end tests: run the full analysis on the fixture packages under
+//! `tests/fixtures/` and check the findings. Requires `cargo` on PATH (used
+//! for `cargo metadata`), which is a given anywhere `cargo test` runs.
 
 use std::path::{Path, PathBuf};
 
-use deadwood::{FindingKind, analyze};
+use deadwood::{Analysis, FindingKind, analyze};
 
-#[test]
-fn detects_dead_file_and_unused_pub_item() {
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/simple");
-    let analysis = analyze(&fixture).expect("analysis should succeed on the fixture");
-
+/// Analyze the named fixture, asserting the run was complete: any warning
+/// makes a detector skip, which would make the assertions below vacuous.
+fn analyze_fixture(name: &str) -> Analysis {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let analysis = analyze(&fixture.join(name)).expect("analysis should succeed on the fixture");
     assert!(
         analysis.warnings.is_empty(),
         "unexpected warnings: {:?}",
         analysis.warnings
     );
+    analysis
+}
+
+/// Findings of one kind, as `(file, name)` pairs in report order.
+fn reported(analysis: &Analysis, kind: FindingKind) -> Vec<(String, &str)> {
+    analysis
+        .findings
+        .iter()
+        .filter(|f| f.kind == kind)
+        .map(|f| {
+            (
+                f.file.display().to_string(),
+                f.name.as_deref().unwrap_or_default(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn detects_dead_file_and_unused_pub_item() {
+    let analysis = analyze_fixture("simple");
 
     let dead_files: Vec<&PathBuf> = analysis
         .findings
@@ -51,14 +72,8 @@ fn detects_dead_file_and_unused_pub_item() {
 /// inside must find `src/renamed_file/child.rs`, not `src/child.rs`.
 #[test]
 fn path_attr_module_children_resolve_in_stem_directory() {
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/pathmod");
-    let analysis = analyze(&fixture).expect("analysis should succeed on the fixture");
+    let analysis = analyze_fixture("pathmod");
 
-    assert!(
-        analysis.warnings.is_empty(),
-        "unexpected warnings: {:?}",
-        analysis.warnings
-    );
     assert!(
         !analysis
             .findings
@@ -117,19 +132,12 @@ fn detectors_skip_when_module_resolution_is_incomplete() {
     );
 }
 
-/// A file included by several workspace members via `#[path]` enters the
-/// identifier census exactly once, so its dead pub items are still reported
-/// (and reported once, not per including package).
+/// A file included by several workspace members via `#[path]` is a module of
+/// each crate, so its dead pub items are still reported — once, not per
+/// including package.
 #[test]
 fn file_shared_between_packages_is_counted_once() {
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/shared");
-    let analysis = analyze(&fixture).expect("analysis should succeed on the fixture");
-
-    assert!(
-        analysis.warnings.is_empty(),
-        "unexpected warnings: {:?}",
-        analysis.warnings
-    );
+    let analysis = analyze_fixture("shared");
     let shared_dead_reports = analysis
         .findings
         .iter()
@@ -139,5 +147,77 @@ fn file_shared_between_packages_is_counted_once() {
         shared_dead_reports, 1,
         "shared_dead is unused and must be reported exactly once: {:?}",
         analysis.findings
+    );
+}
+
+/// The three classes of dead code the old identifier census could not see:
+/// an item sharing a name with a used one, a type mentioned only by its own
+/// `impl` block, and a `pub use` re-export nothing goes through. Renamed and
+/// nested imports and `crate::`/`self::`/`super::` paths all resolve, so the
+/// items they reach stay unreported.
+#[test]
+fn resolution_sees_through_names_impls_and_reexports() {
+    let analysis = analyze_fixture("paths");
+
+    assert_eq!(
+        reported(&analysis, FindingKind::UnusedPubItem),
+        vec![
+            // Only mentioned by `impl ImplOnly`, including inside its body.
+            ("src/alpha.rs".to_string(), "ImplOnly"),
+            // `alpha::collision` is the one every path resolves to; a census
+            // of the name "collision" hid this one behind it.
+            ("src/beta.rs".to_string(), "collision"),
+        ]
+    );
+    assert_eq!(
+        reported(&analysis, FindingKind::UnusedReexport),
+        vec![
+            ("src/surface.rs".to_string(), "Ignored"),
+            ("src/surface.rs".to_string(), "Alias"),
+        ]
+    );
+
+    // The re-exported definitions themselves are *not* reported as well: a
+    // dead re-export is one finding, and removing it is what surfaces the
+    // item underneath on the next run.
+    assert!(
+        !analysis
+            .findings
+            .iter()
+            .any(|f| f.file == Path::new("src/surface/hidden.rs")),
+        "re-export targets must not cascade into a second finding: {:?}",
+        analysis.findings
+    );
+}
+
+/// Anything Deadwood cannot resolve counts as a use: identifiers in macro
+/// input, and names in a module whose scope has a glob import that does not
+/// lead into the workspace. A glob that *does* is expanded instead of giving
+/// up, so it hides nothing.
+#[test]
+fn unresolvable_paths_keep_their_targets_alive() {
+    let analysis = analyze_fixture("macros");
+
+    assert_eq!(
+        reported(&analysis, FindingKind::UnusedPubItem),
+        vec![("src/glob_source.rs".to_string(), "never_named")],
+        "only the item behind a followed glob that nobody names is dead"
+    );
+}
+
+/// Paths that cross workspace members resolve by crate name, with cargo's
+/// dash-to-underscore normalization (`engine-core` is `engine_core` in a
+/// path). Items the other member never reaches are still reported.
+#[test]
+fn paths_resolve_across_workspace_members() {
+    let analysis = analyze_fixture("crosscrate");
+
+    assert_eq!(
+        reported(&analysis, FindingKind::UnusedPubItem),
+        vec![
+            ("engine-core/src/api.rs".to_string(), "Unused"),
+            ("engine-core/src/lib.rs".to_string(), "never_started"),
+        ],
+        "`start` and `Handle` are reached from `app` and must not be reported"
     );
 }
