@@ -225,6 +225,10 @@ pub(crate) struct SymbolTable {
     roots: Vec<usize>,
     /// Crate name to that crate's root module.
     externs: HashMap<String, usize>,
+    /// Crate names claimed by more than one crate. Resolving through one
+    /// would be a guess, so paths that start with one fall back to the
+    /// conservative rule instead.
+    ambiguous_externs: HashSet<String>,
     /// Every definition sharing a name, for the conservative fallback.
     by_name: HashMap<String, Vec<usize>>,
     /// Module lookup by crate and module path.
@@ -251,6 +255,7 @@ impl SymbolTable {
             modules: Vec::new(),
             roots: Vec::new(),
             externs: HashMap::new(),
+            ambiguous_externs: HashSet::new(),
             by_name: HashMap::new(),
             by_path: HashMap::new(),
             is_library: crates.iter().map(|unit| !unit.names.is_empty()).collect(),
@@ -261,19 +266,41 @@ impl SymbolTable {
             let root = table.new_module(krate, None, Vec::new());
             table.roots.push(root);
         }
-        // A target's own library name is authoritative; the package name is
-        // only a fallback for the common case where the two agree.
+        // A target's own library name is authoritative; the package name and
+        // any dependency aliases are fallbacks, used only for names no
+        // library target claims. Within a tier, a name claimed by two crates
+        // is ambiguous: picking either would risk marking the wrong crate's
+        // items used and reporting the right one's as dead.
+        let mut authoritative: HashMap<&str, HashSet<usize>> = HashMap::new();
+        let mut fallback: HashMap<&str, HashSet<usize>> = HashMap::new();
         for (krate, unit) in crates.iter().enumerate() {
-            if let Some(name) = unit.names.first() {
-                table.externs.insert(name.clone(), table.roots[krate]);
+            let mut names = unit.names.iter();
+            if let Some(name) = names.next() {
+                authoritative
+                    .entry(name.as_str())
+                    .or_default()
+                    .insert(table.roots[krate]);
+            }
+            for name in names {
+                fallback
+                    .entry(name.as_str())
+                    .or_default()
+                    .insert(table.roots[krate]);
             }
         }
-        for (krate, unit) in crates.iter().enumerate() {
-            for name in unit.names.iter().skip(1) {
-                table
-                    .externs
-                    .entry(name.clone())
-                    .or_insert(table.roots[krate]);
+        for (name, roots) in authoritative.iter().chain(
+            fallback
+                .iter()
+                .filter(|(name, _)| !authoritative.contains_key(*name)),
+        ) {
+            let mut roots = roots.iter();
+            match (roots.next(), roots.next()) {
+                (Some(&root), None) => {
+                    table.externs.insert((*name).to_string(), root);
+                }
+                _ => {
+                    table.ambiguous_externs.insert((*name).to_string());
+                }
             }
         }
 
@@ -654,6 +681,9 @@ impl SymbolTable {
         let mut at_head = true;
 
         if path.absolute {
+            if self.ambiguous_externs.contains(&segments[0]) {
+                return Outcome::Opaque(0);
+            }
             let Some(&root) = self.externs.get(&segments[0]) else {
                 return Outcome::Foreign;
             };
@@ -693,6 +723,9 @@ impl SymbolTable {
             let name = &segments[index];
             let mut step = self.lookup(current, name);
             if at_head && matches!(step, Step::Absent) {
+                if self.ambiguous_externs.contains(name.as_str()) {
+                    return Outcome::Opaque(index);
+                }
                 if let Some(&root) = self.externs.get(name.as_str()) {
                     // A workspace crate named at the head of the path.
                     current = root;
@@ -1106,6 +1139,39 @@ mod tests {
             .by_path
             .get(&(0, path.clone()))
             .unwrap_or_else(|| panic!("no module at {path:?}"))
+    }
+
+    /// Two crates answering to the same name (a dependency rename colliding
+    /// with another crate's name) must not be guessed between: resolving
+    /// through the wrong one would report the right one's items as dead.
+    #[test]
+    fn a_crate_name_claimed_twice_falls_back_to_the_conservative_rule() {
+        let mut left = unit(&[("", "pub fn contested() {}\n")]);
+        left.names = vec!["left".to_string(), "shared".to_string()];
+        let mut right = unit(&[("", "pub fn contested() {}\n")]);
+        right.names = vec!["right".to_string(), "shared".to_string()];
+        let caller = CrateUnit {
+            names: Vec::new(),
+            files: unit(&[("", "fn go() { shared::contested(); }\n")]).files,
+        };
+
+        let crates = [left, right, caller];
+        let mut table = SymbolTable::build(&crates);
+        assert!(
+            table.ambiguous_externs.contains("shared"),
+            "`shared` names two crates and must be marked ambiguous"
+        );
+        table.record_references(&crates);
+
+        assert!(
+            table.unused_definitions().is_empty(),
+            "an ambiguous head segment keeps every candidate alive: {:?}",
+            table
+                .unused_definitions()
+                .iter()
+                .map(|def| def.name.clone())
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

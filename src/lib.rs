@@ -19,7 +19,7 @@ pub mod report;
 mod resolve;
 mod unused;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -74,6 +74,9 @@ pub fn analyze(path: &Path) -> Result<Analysis> {
     // lib it uses see different scopes, and the same file pulled into two
     // packages via `#[path]` is a separate module in each.
     let mut crates: Vec<resolve::CrateUnit> = Vec::new();
+    // Package name to its library crate, so a dependency rename can be
+    // attached to the crate the alias actually names.
+    let mut lib_of_package: HashMap<&str, usize> = HashMap::new();
 
     for package in &meta.packages {
         let manifest_dir = package
@@ -88,10 +91,11 @@ pub fn analyze(path: &Path) -> Result<Analysis> {
             for file in &files {
                 package_reachable.insert(file.path.clone());
             }
-            crates.push(resolve::CrateUnit {
-                names: crate_names(package, target),
-                files,
-            });
+            let names = crate_names(package, target);
+            if !names.is_empty() {
+                lib_of_package.insert(package.name.as_str(), crates.len());
+            }
+            crates.push(resolve::CrateUnit { names, files });
         }
 
         // An unparsable file or unresolved `mod` means the reachable set is
@@ -126,6 +130,8 @@ pub fn analyze(path: &Path) -> Result<Analysis> {
             }
         }
     }
+
+    add_dependency_aliases(&meta, &lib_of_package, &mut crates);
 
     // Usage resolution must see every file in the workspace: if module
     // resolution hit any problem, files (and the paths inside them) may be
@@ -172,6 +178,36 @@ pub fn analyze(path: &Path) -> Result<Analysis> {
         findings,
         warnings,
     })
+}
+
+/// Register every `foo = { package = "bar" }` rename as a name for the
+/// renamed crate.
+///
+/// Code spells a renamed dependency by its alias, which is derivable from
+/// neither the dependency's package name nor its lib target name, so without
+/// this a path through the alias resolves to nothing and the items it reaches
+/// look unused.
+fn add_dependency_aliases(
+    meta: &metadata::Metadata,
+    lib_of_package: &HashMap<&str, usize>,
+    crates: &mut [resolve::CrateUnit],
+) {
+    for package in &meta.packages {
+        for dependency in &package.dependencies {
+            let Some(rename) = &dependency.rename else {
+                continue;
+            };
+            // Only workspace members are analyzed; a rename of an external
+            // crate names nothing we could resolve into.
+            let Some(&krate) = lib_of_package.get(dependency.name.as_str()) else {
+                continue;
+            };
+            let alias = rename.replace('-', "_");
+            if !crates[krate].names.contains(&alias) {
+                crates[krate].names.push(alias);
+            }
+        }
+    }
 }
 
 fn relative_to(path: &Path, root: &Path) -> PathBuf {

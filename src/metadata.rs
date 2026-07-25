@@ -25,6 +25,20 @@ pub struct Package {
     pub name: String,
     pub manifest_path: PathBuf,
     pub targets: Vec<Target>,
+    /// Declared dependencies. Needed for the `rename` field: a dependency
+    /// renamed in `Cargo.toml` is spelled by its alias in code, which is not
+    /// derivable from the dependency's own package or lib name.
+    #[serde(default)]
+    pub dependencies: Vec<Dependency>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Dependency {
+    /// The dependency's package name.
+    pub name: String,
+    /// The name code refers to it by, when it differs from `name`.
+    #[serde(default)]
+    pub rename: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

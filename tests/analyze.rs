@@ -230,6 +230,26 @@ fn paths_resolve_across_workspace_members() {
             ("engine-core/src/api.rs".to_string(), "Unused"),
             ("engine-core/src/lib.rs".to_string(), "never_started"),
         ],
-        "`start` and `Handle` are reached from `app` and must not be reported"
+        "`start` and `Handle` are reached from `app`, and `aliased_only` from \
+         `aliased` through the `motor` dependency rename; none may be reported"
+    );
+}
+
+/// A dependency renamed in `Cargo.toml` (`motor = { package = "engine-core" }`)
+/// is spelled by its alias in code. The alias is derivable from neither the
+/// package name nor the lib target name, so without reading it out of the
+/// manifest the path resolves to nothing and everything it reaches looks dead.
+#[test]
+fn paths_through_a_dependency_rename_resolve() {
+    let analysis = analyze_fixture("crosscrate");
+
+    let unused = reported(&analysis, FindingKind::UnusedPubItem);
+    assert!(
+        !unused.iter().any(|(_, name)| *name == "aliased_only"),
+        "`aliased_only` is called as `motor::aliased_only()`: {unused:?}"
+    );
+    assert!(
+        !unused.iter().any(|(_, name)| *name == "Handle"),
+        "`Handle` is named through the alias as `motor::api::Handle`: {unused:?}"
     );
 }
