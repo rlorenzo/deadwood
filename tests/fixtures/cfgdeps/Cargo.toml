@@ -1,0 +1,17 @@
+# Test fixture: the dependency entries `cfg` evaluation made judgeable, and
+# the one it did not. The crates do not exist and never need to:
+# `cargo metadata --no-deps` does not resolve them, and Deadwood never builds.
+[package]
+name = "cfgdeps"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+
+[target.'cfg(any())'.dependencies]
+# `cfg(any())` holds on no target, ever. This is how a crate pins the version
+# of something it never links (serde does exactly this to `serde_derive`), so
+# no code can name it and reporting it would be a false positive.
+pinned_crate = "1"
+
+[workspace]

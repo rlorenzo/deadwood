@@ -45,13 +45,32 @@
 //! common word (`log`, `time`, `bytes`) is kept alive by any mention of that
 //! word. That is the trade Deadwood always makes.
 //!
+//! # Gated entries
+//!
+//! Optional and `[target.'cfg(...)'.dependencies]` entries used to be skipped
+//! outright: both are reached through code behind a `cfg`, and Deadwood did
+//! not evaluate one. It does now ([`crate::cfg`]), and the answer under the
+//! default matrix turns out to be simple — every feature combination and every
+//! target is analyzed, so the code that uses such an entry *is* read, and a
+//! reference to it is found wherever one exists. They are therefore judged
+//! like any other entry.
+//!
+//! A configured matrix is the case that still cannot be judged. If
+//! `deadwood.toml` narrows features so that nothing can turn an optional
+//! dependency on, or narrows targets so that a `[target.'cfg(...)']` table
+//! never applies, then the code using that entry was never read and "never
+//! referenced" would be a statement about a build that was not analyzed. Those
+//! entries are skipped with a warning naming the matrix as the reason.
+//!
+//! One consequence is worth stating, because it looks like a special case and
+//! is not: Cargo synthesizes a `foo = ["dep:foo"]` feature for every optional
+//! dependency, and [`crate::metadata::Package::dependencies_named_by_features`]
+//! deliberately does not count it. It is the entry restated, not a second
+//! place naming it, and counting it would leave every optional dependency
+//! permanently unjudgeable.
+//!
 //! # What is skipped, and why
 //!
-//! - **Optional dependencies.** They are pulled in by features, and Deadwood
-//!   does not evaluate `cfg(feature = ...)` yet, so whether the code that
-//!   uses them is even compiled is unknown.
-//! - **`[target.'cfg(...)'.dependencies]`.** Same reason, for platform gates:
-//!   the code using them typically sits behind a `cfg` we do not evaluate.
 //! - **Packages that pull in code we cannot read.** `include!("other.rs")`
 //!   and `#![doc = include_str!("../README.md")]` are followed — the included
 //!   code is walked, the included documentation is mined for words, since its
@@ -113,6 +132,7 @@ use std::path::{Path, PathBuf};
 use proc_macro2::{TokenStream, TokenTree};
 use syn::visit::Visit;
 
+use crate::cfg::{Gates, TargetVerdict};
 use crate::config::DependencyAllowList;
 use crate::metadata::{DependencyKind, Package};
 use crate::modtree::ParsedFile;
@@ -272,6 +292,7 @@ pub fn find_unused(
     package: &Package,
     references: &CrateReferences,
     allowed: &DependencyAllowList,
+    gates: &Gates<'_>,
     warnings: &mut Vec<String>,
 ) -> Vec<UnusedDependency> {
     if let Some(reason) = references.hidden_code {
@@ -290,6 +311,7 @@ pub fn find_unused(
     let mut unused = Vec::new();
     let mut optional = Vec::new();
     let mut platform = Vec::new();
+    let mut never_built = Vec::new();
 
     for dependency in &package.dependencies {
         // Before anything else, including the skip warnings: an allowlisted
@@ -298,16 +320,26 @@ pub fn find_unused(
         if allowed.allows(&package.name, dependency.manifest_name()) {
             continue;
         }
-        // Feature- and platform-gated entries are used by code Deadwood
-        // cannot tell is compiled at all; guessing either way would be wrong
-        // for somebody's feature set.
-        if dependency.optional {
+        // Feature- and platform-gated entries are reached through code behind
+        // a `cfg`. The default matrix analyzes that code, so they are judged
+        // like anything else; a matrix that narrows it away leaves the entry
+        // unjudgeable, because the only code that could name it was not read.
+        if dependency.optional && !gates.optional_dependency_possible(dependency.manifest_name()) {
             optional.push(dependency.manifest_name().to_string());
             continue;
         }
-        if dependency.target.is_some() {
-            platform.push(dependency.manifest_name().to_string());
-            continue;
+        if let Some(target) = &dependency.target {
+            match gates.target_expression(target) {
+                TargetVerdict::Possible => {}
+                TargetVerdict::RuledOutByMatrix => {
+                    platform.push(dependency.manifest_name().to_string());
+                    continue;
+                }
+                TargetVerdict::NeverBuilt => {
+                    never_built.push(dependency.manifest_name().to_string());
+                    continue;
+                }
+            }
         }
         let name = dependency.crate_name();
         if !references.names.contains(&name) && !named_by_features.contains(&name) {
@@ -322,13 +354,23 @@ pub fn find_unused(
         warnings,
         &package.name,
         optional,
-        "optional dependencies are enabled by features, which Deadwood does not evaluate yet",
+        "no feature the configured `[cfg] features` matrix enables can turn these optional entries \
+         on, so the code that would name them was never analyzed",
     );
     warn_skipped(
         warnings,
         &package.name,
         platform,
-        "`[target.'cfg(...)'.dependencies]` entries are platform-gated, which Deadwood does not evaluate yet",
+        "the configured `[cfg] target-os` matrix rules out the \
+         `[target.'cfg(...)'.dependencies]` table these came from, so the code that would name \
+         them was never analyzed",
+    );
+    warn_skipped(
+        warnings,
+        &package.name,
+        never_built,
+        "the `[target.'cfg(...)'.dependencies]` table these came from holds on no target at all, \
+         so they are declared to constrain version resolution rather than to be compiled",
     );
 
     unused
@@ -583,13 +625,23 @@ mod tests {
         }
     }
 
-    /// Names reported unused, with the warnings the run produced.
+    /// Names reported unused, with the warnings the run produced, under the
+    /// default `cfg` matrix.
     fn unused(package: &Package, refs: &CrateReferences) -> (Vec<String>, Vec<String>) {
+        unused_with(package, refs, &crate::cfg::Matrix::default())
+    }
+
+    fn unused_with(
+        package: &Package,
+        refs: &CrateReferences,
+        matrix: &crate::cfg::Matrix,
+    ) -> (Vec<String>, Vec<String>) {
         let mut warnings = Vec::new();
         let found = find_unused(
             package,
             refs,
             &DependencyAllowList::default(),
+            &Gates::new(matrix, package),
             &mut warnings,
         );
         (
@@ -715,34 +767,78 @@ mod tests {
         assert_eq!(unused(&manifest, &refs).0, vec!["dead_crate"]);
     }
 
+    /// Both used to be skipped outright. Under the default matrix every
+    /// feature and every target is analyzed, so the code that would name them
+    /// *was* read — and an entry nothing named is an entry nothing named.
     #[test]
-    fn optional_and_platform_gated_entries_are_skipped_with_a_warning() {
+    fn gated_entries_are_judged_under_the_default_matrix() {
+        let gated = || {
+            package(vec![
+                Dependency {
+                    optional: true,
+                    ..dependency("feature_gated")
+                },
+                Dependency {
+                    target: Some("cfg(unix)".to_string()),
+                    ..dependency("platform_gated")
+                },
+            ])
+        };
+
         let refs = references(&["pub fn nothing() {}\n"]);
-        let manifest = package(vec![
+        let (mut reported, warnings) = unused(&gated(), &refs);
+        reported.sort();
+        assert_eq!(reported, vec!["feature_gated", "platform_gated"]);
+        assert!(warnings.is_empty(), "nothing was skipped: {warnings:?}");
+
+        // And a mention behind the very `cfg` that gates them still counts,
+        // because the default matrix compiles it.
+        let refs = references(&[concat!(
+            "#[cfg(feature = \"feature_gated\")]\nfn a() { feature_gated::go(); }\n",
+            "#[cfg(unix)]\nfn b() { platform_gated::go(); }\n",
+        )]);
+        assert!(unused(&gated(), &refs).0.is_empty());
+    }
+
+    /// A matrix that narrows the gate away is the case that stays unjudgeable:
+    /// the only code that could name the entry was never read, so "never
+    /// referenced" would describe a build nobody analyzed.
+    #[test]
+    fn a_narrowed_matrix_skips_the_entries_it_rules_out_with_a_warning() {
+        let mut manifest = package(vec![
             Dependency {
                 optional: true,
                 ..dependency("feature_gated")
             },
             Dependency {
-                target: Some("cfg(unix)".to_string()),
+                target: Some("cfg(windows)".to_string()),
                 ..dependency("platform_gated")
             },
         ]);
-        let (unused, warnings) = unused(&manifest, &refs);
+        manifest.features = HashMap::from([(
+            "feature_gated".to_string(),
+            vec!["dep:feature_gated".to_string()],
+        )]);
+
+        let refs = references(&["pub fn nothing() {}\n"]);
+        let matrix =
+            crate::cfg::Matrix::new(Some(Vec::new()), Some(vec!["linux".to_string()]), None);
+        let (reported, warnings) = unused_with(&manifest, &refs, &matrix);
         assert!(
-            unused.is_empty(),
-            "gated entries are not judgeable: {unused:?}"
-        );
-        assert!(
-            warnings.iter().any(|w| w.contains("`feature_gated`")
-                && w.contains("optional dependencies are enabled by features")),
-            "the optional skip must be surfaced: {warnings:?}"
+            reported.is_empty(),
+            "an entry the matrix gates away is not judgeable: {reported:?}"
         );
         assert!(
             warnings
                 .iter()
-                .any(|w| w.contains("`platform_gated`") && w.contains("platform-gated")),
-            "the platform skip must be surfaced: {warnings:?}"
+                .any(|w| w.contains("`feature_gated`") && w.contains("[cfg] features")),
+            "the optional skip must name the matrix as the reason: {warnings:?}"
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("`platform_gated`") && w.contains("[cfg] target-os")),
+            "the platform skip must name the matrix as the reason: {warnings:?}"
         );
     }
 

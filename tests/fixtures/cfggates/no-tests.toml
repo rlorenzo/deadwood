@@ -1,0 +1,3 @@
+# Analyze the build that ships, where `#[cfg(test)]` code does not exist.
+[cfg]
+test = false

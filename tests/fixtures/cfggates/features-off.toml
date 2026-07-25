@@ -1,0 +1,3 @@
+# The build with no features at all.
+[cfg]
+features = []

@@ -1,0 +1,3 @@
+# One platform, so `cfg(windows)` is not part of the build being analyzed.
+[cfg]
+target-os = ["linux"]

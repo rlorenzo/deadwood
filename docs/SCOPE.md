@@ -65,9 +65,9 @@ that were actually implemented, since several were judgement calls:
   build-dependency used only in `build.rs` are both seen, because those
   targets are scanned like any other.
 - **What cannot be judged is skipped out loud**: optional and
-  `[target.'cfg(...)'.dependencies]` entries (both gated by a `cfg` we do not
-  evaluate — item 2 below), packages whose module tree did not resolve, and
-  packages including code from a file that cannot be read.
+  `[target.'cfg(...)'.dependencies]` entries (both gated by a `cfg` we did not
+  evaluate then — closed by phase 4 below), packages whose module tree did not
+  resolve, and packages including code from a file that cannot be read.
 
 Known gap, closed by phase 3: a dependency declared only to enable a feature
 of a transitive dependency (`getrandom = { features = ["js"] }`) is named by
@@ -111,27 +111,95 @@ allowlist, and a dependency allowlist. The decisions that shaped it:
 Closes [#4](https://github.com/rlorenzo/deadwood/issues/4) and
 [#9](https://github.com/rlorenzo/deadwood/issues/9).
 
+## Phase 4 — `cfg` awareness (shipped)
+
+`cfg` gates are evaluated instead of always followed (`src/cfg.rs`). This is
+the first phase that can report *more* rather than less, and the first that
+could manufacture a false positive rather than merely miss a finding, so its
+shape was chosen for that risk rather than for coverage.
+
+- **A matrix, not a configuration.** Deadwood analyzes a *set* of builds and
+  follows a gate that holds in at least one of them, so a predicate answers
+  one of three things: holds always, holds never, or holds sometimes. The
+  default matrix is the union of every possibility — every feature on and off,
+  every target, tests included — which makes "follow it" the answer for every
+  gate that could hold anywhere. That is byte for byte the pre-`cfg` behavior,
+  and it is why an absent `[cfg]` section is a no-op.
+- **Two questions, two matrices.** *Is this code in the analyzed build?* is
+  judged against the configured matrix; code it rules out is not read, not
+  resolved, and — the part that matters — not reported dead either, since
+  "nothing reaches it" and "this build does not contain it" are different
+  facts. *Can this gate hold at all?* is judged against every build there
+  could be, and a gate that cannot is the new `unsatisfiable_cfg` finding.
+  Keeping them apart is what makes the phase safe: an impossible gate is
+  reported and its code is still analyzed, so adding a finding kind never
+  moves what the other detectors see.
+- **Unevaluable means follow.** `cfg(accessible(..))`, a `cfg` a build script
+  sets, anything behind `cfg_attr`, and every predicate the matrix has no axis
+  for (`target_arch`, `debug_assertions`) answer "sometimes", which lands on
+  today's behavior at every decision point. Correlation between atoms is not
+  tracked either, so `all(feature = "a", not(feature = "a"))` reads as
+  satisfiable — a lost finding, never an invented one, and the alternative is
+  a SAT solver nobody asked for.
+- **The `cfg(test)` decision, which needed one.** Test code counts as a use by
+  default, exactly as before, and `[cfg] test = false` is how a project asks
+  the other question. The two rejected alternatives are worth recording.
+  Leaving it always-on with no lever forecloses a question a shipping project
+  legitimately has. Giving test-only items their own finding kind sounds
+  better than it is: proving "only tests reach this" needs the reachability
+  analysis of item 2 below, without which the claim is really "no *non-test*
+  path resolves here", which is a different and weaker statement to put in a
+  finding message; and any default that reports it is not the quiet default
+  the tenet asks for, since every `#[cfg(test)]` helper in every codebase
+  would fire. Making it a matrix axis adds no second mechanism, and the
+  answers come back as ordinary `unused_pub_item` findings, which is what they
+  are. Revisit once reachability lands.
+- **Pruning, not plumbing.** Items the matrix rules out are removed from the
+  AST in `src/modtree.rs` right after parsing, so `src/resolve.rs` and
+  `src/deps.rs` never learn what a `cfg` is. The one thing that could not be
+  handled that way is a file-backed `mod`: its path and the directory its
+  children would live in are returned separately, so the dead-file check can
+  subtract them.
+- **Phase 2's skips are closed.** Optional and
+  `[target.'cfg(...)'.dependencies]` entries are judged like any other,
+  because the default matrix analyzes the code that uses them. Two cases
+  remain unjudgeable and say so: an entry no feature in a *narrowed* matrix
+  can turn on, and `[target.'cfg(any())'.dependencies]`, the idiom for an
+  entry that pins a version and is deliberately compiled by nothing. Closing
+  this needed one related fix — Cargo synthesizes a `foo = ["dep:foo"]`
+  feature per optional dependency, and counting it as "named by the features
+  table" would have left every optional entry alive by its own existence.
+- **What it found.** Across the fixtures and 34 crates in the local registry,
+  the only new finding was in `heck 0.5.0`: `#[cfg(feature = "unicode")]` in
+  `src/train.rs`, left behind when the feature was removed. Not one existing
+  finding changed, and not one newly-judged dependency entry turned into a
+  false positive.
+
+Closes [#5](https://github.com/rlorenzo/deadwood/issues/5).
+
 ## Next (sequenced, one slice at a time)
 
-1. **`cfg` awareness** — evaluate simple `cfg(feature = ...)` / platform
-   gates instead of always following them. Unblocks the optional and
-   platform-gated dependency entries phase 2 skips.
-2. **Baseline/suppress file** for adopting Deadwood on brownfield codebases.
+1. **Baseline/suppress file** for adopting Deadwood on brownfield codebases.
    Its path is a config key waiting to be added; `src/config.rs` marks the
    spot deliberately left empty, since a key parsed and ignored is the silent
    misconfiguration phase 3 was built to prevent.
-3. **Reachability over reference counting** — an item referenced only by
+2. **Reachability over reference counting** — an item referenced only by
    other dead items is still dead; today each item is judged on whether
-   anything names it, not on whether that something is alive.
-4. **Lexical scope tracking** — a local, parameter, or generic parameter
+   anything names it, not on whether that something is alive. Also what a
+   "test-only item" finding kind would need before it could be honest; see
+   the `cfg(test)` decision in phase 4.
+3. **Lexical scope tracking** — a local, parameter, or generic parameter
    sharing a name with a module item currently resolves to that item and
    keeps it alive. Costs findings only; the fix must be namespace-aware, as
    a value binding must not silence a type of the same name.
-5. **Misplaced dependency kinds** — a `[dependencies]` entry used only by
+4. **Misplaced dependency kinds** — a `[dependencies]` entry used only by
    tests belongs in `[dev-dependencies]`. Deliberately not folded into the
    unused-dependency check, whose question is whether an entry is named at
    all; this is a separate finding with its own noise profile, tracked in
-   [#10](https://github.com/rlorenzo/deadwood/issues/10).
+   [#10](https://github.com/rlorenzo/deadwood/issues/10). Phase 4 was its
+   prerequisite and left `src/deps.rs` the seam: a `cfg` matrix that already
+   knows which features and targets a build has, and a `find_unused` that
+   consults it per entry.
 
 ## Explicitly out of scope for now
 
@@ -158,4 +226,5 @@ Closes [#4](https://github.com/rlorenzo/deadwood/issues/4) and
   (Path resolution needed no new crate, only `syn`'s `visit` feature; unused
   dependency detection needed none at all — `cargo metadata` already reports
   the manifest. `toml` arrived with the config file in phase 3, parse-only, and
-  was the only addition: glob matching stayed in-tree.)
+  was the only addition: glob matching stayed in-tree, and `cfg` evaluation in
+  phase 4 was `syn` attribute walking.)

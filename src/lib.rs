@@ -14,13 +14,19 @@
 //! - **Unused dependencies**: `Cargo.toml` entries whose crate name a
 //!   package's code never mentions, in any target and through any channel we
 //!   can see (`src/deps.rs`).
+//! - **Unsatisfiable `cfg` gates**: `#[cfg(...)]` gates that can hold in no
+//!   build of the package — a `mod` behind a feature its manifest does not
+//!   declare is dead by construction (`src/cfg.rs`).
 //!
 //! What each detector reports can be tuned by a `deadwood.toml`
 //! (`src/config.rs`): files to ignore, a severity per finding kind, the crates
-//! and item paths that are deliberate public API, and the dependency entries
-//! that are load bearing without being named in code. With no config file the
-//! behavior is exactly as described above.
+//! and item paths that are deliberate public API, the dependency entries that
+//! are load bearing without being named in code, and which builds — features,
+//! targets, tests — to analyze. With no config file every setting takes the
+//! value that reproduces the behavior described above, and for the `cfg`
+//! matrix that value is the union of every possibility.
 
+pub mod cfg;
 pub mod config;
 pub mod metadata;
 pub mod modtree;
@@ -31,7 +37,7 @@ mod glob;
 mod resolve;
 mod unused;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -54,6 +60,9 @@ pub enum FindingKind {
     UnusedReexport,
     /// A `Cargo.toml` dependency the declaring package's code never names.
     UnusedDependency,
+    /// A `#[cfg(...)]` gate that can hold in no build of its package, so the
+    /// code behind it is never compiled by anyone.
+    UnsatisfiableCfg,
 }
 
 /// A single issue reported by the analyzer.
@@ -79,7 +88,8 @@ pub struct Analysis {
     pub workspace_root: PathBuf,
     pub findings: Vec<Finding>,
     /// Non-fatal problems hit during analysis (unparsable files, unresolved
-    /// `mod` declarations, dependency entries behind a `cfg`). Whenever
+    /// `mod` declarations, dependency entries the configured `cfg` matrix
+    /// leaves out of the build being analyzed). Whenever
     /// something could cause a detector to report false positives —
     /// incomplete module resolution for dead files, unseen definitions or
     /// paths for unused pub items, unseen code or an unevaluated gate for
@@ -116,6 +126,7 @@ pub fn analyze(path: &Path, config_path: Option<&Path>) -> Result<Analysis> {
     let ignore = config.ignore();
     let mut findings = Vec::new();
     let mut warnings = Vec::new();
+    let mut gate_sites = GateSites::default();
 
     // Every target is a crate of its own for name resolution: a bin and the
     // lib it uses see different scopes, and the same file pulled into two
@@ -126,30 +137,48 @@ pub fn analyze(path: &Path, config_path: Option<&Path>) -> Result<Analysis> {
     let mut lib_of_package: HashMap<&str, usize> = HashMap::new();
     // Crate names each package's code refers to, for the dependency check.
     // Packages whose module tree did not resolve are left out entirely.
-    let mut references: Vec<(&metadata::Package, deps::CrateReferences)> = Vec::new();
+    let mut references: Vec<(&metadata::Package, deps::CrateReferences, cfg::Gates<'_>)> =
+        Vec::new();
 
     for package in &meta.packages {
         let manifest_dir = package
             .manifest_path
             .parent()
             .context("manifest path has no parent directory")?;
+        // Features are declared per package, so which builds exist is too.
+        let gates = cfg::Gates::new(config.cfg(), package);
 
         let warnings_before = warnings.len();
         let mut package_reachable: HashSet<PathBuf> = HashSet::new();
+        // Files a `cfg` keeps out of the analyzed build: unreachable, but not
+        // dead — nothing reaches them because this build does not have them.
+        let mut package_excluded: HashSet<PathBuf> = HashSet::new();
         let mut package_references = deps::CrateReferences::default();
         for target in &package.targets {
-            let files = modtree::resolve(&target.src_path, ignore, &mut warnings);
-            for file in &files {
+            let resolved = modtree::resolve(&target.src_path, ignore, &gates, &mut warnings);
+            for file in &resolved.files {
                 package_reachable.insert(file.path.clone());
+                // Unlike the detectors below, this one is not gated on the
+                // package resolving completely. Whether a gate can hold is a
+                // property of one file's attributes and the manifest's feature
+                // list; a sibling file that failed to parse says nothing about
+                // it, and cannot turn a non-finding into a finding.
+                if let Some(ast) = &file.ast {
+                    gate_sites.record(&file.path, &package.name, gates.gate_sites(ast));
+                }
             }
+            package_excluded.extend(resolved.excluded);
             // Every target of the package can name a dependency, including
             // its tests, examples, benches, and build script.
-            package_references.add_target(&files);
+            package_references.add_target(&resolved.files);
             let names = crate_names(package, target);
             if !names.is_empty() {
                 lib_of_package.insert(package.name.as_str(), crates.len());
             }
-            crates.push(resolve::CrateUnit { names, files });
+            crates.push(resolve::CrateUnit {
+                names,
+                files: resolved.files,
+            });
         }
 
         // An unparsable file or unresolved `mod` means the reachable set is
@@ -170,9 +199,13 @@ pub fn analyze(path: &Path, config_path: Option<&Path>) -> Result<Analysis> {
         }
         // Reachability is the wrong question for a dependency: a file that no
         // `mod` declaration names can still be compiled (a macro that expands
-        // to `mod`s, a `cfg` we skipped) and can hold the only reference.
-        package_references.add_unreached_sources(manifest_dir, &package_reachable);
-        references.push((package, package_references));
+        // to `mod`s) and can hold the only reference. A file the `cfg` matrix
+        // excluded is the one exception — it is not compiled in the build
+        // being analyzed, so a mention in it is not evidence about this build.
+        let mut already_read = package_reachable.clone();
+        already_read.extend(package_excluded.iter().cloned());
+        package_references.add_unreached_sources(manifest_dir, &already_read);
+        references.push((package, package_references, gates));
 
         // Dead-file detection only covers src/: tests/, examples/, and
         // benches/ roots are auto-discovered targets and already covered
@@ -180,7 +213,7 @@ pub fn analyze(path: &Path, config_path: Option<&Path>) -> Result<Analysis> {
         let src_dir = manifest_dir.join("src");
         if src_dir.is_dir() {
             for file in modtree::rs_files_under(&src_dir) {
-                if !package_reachable.contains(&file) {
+                if !package_reachable.contains(&file) && !package_excluded.contains(&file) {
                     findings.push(Finding {
                         kind: FindingKind::DeadFile,
                         // Every construction site leaves the severity at its
@@ -242,13 +275,14 @@ pub fn analyze(path: &Path, config_path: Option<&Path>) -> Result<Analysis> {
     // Last, because the warnings it raises about entries it cannot judge
     // (optional, platform-gated) say nothing about the checks above, which
     // gate themselves on the warning list being clean.
-    for (package, package_references) in &references {
+    for (package, package_references, gates) in &references {
         let manifest = relative_to(&package.manifest_path, &meta.workspace_root);
         findings.extend(
             deps::find_unused(
                 package,
                 package_references,
                 config.dependencies(),
+                gates,
                 &mut warnings,
             )
             .into_iter()
@@ -272,6 +306,8 @@ pub fn analyze(path: &Path, config_path: Option<&Path>) -> Result<Analysis> {
         );
     }
 
+    findings.extend(gate_sites.into_findings(&meta.workspace_root));
+
     let mut findings = apply_config(findings, &config, &meta.workspace_root);
     findings.sort_by(|a, b| {
         (a.file.as_path(), a.line.unwrap_or(0)).cmp(&(b.file.as_path(), b.line.unwrap_or(0)))
@@ -282,6 +318,76 @@ pub fn analyze(path: &Path, config_path: Option<&Path>) -> Result<Analysis> {
         findings,
         warnings,
     })
+}
+
+/// Every `#[cfg]` gate seen in the workspace, keyed by where it is written.
+///
+/// The keying is not bookkeeping, it is the correctness argument. Features are
+/// declared per package, and one file can belong to several: `#[path]` pulls
+/// the same source into two members, and a target's root is read once per
+/// target. A gate impossible for one package may be perfectly satisfiable for
+/// another, so a site is only reported when *no* package that compiles it
+/// found the gate satisfiable.
+#[derive(Default)]
+struct GateSites {
+    /// Site to the package and gate that condemned it.
+    impossible: BTreeMap<(PathBuf, usize), (String, cfg::GateSite)>,
+    /// Sites some package can compile, which overrule the map above.
+    satisfiable: HashSet<(PathBuf, usize)>,
+}
+
+impl GateSites {
+    fn record(&mut self, file: &Path, package: &str, sites: Vec<cfg::GateSite>) {
+        for site in sites {
+            let key = (file.to_path_buf(), site.line);
+            match site.verdict {
+                cfg::Verdict::CanHold => {
+                    self.satisfiable.insert(key);
+                }
+                cfg::Verdict::Impossible { .. } => {
+                    self.impossible
+                        .entry(key)
+                        .or_insert_with(|| (package.to_string(), site));
+                }
+            }
+        }
+    }
+
+    fn into_findings(self, workspace_root: &Path) -> Vec<Finding> {
+        self.impossible
+            .into_iter()
+            .filter(|(key, _)| !self.satisfiable.contains(key))
+            .map(|((file, line), (package, site))| Finding {
+                kind: FindingKind::UnsatisfiableCfg,
+                severity: Severity::default(),
+                file: relative_to(&file, workspace_root),
+                line: Some(line),
+                message: match &site.verdict {
+                    cfg::Verdict::Impossible { undeclared } if !undeclared.is_empty() => {
+                        format!(
+                            "`#[cfg({})]` can never hold: package `{package}` declares no {}",
+                            site.gate,
+                            feature_list(undeclared)
+                        )
+                    }
+                    _ => format!(
+                        "`#[cfg({})]` can never hold in any build of package `{package}`",
+                        site.gate
+                    ),
+                },
+                name: site.name,
+            })
+            .collect()
+    }
+}
+
+/// `feature `x`` or `features `x`, `y``, for the finding message.
+fn feature_list(names: &[String]) -> String {
+    let quoted: Vec<String> = names.iter().map(|name| format!("`{name}`")).collect();
+    match quoted.len() {
+        1 => format!("feature {}", quoted[0]),
+        _ => format!("features {}", quoted.join(", ")),
+    }
 }
 
 /// Drop the findings the configuration silences and label the rest with their

@@ -1,0 +1,3 @@
+# The new kind is reachable by its serde tag like any other.
+[severity]
+unsatisfiable_cfg = "off"

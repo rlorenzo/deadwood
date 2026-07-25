@@ -21,6 +21,7 @@ pub fn render_text(analysis: &Analysis) -> String {
     let mut out = String::new();
     for (kind, header) in [
         (FindingKind::DeadFile, "Dead files"),
+        (FindingKind::UnsatisfiableCfg, "Unsatisfiable cfg gates"),
         (FindingKind::UnusedPubItem, "Unused public items"),
         (FindingKind::UnusedReexport, "Unused re-exports"),
         (FindingKind::UnusedDependency, "Unused dependencies"),
@@ -180,6 +181,36 @@ mod tests {
             text.contains("3 finding(s) in workspace `/ws`: 2 deny, 1 warn"),
             "the summary must separate what fails the run from what does not:\n{text}"
         );
+    }
+
+    /// A new finding kind needs a group of its own, or its findings would be
+    /// dropped from the text report while still counting toward the summary.
+    #[test]
+    fn every_finding_kind_has_a_group_of_its_own() {
+        let analysis = Analysis {
+            workspace_root: PathBuf::from("/ws"),
+            findings: vec![Finding {
+                kind: FindingKind::UnsatisfiableCfg,
+                severity: Severity::Deny,
+                file: PathBuf::from("src/lib.rs"),
+                line: Some(4),
+                name: Some("win".into()),
+                message: "`#[cfg(feature = \"gone\")]` can never hold: package `demo` declares no \
+                          feature `gone`"
+                    .into(),
+            }],
+            warnings: vec![],
+        };
+
+        let text = render_text(&analysis);
+        assert!(text.contains("Unsatisfiable cfg gates:\n"), "{text}");
+        assert!(text.contains("  src/lib.rs:4: `#[cfg("), "{text}");
+        assert!(text.contains("1 finding(s)"), "{text}");
+
+        let value: serde_json::Value =
+            serde_json::from_str(&render_json(&analysis).unwrap()).unwrap();
+        assert_eq!(value["findings"][0]["kind"], "unsatisfiable_cfg");
+        assert_eq!(value["findings"][0]["name"], "win");
     }
 
     #[test]

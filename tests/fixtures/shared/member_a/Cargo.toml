@@ -2,3 +2,9 @@
 name = "member_a"
 version = "0.1.0"
 edition = "2021"
+
+[features]
+# Declared here and nowhere else. The shared file gates an item on it, so the
+# same gate is satisfiable in this member and impossible in `member_b` — and a
+# finding must need every member to agree.
+wide = []

@@ -176,6 +176,18 @@ fn file_shared_between_packages_is_counted_once() {
         "shared_dead is unused and must be reported exactly once: {:?}",
         analysis.findings
     );
+
+    // The same file is compiled by two packages with different feature
+    // tables, so `#[cfg(feature = "wide")]` in it is impossible for the member
+    // that does not declare `wide` and ordinary for the one that does. A gate
+    // is only dead by construction when *no* package that compiles it can
+    // satisfy it — otherwise every shared file would report against whichever
+    // member happened to be judged first.
+    assert!(
+        reported(&analysis, FindingKind::UnsatisfiableCfg).is_empty(),
+        "one member declares the feature, so the gate can hold: {:?}",
+        analysis.findings
+    );
 }
 
 /// The three classes of dead code the old identifier census could not see:
@@ -286,21 +298,26 @@ fn paths_resolve_across_workspace_members() {
 /// paths, a rename, a re-export, `extern crate`, macro bodies, attribute
 /// paths and attribute strings, a doc example, a test target, a build script,
 /// a file only a macro expansion declares, and the `[features]` table.
-/// The entries Deadwood cannot judge are skipped out loud.
+/// Feature- and platform-gated entries are judged like any other under the
+/// default `cfg` matrix, which analyzes the code behind those gates.
 #[test]
 fn unused_dependencies_are_reported_and_every_reference_channel_counts() {
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/deps");
-    let analysis = analyze(&fixture, None).expect("analysis should succeed on the fixture");
+    let analysis = analyze_fixture("deps");
 
     assert_eq!(
         reported(&analysis, FindingKind::UnusedDependency),
         vec![
+            // Optional, and named by nothing: judgeable since the default
+            // matrix compiles every `#[cfg(feature = ...)]` branch.
+            ("Cargo.toml".to_string(), "optional_crate"),
             // `[dependencies]`: named nowhere in the package.
             ("Cargo.toml".to_string(), "unused_crate"),
             // `[dev-dependencies]`: the other one is used by `tests/it.rs`.
             ("Cargo.toml".to_string(), "unused_dev_crate"),
             // `[build-dependencies]`: the other one is used by `build.rs`.
             ("Cargo.toml".to_string(), "unused_build_crate"),
+            // `[target.'cfg(unix)'.dependencies]`, judged for the same reason.
+            ("Cargo.toml".to_string(), "platform_crate"),
         ],
         "every other entry is named somewhere Deadwood has to look"
     );
@@ -330,32 +347,51 @@ fn unused_dependencies_are_reported_and_every_reference_channel_counts() {
         analysis.findings
     );
 
-    // Feature- and platform-gated entries are not judgeable until `cfg`
-    // evaluation lands, and are skipped out loud rather than guessed at.
-    for entry in ["optional_crate", "platform_crate"] {
-        assert!(
-            analysis
-                .warnings
-                .iter()
-                .any(|w| w.contains(entry) && w.contains("unused-dependency check skipped")),
-            "`{entry}` must be skipped with a warning: {:?}",
-            analysis.warnings
-        );
+    // Gating an entry is not what keeps it alive; being named is. Both of
+    // these are used only from behind the very `cfg` that gates them.
+    for entry in ["gated_used_crate", "platform_used_crate"] {
         assert!(
             !analysis
                 .findings
                 .iter()
                 .any(|f| f.name.as_deref() == Some(entry)),
-            "`{entry}` must not be reported: {:?}",
+            "`{entry}` is named behind its own gate, which the default matrix \
+             compiles: {:?}",
             analysis.findings
         );
     }
 
-    // A skipped dependency entry says nothing about the other detectors, so
-    // they must still run: the fixture's unused pub items are still reported.
     assert!(
         !reported(&analysis, FindingKind::UnusedPubItem).is_empty(),
-        "dependency warnings must not silence the unused-pub check: {:?}",
+        "the unused-pub check still runs alongside: {:?}",
+        analysis.warnings
+    );
+}
+
+/// `[target.'cfg(any())'.dependencies]` is the idiom for an entry that exists
+/// to constrain version resolution and is deliberately compiled by no target
+/// (serde pins `serde_derive` this way). No code can name it, and reporting it
+/// would be a false positive, so it is skipped with a warning that says which
+/// of the two it is.
+#[test]
+fn a_dependency_no_target_ever_builds_is_skipped_rather_than_reported() {
+    let fixture = fixtures().join("cfgdeps");
+    let analysis = analyze(&fixture, None).expect("analysis should succeed on the fixture");
+
+    assert!(
+        !analysis
+            .findings
+            .iter()
+            .any(|f| f.name.as_deref() == Some("pinned_crate")),
+        "a never-built entry is not a finding: {:?}",
+        analysis.findings
+    );
+    assert!(
+        analysis
+            .warnings
+            .iter()
+            .any(|w| w.contains("`pinned_crate`") && w.contains("holds on no target at all")),
+        "the skip must name the reason: {:?}",
         analysis.warnings
     );
 }
@@ -389,6 +425,228 @@ fn paths_through_a_dependency_rename_resolve() {
     assert!(
         !unused.iter().any(|(_, name)| *name == "Handle"),
         "`Handle` is named through the alias as `motor::api::Handle`: {unused:?}"
+    );
+}
+
+// -- cfg evaluation --------------------------------------------------------
+//
+// The `cfggates` fixture gives every module one unreferenced `pub fn`, so
+// "was this analyzed?" reads straight off the unused-pub findings: the item is
+// there when the module is part of the analyzed build and gone when it is not.
+
+/// Under the default matrix — every feature, every target, tests included —
+/// every gate that can hold anywhere is followed, exactly as before this phase.
+/// The one thing that is new is the finding about the gate that cannot.
+#[test]
+fn the_default_matrix_follows_every_gate_and_reports_the_ones_that_can_never_hold() {
+    let analysis = analyze_fixture("cfggates");
+
+    assert_eq!(
+        reported(&analysis, FindingKind::UnsatisfiableCfg),
+        vec![
+            // An item-level gate, `all` with one arm no manifest can satisfy.
+            ("src/declared_feature.rs".to_string(), "never_built"),
+            // A file-level `#![cfg(...)]`, which gates every item below it.
+            ("src/inner_impossible.rs".to_string(), ""),
+            // A `mod` behind a feature that does not exist.
+            ("src/lib.rs".to_string(), "missing_feature"),
+        ],
+        "only gates no build can satisfy are reported: {:?}",
+        analysis.findings
+    );
+    let gate = analysis
+        .findings
+        .iter()
+        .find(|f| {
+            f.kind == FindingKind::UnsatisfiableCfg && f.name.as_deref() == Some("missing_feature")
+        })
+        .expect("the mod gate is reported");
+    assert_eq!(gate.line, Some(15), "the line is the `#[cfg]` attribute's");
+    assert!(
+        gate.message
+            .contains("`#[cfg(feature = \"gone\")]` can never hold")
+            && gate.message.contains("declares no feature `gone`"),
+        "the message must name the gate and the missing feature: {}",
+        gate.message
+    );
+
+    assert_eq!(
+        reported(&analysis, FindingKind::UnusedPubItem),
+        vec![
+            // Behind a feature the manifest declares: followed.
+            (
+                "src/declared_feature.rs".to_string(),
+                "from_declared_feature"
+            ),
+            // Gated by an inner `#![cfg(...)]` rather than one on the `mod`.
+            ("src/inner_gated.rs".to_string(), "from_inner_gate"),
+            // Behind the impossible gates: reported *and* still followed, so
+            // that adding a finding kind never moves the other detectors.
+            (
+                "src/inner_impossible.rs".to_string(),
+                "from_inner_impossible",
+            ),
+            ("src/missing_feature.rs".to_string(), "from_missing_feature"),
+            // Platform-gated, and every platform is possible by default.
+            ("src/on_windows.rs".to_string(), "from_windows"),
+            // `any(<unevaluable>, <impossible>)` is not impossible.
+            (
+                "src/partly_unevaluable.rs".to_string(),
+                "from_partly_unevaluable"
+            ),
+            // A `cfg` we do not model at all.
+            ("src/unevaluable.rs".to_string(), "from_unevaluable"),
+        ],
+        "every module was analyzed: {:?}",
+        analysis.findings
+    );
+    assert!(
+        reported(&analysis, FindingKind::DeadFile).is_empty(),
+        "a gated file is never a dead file: {:?}",
+        analysis.findings
+    );
+    assert!(
+        !analysis
+            .findings
+            .iter()
+            .any(|f| f.name.as_deref() == Some("used_by_tests_only")),
+        "`#[cfg(test)]` code counts as a use by default: {:?}",
+        analysis.findings
+    );
+}
+
+/// Narrowing the targets takes the platform modules out of the analyzed build
+/// — the one gated on its `mod` declaration and the one gated by an inner
+/// `#![cfg(...)]` alike. The load-bearing half is the first assertion: code
+/// that is not in this build must not turn into a dead file, or narrowing the
+/// matrix would trade one false positive for another.
+#[test]
+fn a_narrowed_target_matrix_excludes_a_platform_module_without_calling_it_dead() {
+    let analysis = analyze_configured("cfggates", "linux-only.toml");
+
+    for excluded in ["src/on_windows.rs", "src/inner_gated.rs"] {
+        assert!(
+            !analysis
+                .findings
+                .iter()
+                .any(|f| f.file.starts_with(excluded)),
+            "`{excluded}` is neither analyzed nor reported: {:?}",
+            analysis.findings
+        );
+    }
+    // Everything else is untouched, including the gates we cannot evaluate.
+    assert_eq!(
+        reported(&analysis, FindingKind::UnusedPubItem),
+        vec![
+            (
+                "src/declared_feature.rs".to_string(),
+                "from_declared_feature"
+            ),
+            (
+                "src/inner_impossible.rs".to_string(),
+                "from_inner_impossible",
+            ),
+            ("src/missing_feature.rs".to_string(), "from_missing_feature"),
+            (
+                "src/partly_unevaluable.rs".to_string(),
+                "from_partly_unevaluable"
+            ),
+            ("src/unevaluable.rs".to_string(), "from_unevaluable"),
+        ]
+    );
+}
+
+/// The `cfg(test)` decision, pinned from both sides. Test code counts as a use
+/// by default — the quiet answer, and the one that keeps an absent config a
+/// no-op — and `test = false` is how a project asks the other question.
+#[test]
+fn test_code_counts_as_a_use_until_the_matrix_says_otherwise() {
+    let baseline = analyze_fixture("cfggates");
+    assert!(
+        !baseline
+            .findings
+            .iter()
+            .any(|f| f.name.as_deref() == Some("used_by_tests_only")),
+        "the default must be the quiet one: {:?}",
+        baseline.findings
+    );
+
+    let analysis = analyze_configured("cfggates", "no-tests.toml");
+    assert!(
+        analysis
+            .findings
+            .iter()
+            .any(|f| f.kind == FindingKind::UnusedPubItem
+                && f.name.as_deref() == Some("used_by_tests_only")),
+        "with the test build out of the matrix, a test-only helper is unused: {:?}",
+        analysis.findings
+    );
+}
+
+/// Narrowing the features leaves a declared-feature module out of the build,
+/// and takes the optional dependencies nothing can enable with it — those go
+/// back to being unjudgeable, out loud.
+#[test]
+fn a_narrowed_feature_matrix_excludes_gated_code_and_its_optional_dependencies() {
+    let fixture = fixtures().join("cfggates");
+    let analysis = analyze(&fixture, Some(&fixture.join("features-off.toml")))
+        .expect("`features-off.toml` should load");
+
+    assert!(
+        !analysis
+            .findings
+            .iter()
+            .any(|f| f.file.starts_with("src/declared_feature.rs")),
+        "`extra` is off, so nothing in that module is in the build: {:?}",
+        analysis.findings
+    );
+    assert!(
+        reported(&analysis, FindingKind::UnusedDependency).is_empty(),
+        "an optional entry no feature can enable is not judgeable: {:?}",
+        analysis.findings
+    );
+    assert!(
+        analysis
+            .warnings
+            .iter()
+            .any(|w| w.contains("`optional_helper`") && w.contains("[cfg] features")),
+        "the skip must name the matrix as the reason: {:?}",
+        analysis.warnings
+    );
+    // The gate that can never hold is judged against every build there could
+    // be, not against the configured one, so narrowing does not silence it.
+    assert_eq!(
+        reported(&analysis, FindingKind::UnsatisfiableCfg),
+        vec![
+            ("src/inner_impossible.rs".to_string(), ""),
+            ("src/lib.rs".to_string(), "missing_feature")
+        ]
+    );
+}
+
+/// The new kind is a first-class one: `[severity]` reaches it by its serde tag
+/// with no plumbing of its own, and it carries that tag into the JSON.
+#[test]
+fn the_new_finding_kind_is_configurable_and_typed() {
+    let fixture = fixtures().join("cfggates");
+    let analysis =
+        analyze(&fixture, Some(&fixture.join("cfg-off.toml"))).expect("`cfg-off.toml` should load");
+    assert!(
+        reported(&analysis, FindingKind::UnsatisfiableCfg).is_empty(),
+        "`unsatisfiable_cfg = \"off\"` removes the finding entirely: {:?}",
+        analysis.findings
+    );
+
+    let reported = analyze_fixture("cfggates");
+    let json = deadwood::report::render_json(&reported).expect("the report should render");
+    assert!(
+        json.contains("\"kind\": \"unsatisfiable_cfg\""),
+        "the JSON carries the same tag the config file keys off:\n{json}"
+    );
+    let text = deadwood::report::render_text(&reported);
+    assert!(
+        text.contains("Unsatisfiable cfg gates:\n"),
+        "and the text report gives it a group of its own:\n{text}"
     );
 }
 
