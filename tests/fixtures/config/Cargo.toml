@@ -1,0 +1,17 @@
+# Test fixture: the `deadwood.toml` settings.
+#
+# The tree deliberately produces at least one finding of every kind with no
+# configuration at all. Each `*.toml` beside this file is then applied with
+# `--config` and asserted to silence exactly what it claims to, and nothing
+# else.
+#
+# There is deliberately no `deadwood.toml` here. The unconfigured run is the
+# baseline every other case is compared against, and a discoverable config
+# would quietly change it — which is the very failure mode the config file has
+# to be provably free of. Discovery gets its own fixture (`ignoremod`).
+#
+# The registry dependencies below do not exist and do not need to:
+# `cargo metadata --no-deps` never resolves them, and Deadwood never builds.
+[workspace]
+resolver = "2"
+members = ["surface", "app"]

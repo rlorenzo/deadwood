@@ -117,7 +117,7 @@ impl Config {
         let raw: RawConfig = toml::from_str(&text)
             .with_context(|| format!("invalid config file `{}`", path.display()))?;
         Ok(Config {
-            base: path.parent().unwrap_or(Path::new("")).to_path_buf(),
+            base: base_of(path),
             ignore: raw.ignore.iter().map(|p| Glob::path(p)).collect(),
             severity: raw.severity,
             public_api: PublicApi::compile(raw.public_api),
@@ -264,6 +264,20 @@ impl PublicApi {
         let item_path = normalize(item_path);
         self.items.iter().any(|glob| glob.matches(&item_path))
     }
+}
+
+/// The directory a config file's relative patterns are resolved against.
+///
+/// It has to be absolute: the paths patterns are matched against come from
+/// `cargo metadata` and are absolute and symlink-resolved, and `--config
+/// deadwood.toml` on its own has no directory part at all — taking that
+/// literally would leave every pattern matching nothing, silently.
+fn base_of(config_file: &Path) -> PathBuf {
+    let directory = match config_file.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+    directory.canonicalize().unwrap_or(directory)
 }
 
 /// Cargo normalizes `-` to `_` in crate names, so `engine-core` and

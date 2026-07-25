@@ -1,0 +1,2 @@
+# A configuration that sets nothing, so `--config empty.toml` asks for exactly
+# the unconfigured behavior — used to show what the discovered config changes.

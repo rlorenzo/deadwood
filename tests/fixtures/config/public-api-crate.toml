@@ -1,0 +1,4 @@
+# The whole crate's `pub` surface is API. This is the one-line answer for a
+# library with consumers Deadwood cannot see.
+[public-api]
+crates = ["surface"]

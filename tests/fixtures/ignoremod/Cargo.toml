@@ -1,0 +1,19 @@
+# Test fixture: config discovery, and the one place `ignore` has to reach
+# inside module resolution.
+#
+# `src/lib.rs` declares `mod generated;` for a file a build step would have
+# written. It is not in the tree, so without the `deadwood.toml` beside this
+# file the declaration is an unresolved module: a warning, and every check for
+# the package skipped. Ignoring the file has to make that declaration silent
+# instead, or ignoring one generated module would stop Deadwood analyzing
+# everything around it.
+#
+# The `deadwood.toml` here is discovered rather than passed with `--config`,
+# which is the other half of what this fixture pins. `empty.toml` is the way to
+# ask for the unconfigured behavior back.
+[package]
+name = "ignoremod"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]

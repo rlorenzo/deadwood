@@ -1,0 +1,7 @@
+# Both files named here are excluded from *reporting*, not from reading.
+#
+# `orphan.rs` would otherwise be a dead-file finding. `generated.rs` would
+# otherwise contribute two unused-pub findings — and it holds the only call to
+# `surface::api::helper`, which must stay a use, or ignoring generated code
+# would invent a finding in the hand-written code beside it.
+ignore = ["surface/src/generated.rs", "surface/src/orphan.rs"]
