@@ -1,0 +1,10 @@
+# Test fixture: everything path-aware resolution has to get right that a bare
+# identifier census could not — two items sharing a name, a type mentioned
+# only by its own `impl` block, renamed and nested imports, `crate::`,
+# `self::` and `super::` paths, and re-exports that are used and unused.
+[package]
+name = "paths"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]

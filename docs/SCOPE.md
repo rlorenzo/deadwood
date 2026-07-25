@@ -16,24 +16,48 @@ reworking the core.
   `#[path]`).
 - **Unused pub item detection**: name-census heuristic over the whole
   workspace; conservative (false negatives over false positives); attribute
-  and `fn main` escape hatches.
+  and `fn main` escape hatches. (The census was replaced in phase 1 below;
+  the conservative bias and escape hatches carried over.)
 - Text + JSON reporting, CI-friendly exit codes (0 clean / 1 findings /
   2 error).
 - Quality gate: fmt + clippy `-D warnings` + tests, locally
   (`scripts/check.sh`) and in CI.
 
+## Phase 1 — path-aware usage resolution (shipped)
+
+The name census is gone. Usage now comes from resolving paths against a
+per-crate symbol table (`src/resolve.rs`): `use` declarations including
+renames, nested trees and `pub use`; `crate::`/`self::`/`super::`; and
+cross-crate paths between workspace members. Globs into the workspace are
+expanded.
+
+This removed three documented false-negative classes — items sharing a name
+with a used item, types whose only mention is their own `impl` block, and
+unused `pub use` re-exports (now their own finding kind — reported only where
+outside code cannot reach them either, since a re-export on a library's
+public surface is doing its job with no workspace-internal user). The
+conservatism
+tenet is unchanged and load-bearing: unresolvable paths (macro input,
+attribute arguments, globs leading outside the workspace, ambiguity of any
+kind) count as uses of every item with that name. Resolution stays syntactic
+— no rustc or rust-analyzer.
+
 ## Next (sequenced, one slice at a time)
 
-1. **Path-aware usage resolution** — resolve `use` paths and qualified calls
-   instead of bare name counting; unlocks flagging items that share names and
-   detecting unused re-exports (`pub use`).
-2. **Unused dependency detection** — compare `Cargo.toml` dependencies
+1. **Unused dependency detection** — compare `Cargo.toml` dependencies
    against `use`/path references per crate.
-3. **Config file** (`deadwood.toml`): ignore globs, per-check severity,
+2. **Config file** (`deadwood.toml`): ignore globs, per-check severity,
    public-API allowlist for library crates.
-4. **`cfg` awareness** — evaluate simple `cfg(feature = ...)` / platform
+3. **`cfg` awareness** — evaluate simple `cfg(feature = ...)` / platform
    gates instead of always following them.
-5. **Baseline/suppress file** for adopting Deadwood on brownfield codebases.
+4. **Baseline/suppress file** for adopting Deadwood on brownfield codebases.
+5. **Reachability over reference counting** — an item referenced only by
+   other dead items is still dead; today each item is judged on whether
+   anything names it, not on whether that something is alive.
+6. **Lexical scope tracking** — a local, parameter, or generic parameter
+   sharing a name with a module item currently resolves to that item and
+   keeps it alive. Costs findings only; the fix must be namespace-aware, as
+   a value binding must not silence a type of the same name.
 
 ## Explicitly out of scope for now
 
@@ -55,4 +79,5 @@ reworking the core.
 - Every limitation is documented where it lives (module docs) and in the
   README.
 - New dependencies only for confirmed problems; std + `syn` + `serde` +
-  `clap` + `anyhow` is the current ceiling.
+  `clap` + `anyhow` is the current ceiling. (Path resolution needed no new
+  crate, only `syn`'s `visit` feature.)

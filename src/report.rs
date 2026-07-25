@@ -14,6 +14,7 @@ pub fn render_text(analysis: &Analysis) -> String {
     for (kind, header) in [
         (FindingKind::DeadFile, "Dead files"),
         (FindingKind::UnusedPubItem, "Unused public items"),
+        (FindingKind::UnusedReexport, "Unused re-exports"),
     ] {
         let group: Vec<_> = analysis
             .findings
@@ -60,14 +61,26 @@ mod tests {
     fn sample() -> Analysis {
         Analysis {
             workspace_root: PathBuf::from("/ws"),
-            findings: vec![Finding {
-                kind: FindingKind::UnusedPubItem,
-                file: PathBuf::from("src/lib.rs"),
-                line: Some(3),
-                name: Some("dead".into()),
-                message: "pub fn `dead` is never referenced by name anywhere in this workspace"
-                    .into(),
-            }],
+            findings: vec![
+                Finding {
+                    kind: FindingKind::UnusedPubItem,
+                    file: PathBuf::from("src/lib.rs"),
+                    line: Some(3),
+                    name: Some("dead".into()),
+                    message: "pub fn `dead` is never referenced by any resolved path in this \
+                              workspace"
+                        .into(),
+                },
+                Finding {
+                    kind: FindingKind::UnusedReexport,
+                    file: PathBuf::from("src/lib.rs"),
+                    line: Some(9),
+                    name: Some("Stale".into()),
+                    message: "`pub use` re-export of `Stale` is never referenced through this \
+                              module"
+                        .into(),
+                },
+            ],
             warnings: vec![],
         }
     }
@@ -76,7 +89,15 @@ mod tests {
     fn text_report_includes_location_and_summary() {
         let text = render_text(&sample());
         assert!(text.contains("src/lib.rs:3:"));
-        assert!(text.contains("1 finding(s)"));
+        assert!(text.contains("2 finding(s)"));
+    }
+
+    #[test]
+    fn text_report_groups_re_exports_separately() {
+        let text = render_text(&sample());
+        let items = text.find("Unused public items:").expect("items group");
+        let reexports = text.find("Unused re-exports:").expect("re-exports group");
+        assert!(items < reexports, "groups render in kind order:\n{text}");
     }
 
     #[test]
@@ -95,5 +116,7 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value["findings"][0]["kind"], "unused_pub_item");
         assert_eq!(value["findings"][0]["line"], 3);
+        assert_eq!(value["findings"][1]["kind"], "unused_reexport");
+        assert_eq!(value["findings"][1]["name"], "Stale");
     }
 }

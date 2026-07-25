@@ -1,0 +1,9 @@
+[package]
+name = "aliased"
+version = "0.1.0"
+edition = "2021"
+
+# `engine-core` renamed: code here spells it `motor`, a name derivable from
+# neither the package name nor the lib target name.
+[dependencies]
+motor = { package = "engine-core", path = "../engine-core" }

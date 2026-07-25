@@ -1,0 +1,11 @@
+# Test fixture: the conservative fallback. Names Deadwood cannot resolve —
+# identifiers inside macro invocations, and names in a module holding a glob
+# import it cannot follow — must be treated as used. A glob it *can* follow
+# is expanded precisely, so an item that glob makes visible but nobody names
+# is still reported.
+[package]
+name = "macros"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
