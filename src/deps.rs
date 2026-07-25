@@ -395,10 +395,12 @@ impl CrateReferences {
             self.hidden_code = Some(INCLUDE_REASON);
             return;
         }
-        for path in code {
-            // An included file is compiled as part of the file that includes
-            // it, so it belongs to the same target — and to the same
-            // `#[cfg(test)]` context, which `origin` already carries.
+        for (path, context) in code {
+            // An included file is spliced into the item that includes it, so
+            // it is that item's code: same target, and same `#[cfg(test)]`
+            // context, which is why the site's context travels with the path
+            // rather than the file's being reused here.
+            let origin = Origin { context, ..origin };
             match parse(&path) {
                 Some(ast) => self.add_file_at_depth(&ast, parent_of(&path), origin, depth + 1),
                 None => self.hidden_code = Some(INCLUDE_REASON),
@@ -734,8 +736,10 @@ struct Collector<'a, 'g> {
     /// Where the mentions found here are attributed. Its context follows
     /// `#[cfg(test)]` down the item tree.
     origin: Origin<'g>,
-    /// Files spliced into this one by `include!`.
-    included_code: Vec<PathBuf>,
+    /// Files spliced into this one by `include!`, each with the context of
+    /// the item the `include!` was written in — the included code is that
+    /// item's code, gate and all.
+    included_code: Vec<(PathBuf, Contexts)>,
     /// Files spliced in as documentation, whose examples become doctests.
     included_text: Vec<PathBuf>,
 }
@@ -884,7 +888,10 @@ impl<'ast> Visit<'ast> for Collector<'_, '_> {
             .is_some_and(|segment| segment.ident == "include")
         {
             match literal_argument(&node.tokens) {
-                Some(path) => self.included_code.push(self.dir.join(path)),
+                Some(path) => {
+                    let at = self.dir.join(path);
+                    self.included_code.push((at, self.origin.context));
+                }
                 None => *self.hidden_code = Some(INCLUDE_REASON),
             }
         }
@@ -1542,6 +1549,36 @@ mod tests {
             misplaced(&manifest, &refs).0,
             vec![("stale".to_string(), DependencyKind::Development)],
             "the table it belongs in follows the code that names it"
+        );
+    }
+
+    /// `include!` splices a file into the *item* that includes it, so the
+    /// included code inherits that item's gate: a file pulled in from inside a
+    /// `#[cfg(test)]` module is test code, not library code.
+    #[test]
+    fn an_included_file_inherits_the_context_of_the_include_site() {
+        let mut refs = CrateReferences::default();
+        // `deps.rs` is next to the probe and certainly names `proc_macro2`;
+        // only the directory the path resolves against matters here.
+        add_one(
+            &mut refs,
+            "lib",
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("src/probe.rs"),
+            syn::parse_file("#[cfg(test)]\nmod tests {\n include!(\"deps.rs\");\n}\n").ok(),
+        );
+        // A *normal* entry is the discriminating case: reading the included
+        // file as library code would leave this unreported, which is exactly
+        // the answer a correctly-placed entry gets.
+        let manifest = package(vec![dependency("proc-macro2")]);
+        let (found, warnings) = misplaced(&manifest, &refs);
+        assert!(
+            warnings.is_empty(),
+            "the include was followed: {warnings:?}"
+        );
+        assert_eq!(
+            found,
+            vec![("proc-macro2".to_string(), DependencyKind::Development)],
+            "the only code naming it is behind `#[cfg(test)]`"
         );
     }
 
