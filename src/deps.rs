@@ -1545,6 +1545,22 @@ mod tests {
         );
     }
 
+    /// A proc-macro crate's lib target is runtime code like any other: it is
+    /// the only lib such a package has, and a stale `[build-dependencies]`
+    /// entry there belongs in `[dependencies]`, not `[dev-dependencies]`.
+    #[test]
+    fn a_proc_macro_target_is_runtime_code() {
+        let refs = references_from(&[
+            ("proc-macro", "pub fn derive() { stale::helper(); }\n"),
+            ("custom-build", "fn main() {}\n"),
+        ]);
+        let manifest = package(vec![build_dependency("stale")]);
+        assert_eq!(
+            misplaced(&manifest, &refs).0,
+            vec![("stale".to_string(), DependencyKind::Normal)]
+        );
+    }
+
     /// An entry both shipping code and tests name is where it belongs, and an
     /// entry nothing names at all is the unused check's business — "no target
     /// of the right kind names it" is a weaker claim than "the table is wrong".

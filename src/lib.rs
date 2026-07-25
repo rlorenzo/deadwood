@@ -447,7 +447,10 @@ fn misplacement_evidence(
             "is never referenced by the build script of package `{package}`, only by its {}",
             match belongs_in {
                 metadata::DependencyKind::Development => "test, example and bench code",
-                _ => "library and binaries",
+                // Every target kind the runtime context covers, since a
+                // proc-macro crate has no other lib and would otherwise read
+                // its own finding as being about a target it does not have.
+                _ => "library, binaries and proc-macro code",
             }
         ),
         _ => {
