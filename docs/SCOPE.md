@@ -54,6 +54,10 @@ kind) count as uses of every item with that name. Resolution stays syntactic
 5. **Reachability over reference counting** — an item referenced only by
    other dead items is still dead; today each item is judged on whether
    anything names it, not on whether that something is alive.
+6. **Lexical scope tracking** — a local, parameter, or generic parameter
+   sharing a name with a module item currently resolves to that item and
+   keeps it alive. Costs findings only; the fix must be namespace-aware, as
+   a value binding must not silence a type of the same name.
 
 ## Explicitly out of scope for now
 

@@ -40,14 +40,20 @@
 //! Doc comments are the one string we do not scan: they are prose, and
 //! mentioning an item in one should not keep it alive.
 //!
-//! A path that resolves cleanly to nothing in the workspace (a local
-//! binding, a generic parameter, `std`, an external crate) marks nothing.
+//! A path that resolves cleanly to nothing in the workspace (`std`, an
+//! external crate, or a local name matching no item) marks nothing.
 //!
 //! # Known limitations
 //!
 //! - Purely syntactic: method calls (`x.foo()`), trait dispatch, and
 //!   associated items are not resolved. Only free-standing item definitions
 //!   are reported, so this costs findings, never precision.
+//! - Lexical scopes are not tracked, so a local binding, function parameter,
+//!   or generic parameter sharing a name with a module item resolves to that
+//!   item and keeps it alive (`let helper = 5;` hides a dead `pub fn
+//!   helper`). Findings are lost, never invented — fixing it means tracking
+//!   bindings per namespace, since a value binding must not silence a *type*
+//!   of the same name, and a wrong suppression would invent false positives.
 //! - `cfg` is not evaluated, so `#[cfg(test)]` code counts as a use.
 //! - Edition 2015 crate-relative `use` paths are supported by falling back to
 //!   the crate root; other 2015-only path forms may resolve to nothing (which
