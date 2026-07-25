@@ -1,0 +1,10 @@
+# Test fixture: a package with an unparsable module file. Both detectors
+# must skip rather than report findings from incomplete data: the broken
+# file hides `mod` declarations (dead-file false positives) and usages
+# (unused-pub false positives).
+[package]
+name = "broken"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]

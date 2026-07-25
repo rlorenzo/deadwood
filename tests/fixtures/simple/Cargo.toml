@@ -1,0 +1,9 @@
+# Test fixture: a minimal standalone package with one dead file and one
+# unused pub item. The empty [workspace] table keeps it out of any enclosing
+# workspace.
+[package]
+name = "simple"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
