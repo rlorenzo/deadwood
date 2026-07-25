@@ -446,9 +446,9 @@ fn misplacement_evidence(
                 _ => "library and binaries",
             }
         ),
-        _ => format!(
-            "is referenced only by the test, example and bench code of package `{package}`"
-        ),
+        _ => {
+            format!("is referenced only by the test, example and bench code of package `{package}`")
+        }
     }
 }
 

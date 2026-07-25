@@ -1,0 +1,4 @@
+# The new finding kind is keyed by its own serde tag, so it is configurable
+# the day it is added, with no plumbing of its own.
+[severity]
+misplaced_dependency = "off"

@@ -1,0 +1,43 @@
+# Test fixture: dependencies declared in the wrong table. Every entry here is
+# named by some code, so nothing in this fixture is an *unused* dependency —
+# the only question it asks is which table each entry belongs in.
+#
+# The dependencies do not exist on any registry, and do not need to:
+# `cargo metadata --no-deps` never resolves them, and Deadwood never builds.
+[package]
+name = "depkinds"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Named by the library and by the integration test, which is what a normal
+# dependency is for. Not a finding.
+shared_crate = "1"
+# Named only by `tests/it.rs`. Test targets link `[dev-dependencies]`, so this
+# entry costs every consumer of the crate a build for nothing: a finding.
+test_only_crate = "1"
+# Named only by `examples/demo.rs`. Examples link `[dev-dependencies]` too, so
+# this is the same finding through a different target kind.
+example_only_crate = "1"
+# The library names it, so the entry is right where it is — the stale
+# `[build-dependencies]` copy below is the finding.
+stale_build_crate = "1"
+
+[dev-dependencies]
+# Named only by a `#[cfg(test)]` module inside the library. That module is part
+# of the lib target and still links `[dev-dependencies]`, so calling this
+# misplaced would be the single largest false positive this check could make.
+cfg_test_crate = "1"
+# Named only by a doc example in `src/lib.rs`. A doctest compiles with the
+# dev-dependencies available, so the entry is correctly placed.
+doc_only_crate = "1"
+
+[build-dependencies]
+# Named by `build.rs`, the only target that can use a build-dependency.
+build_crate = "1"
+# Never named by the build script; the library names it. The `[dependencies]`
+# entry above is the one carrying the library's use, so this copy is a stale
+# leftover in a table nothing reads: a finding.
+stale_build_crate = "1"
+
+[workspace]

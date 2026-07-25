@@ -304,7 +304,8 @@ fn normalize(name: &str) -> String {
     name.replace('-', "_")
 }
 
-/// Manifest entries the unused-dependency check must never judge.
+/// Manifest entries the dependency checks must never judge — neither whether
+/// anything names them nor which table they belong in.
 ///
 /// Matching is on the manifest key, exactly as written, because that is the
 /// line the user would delete: a renamed entry
@@ -325,6 +326,15 @@ impl DependencyAllowList {
                 .into_iter()
                 .map(|(package, entries)| (package, entries.into_iter().collect()))
                 .collect(),
+        }
+    }
+
+    /// Built without a file to parse, for the tests of other modules.
+    #[cfg(test)]
+    pub(crate) fn for_tests(entries: &[&str]) -> DependencyAllowList {
+        DependencyAllowList {
+            workspace: entries.iter().map(|entry| (*entry).to_string()).collect(),
+            per_package: HashMap::new(),
         }
     }
 

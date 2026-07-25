@@ -340,9 +340,7 @@ impl CrateReferences {
 /// module is not compiled by `cargo test` at all — it is still build-script
 /// code, and treating it as dev code would be inventing a claim.
 fn test_shifted(origin: Origin<'_>, attrs: &[syn::Attribute]) -> Contexts {
-    let test_only = origin
-        .gates
-        .is_some_and(|gates| gates.test_only(attrs));
+    let test_only = origin.gates.is_some_and(|gates| gates.test_only(attrs));
     if origin.context == Contexts::RUNTIME && test_only {
         Contexts::DEV
     } else {
@@ -667,10 +665,7 @@ impl Collector<'_, '_> {
 
     /// A mention that names a crate without saying which code uses it.
     fn insert_opaque(&mut self, name: String) {
-        self.names
-            .entry(name)
-            .or_default()
-            .insert(Contexts::OPAQUE);
+        self.names.entry(name).or_default().insert(Contexts::OPAQUE);
     }
 
     /// The first segment of a path: the only position a crate name can take.
@@ -1252,6 +1247,268 @@ mod tests {
             warnings
                 .iter()
                 .any(|w| w.contains("unused-dependency check skipped")),
+            "the skip must be surfaced: {warnings:?}"
+        );
+    }
+
+    // -- placement ---------------------------------------------------------
+
+    fn dev_dependency(name: &str) -> Dependency {
+        Dependency {
+            kind: Some("dev".to_string()),
+            ..dependency(name)
+        }
+    }
+
+    fn build_dependency(name: &str) -> Dependency {
+        Dependency {
+            kind: Some("build".to_string()),
+            ..dependency(name)
+        }
+    }
+
+    /// Entries reported misplaced, as `(entry, table it belongs in)`, with the
+    /// warnings the run produced.
+    fn misplaced(
+        package: &Package,
+        refs: &CrateReferences,
+    ) -> (Vec<(String, DependencyKind)>, Vec<String>) {
+        misplaced_allowing(package, refs, &DependencyAllowList::default())
+    }
+
+    fn misplaced_allowing(
+        package: &Package,
+        refs: &CrateReferences,
+        allowed: &DependencyAllowList,
+    ) -> (Vec<(String, DependencyKind)>, Vec<String>) {
+        let matrix = crate::cfg::Matrix::default();
+        let mut warnings = Vec::new();
+        let found = find_misplaced(
+            package,
+            refs,
+            allowed,
+            &Gates::new(&matrix, package),
+            &mut warnings,
+        );
+        (
+            found
+                .into_iter()
+                .map(|entry| (entry.name, entry.belongs_in))
+                .collect(),
+            warnings,
+        )
+    }
+
+    /// The finding the check exists for: a normal entry no shipping code
+    /// names, only a test target — which links `[dev-dependencies]` anyway.
+    #[test]
+    fn a_normal_entry_only_a_test_target_names_belongs_in_dev_dependencies() {
+        let refs = references_from(&[
+            ("lib", "pub fn go() {}\n"),
+            ("test", "fn t() { test_helper::assert_ok(); }\n"),
+        ]);
+        let manifest = package(vec![dependency("test_helper")]);
+        assert_eq!(
+            misplaced(&manifest, &refs).0,
+            vec![("test_helper".to_string(), DependencyKind::Development)]
+        );
+    }
+
+    /// Examples and benches link the dev-dependencies exactly as tests do.
+    #[test]
+    fn example_and_bench_targets_count_as_test_code() {
+        for kind in ["example", "bench"] {
+            let refs = references_from(&[
+                ("lib", "pub fn go() {}\n"),
+                (kind, "fn m() { only::go(); }\n"),
+            ]);
+            let manifest = package(vec![dependency("only")]);
+            assert_eq!(
+                misplaced(&manifest, &refs).0,
+                vec![("only".to_string(), DependencyKind::Development)],
+                "a `{kind}` target is dev code"
+            );
+        }
+    }
+
+    /// The single largest false positive a naive per-target split makes:
+    /// `#[cfg(test)]` code lives in the lib target and still links the
+    /// dev-dependencies, so an entry only it names is exactly where it belongs.
+    #[test]
+    fn a_dev_dependency_used_by_a_cfg_test_module_in_the_lib_is_correctly_placed() {
+        let refs = references(&[concat!(
+            "pub fn go() {}\n",
+            "#[cfg(test)]\nmod tests {\n use dev_only::assert_ok;\n",
+            " #[test] fn t() { assert_ok(); }\n}\n",
+        )]);
+        let manifest = package(vec![dev_dependency("dev_only")]);
+        assert!(misplaced(&manifest, &refs).0.is_empty());
+    }
+
+    /// The gate does not have to be a bare `cfg(test)`, and it does not have
+    /// to sit on a module: anything that can only hold in a test build moves
+    /// the code under it.
+    #[test]
+    fn any_gate_that_implies_test_moves_the_code_under_it() {
+        let refs =
+            references(&["#[cfg(all(test, unix))]\nfn helper() { dev_only::assert_ok(); }\n"]);
+        let manifest = package(vec![dev_dependency("dev_only")]);
+        assert!(misplaced(&manifest, &refs).0.is_empty());
+
+        // ...and the gate has to actually imply it. `not(test)` is runtime
+        // code, so a normal entry named there stays where it is.
+        let refs = references(&["#[cfg(not(test))]\nfn helper() { runtime_only::go(); }\n"]);
+        let manifest = package(vec![dependency("runtime_only")]);
+        assert!(misplaced(&manifest, &refs).0.is_empty());
+    }
+
+    /// Doc examples are compiled as doctests, which link the dev-dependencies
+    /// — and a word in a doc comment names no target at all. Either way it
+    /// cannot place an entry, in any direction.
+    #[test]
+    fn a_mention_in_a_doc_comment_places_nothing() {
+        let source = "/// ```\n/// use doc_crate::helper;\n/// ```\npub fn go() {}\n";
+        let refs = references(&[source]);
+        assert!(
+            misplaced(&package(vec![dev_dependency("doc_crate")]), &refs)
+                .0
+                .is_empty(),
+            "a dev-dependency named only by a doctest is correctly placed"
+        );
+        assert!(
+            misplaced(&package(vec![dependency("doc_crate")]), &refs)
+                .0
+                .is_empty(),
+            "and the same mention cannot move a normal entry either"
+        );
+    }
+
+    /// Macro input and attribute arguments keep a dependency alive for the
+    /// unused check. They cannot place one: we do not expand macros, so we do
+    /// not know what code the mention ends up in.
+    #[test]
+    fn a_mention_through_a_macro_or_an_attribute_places_nothing() {
+        let refs = references_from(&[
+            ("lib", "pub fn go() {}\n"),
+            (
+                "test",
+                concat!(
+                    "#[attr_crate(with = \"string_crate::codec\")]\nstruct Wired;\n",
+                    "fn t() { println!(\"{}\", macro_body_crate::VALUE); }\n",
+                ),
+            ),
+        ]);
+        let manifest = package(vec![
+            dependency("attr_crate"),
+            dependency("string_crate"),
+            dependency("macro_body_crate"),
+        ]);
+        assert!(
+            misplaced(&manifest, &refs).0.is_empty(),
+            "an unattributable mention proves a use, not a place"
+        );
+    }
+
+    /// A file no `mod` declaration names is compiled by whatever macro expands
+    /// into its declaration, and that macro is the only thing that knows which
+    /// target that is.
+    #[test]
+    fn a_mention_in_an_unreached_source_places_nothing() {
+        let mut refs = references_from(&[("lib", "pub fn go() {}\n")]);
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/deps/tests");
+        refs.add_unreached_sources(&dir, &HashSet::new());
+        let manifest = package(vec![dependency("regression_only_crate")]);
+        assert!(
+            misplaced(&manifest, &refs).0.is_empty(),
+            "the fixture file naming it is reached by `automod::dir!` alone"
+        );
+    }
+
+    #[test]
+    fn a_build_dependency_the_build_script_names_is_correctly_placed() {
+        let refs = references_from(&[
+            ("lib", "pub fn go() {}\n"),
+            ("custom-build", "fn main() { cc::Build::new(); }\n"),
+        ]);
+        let manifest = package(vec![build_dependency("cc")]);
+        assert!(misplaced(&manifest, &refs).0.is_empty());
+    }
+
+    /// The other direction: a `[build-dependencies]` entry the build script
+    /// never touches is in a table nothing reads, and the code that does name
+    /// it says which table that should have been.
+    #[test]
+    fn a_build_dependency_the_build_script_never_names_is_reported() {
+        let refs = references_from(&[
+            ("lib", "pub fn go() { stale::helper(); }\n"),
+            ("custom-build", "fn main() {}\n"),
+        ]);
+        let manifest = package(vec![build_dependency("stale")]);
+        assert_eq!(
+            misplaced(&manifest, &refs).0,
+            vec![("stale".to_string(), DependencyKind::Normal)]
+        );
+
+        let refs = references_from(&[
+            ("test", "fn t() { stale::helper(); }\n"),
+            ("custom-build", "fn main() {}\n"),
+        ]);
+        assert_eq!(
+            misplaced(&manifest, &refs).0,
+            vec![("stale".to_string(), DependencyKind::Development)],
+            "the table it belongs in follows the code that names it"
+        );
+    }
+
+    /// An entry both shipping code and tests name is where it belongs, and an
+    /// entry nothing names at all is the unused check's business — "no target
+    /// of the right kind names it" is a weaker claim than "the table is wrong".
+    #[test]
+    fn an_entry_is_placed_only_on_positive_evidence() {
+        let refs = references_from(&[
+            ("lib", "pub fn go() { shared::helper(); }\n"),
+            ("test", "fn t() { shared::helper(); }\n"),
+        ]);
+        let manifest = package(vec![dependency("shared"), dependency("named_by_nothing")]);
+        assert!(misplaced(&manifest, &refs).0.is_empty());
+    }
+
+    /// A dev-dependency the library itself appears to name is never reported.
+    /// Such a manifest does not compile, so the likelier explanation is that
+    /// the mention was attributed to the wrong code — a `#[cfg(test)] mod
+    /// tests;` in its own file, say, whose gate lives in the parent.
+    #[test]
+    fn a_dev_dependency_named_by_runtime_code_is_never_reported() {
+        let refs = references(&["pub fn go() { dev_only::helper(); }\n"]);
+        let manifest = package(vec![dev_dependency("dev_only")]);
+        assert!(misplaced(&manifest, &refs).0.is_empty());
+    }
+
+    /// The allowlist means "do not judge this entry", which covers where it is
+    /// declared as much as whether anything names it.
+    #[test]
+    fn an_allowlisted_entry_is_never_placed() {
+        let refs = references_from(&[
+            ("lib", "pub fn go() {}\n"),
+            ("test", "fn t() { test_helper::assert_ok(); }\n"),
+        ]);
+        let manifest = package(vec![dependency("test_helper")]);
+        let allowed = DependencyAllowList::for_tests(&["test_helper"]);
+        assert!(misplaced_allowing(&manifest, &refs, &allowed).0.is_empty());
+    }
+
+    /// Code we cannot see could name the entry from anywhere, so the placement
+    /// question is as unanswerable as the unused one — and says so.
+    #[test]
+    fn hidden_code_skips_the_placement_check_out_loud() {
+        let refs = references(&["include!(concat!(env!(\"OUT_DIR\"), \"/generated.rs\"));\n"]);
+        let manifest = package(vec![dependency("test_helper")]);
+        let (found, warnings) = misplaced(&manifest, &refs);
+        assert!(found.is_empty());
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("misplaced-dependency check skipped")),
             "the skip must be surfaced: {warnings:?}"
         );
     }
