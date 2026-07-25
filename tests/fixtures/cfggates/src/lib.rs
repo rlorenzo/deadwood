@@ -20,6 +20,11 @@ mod missing_feature;
 #[cfg(windows)]
 mod on_windows;
 
+// Gated by an inner attribute rather than one on the declaration: the
+// whole file, children included, stands or falls with it.
+mod inner_gated;
+mod inner_impossible;
+
 // Not a `cfg` we model, at any depth: always followed.
 #[cfg(mystery_flag)]
 mod unevaluable;

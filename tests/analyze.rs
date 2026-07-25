@@ -446,6 +446,8 @@ fn the_default_matrix_follows_every_gate_and_reports_the_ones_that_can_never_hol
         vec![
             // An item-level gate, `all` with one arm no manifest can satisfy.
             ("src/declared_feature.rs".to_string(), "never_built"),
+            // A file-level `#![cfg(...)]`, which gates every item below it.
+            ("src/inner_impossible.rs".to_string(), ""),
             // A `mod` behind a feature that does not exist.
             ("src/lib.rs".to_string(), "missing_feature"),
         ],
@@ -476,8 +478,14 @@ fn the_default_matrix_follows_every_gate_and_reports_the_ones_that_can_never_hol
                 "src/declared_feature.rs".to_string(),
                 "from_declared_feature"
             ),
-            // Behind the impossible gate: reported *and* still followed, so
+            // Gated by an inner `#![cfg(...)]` rather than one on the `mod`.
+            ("src/inner_gated.rs".to_string(), "from_inner_gate"),
+            // Behind the impossible gates: reported *and* still followed, so
             // that adding a finding kind never moves the other detectors.
+            (
+                "src/inner_impossible.rs".to_string(),
+                "from_inner_impossible",
+            ),
             ("src/missing_feature.rs".to_string(), "from_missing_feature"),
             // Platform-gated, and every platform is possible by default.
             ("src/on_windows.rs".to_string(), "from_windows"),
@@ -507,22 +515,25 @@ fn the_default_matrix_follows_every_gate_and_reports_the_ones_that_can_never_hol
     );
 }
 
-/// Narrowing the targets takes the platform module out of the analyzed build.
-/// The load-bearing half of that is the second assertion: code that is not in
-/// this build must not turn into a dead file, or narrowing the matrix would be
-/// a trade of one false positive for another.
+/// Narrowing the targets takes the platform modules out of the analyzed build
+/// — the one gated on its `mod` declaration and the one gated by an inner
+/// `#![cfg(...)]` alike. The load-bearing half is the first assertion: code
+/// that is not in this build must not turn into a dead file, or narrowing the
+/// matrix would trade one false positive for another.
 #[test]
 fn a_narrowed_target_matrix_excludes_a_platform_module_without_calling_it_dead() {
     let analysis = analyze_configured("cfggates", "linux-only.toml");
 
-    assert!(
-        !analysis
-            .findings
-            .iter()
-            .any(|f| f.file.starts_with("src/on_windows.rs")),
-        "the windows module is neither analyzed nor reported: {:?}",
-        analysis.findings
-    );
+    for excluded in ["src/on_windows.rs", "src/inner_gated.rs"] {
+        assert!(
+            !analysis
+                .findings
+                .iter()
+                .any(|f| f.file.starts_with(excluded)),
+            "`{excluded}` is neither analyzed nor reported: {:?}",
+            analysis.findings
+        );
+    }
     // Everything else is untouched, including the gates we cannot evaluate.
     assert_eq!(
         reported(&analysis, FindingKind::UnusedPubItem),
@@ -530,6 +541,10 @@ fn a_narrowed_target_matrix_excludes_a_platform_module_without_calling_it_dead()
             (
                 "src/declared_feature.rs".to_string(),
                 "from_declared_feature"
+            ),
+            (
+                "src/inner_impossible.rs".to_string(),
+                "from_inner_impossible",
             ),
             ("src/missing_feature.rs".to_string(), "from_missing_feature"),
             (
@@ -602,7 +617,10 @@ fn a_narrowed_feature_matrix_excludes_gated_code_and_its_optional_dependencies()
     // be, not against the configured one, so narrowing does not silence it.
     assert_eq!(
         reported(&analysis, FindingKind::UnsatisfiableCfg),
-        vec![("src/lib.rs".to_string(), "missing_feature")]
+        vec![
+            ("src/inner_impossible.rs".to_string(), ""),
+            ("src/lib.rs".to_string(), "missing_feature")
+        ]
     );
 }
 

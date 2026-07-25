@@ -122,6 +122,15 @@ pub fn resolve(
             } else {
                 file_dir.join(path.file_stem().unwrap_or_default())
             };
+            // An inner `#![cfg(...)]` gates the file it is written in, not one
+            // item in it, so a matrix that rules it out takes the whole file
+            // and every module below it. Checked before the `mod` walk, or the
+            // children of a file that is not in this build would be queued.
+            if !gates.compiled(&ast.attrs) {
+                resolved.excluded.extend(rs_files_under(&child_base));
+                resolved.excluded.push(path);
+                continue;
+            }
             let declaring = Declaring {
                 dir: file_dir,
                 file: &path,
@@ -253,6 +262,12 @@ fn collect_mod_decls(
 /// by layout rather than by reading them is deliberate: a module that is not
 /// part of this build should not be parsed, and a file that is not there is
 /// still a path the dead-file check must not report.
+///
+/// The cost is that an orphan file sitting in that directory — one no `mod`
+/// under the excluded module actually declares — is covered too, and so goes
+/// unreported. That is the right trade: the module tree here was never
+/// resolved, so "nothing declares it" is a claim about code we did not read,
+/// and the finding is lost rather than invented.
 fn exclude_subtree(
     named: Option<&Path>,
     child_base: &Path,
@@ -260,13 +275,19 @@ fn exclude_subtree(
     excluded: &mut Vec<PathBuf>,
 ) {
     let (file, directory) = match named {
-        Some(target) => (
-            target.to_path_buf(),
-            target
-                .parent()
-                .unwrap_or(Path::new(""))
-                .join(target.file_stem().unwrap_or_default()),
-        ),
+        Some(target) => {
+            let parent = target.parent().unwrap_or(Path::new(""));
+            // The same rule `collect_mod_decls` follows when it queues one:
+            // only a file literally named `mod.rs` owns its parent directory
+            // for children, so `#[path = "sub/mod.rs"]` nests them in `sub/`
+            // and every other target nests them in a stem-named directory.
+            let directory = if target.file_name().is_some_and(|n| n == "mod.rs") {
+                parent.to_path_buf()
+            } else {
+                parent.join(target.file_stem().unwrap_or_default())
+            };
+            (target.to_path_buf(), directory)
+        }
         None => (child_base.join(format!("{name}.rs")), child_base.join(name)),
     };
     excluded.push(normalize(&file));
@@ -368,6 +389,53 @@ mod tests {
                 vec!["alias".to_string()],
                 vec!["alias".to_string(), "child".to_string()],
             ]
+        );
+    }
+
+    /// A `mod` outside the analyzed build has to account for the same child
+    /// directory `collect_mod_decls` would have queued from, or the files
+    /// under it come back as dead — reported from a module tree we
+    /// deliberately did not read. The `mod.rs` case is the one that differs:
+    /// that file owns its parent directory instead of nesting in a stem-named
+    /// one.
+    #[test]
+    fn an_excluded_module_accounts_for_the_directory_its_children_live_in() {
+        let directory_of = |named: Option<&str>, name: &str| {
+            let mut excluded = Vec::new();
+            exclude_subtree(
+                named.map(Path::new),
+                Path::new("/ws/src"),
+                name,
+                &mut excluded,
+            );
+            // Nothing exists on disk, so only the file itself is listed; the
+            // directory is what the walk was pointed at.
+            excluded
+        };
+
+        assert_eq!(
+            directory_of(None, "win"),
+            vec![PathBuf::from("/ws/src/win.rs")]
+        );
+        assert_eq!(
+            directory_of(Some("/ws/src/renamed.rs"), "win"),
+            vec![PathBuf::from("/ws/src/renamed.rs")]
+        );
+
+        // The behavior that matters is which directory gets walked, so check
+        // it against a tree that exists: this crate's own `src/`.
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut through_mod_rs = Vec::new();
+        exclude_subtree(
+            Some(&src.join("mod.rs")),
+            Path::new("/ws/elsewhere"),
+            "src",
+            &mut through_mod_rs,
+        );
+        assert!(
+            through_mod_rs.contains(&normalize(&src.join("modtree.rs"))),
+            "`#[path = \"src/mod.rs\"]` nests its children in `src/`, not in \
+             `src/mod/`: {through_mod_rs:?}"
         );
     }
 

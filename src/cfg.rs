@@ -300,6 +300,12 @@ impl<'a> Gates<'a> {
     /// single reason.
     pub fn gate_sites(&self, ast: &syn::File) -> Vec<GateSite> {
         let mut sites = Vec::new();
+        // An inner `#![cfg(...)]` gates the file it is written in. If it can
+        // never hold, every item below it is dead for that one reason, so the
+        // file-level gate is the only one worth naming.
+        if self.walk_attrs(&ast.attrs, None, &mut sites) {
+            return sites;
+        }
         self.walk_items(&ast.items, &mut sites);
         sites
     }
@@ -420,6 +426,13 @@ pub enum Verdict {
 /// dependency alive, with no plumbing of their own. With the default matrix
 /// nothing is ever removed.
 pub fn prune(gates: &Gates<'_>, file: &mut syn::File) {
+    // An inner `#![cfg(...)]` the matrix rules out takes the whole file with
+    // it. Module resolution catches this first and never hands such a file
+    // here, but the function has to be right on its own terms.
+    if !gates.compiled(&file.attrs) {
+        file.items.clear();
+        return;
+    }
     prune_items(gates, &mut file.items);
 }
 

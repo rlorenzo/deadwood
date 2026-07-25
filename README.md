@@ -311,8 +311,13 @@ toolchain is pinned to `stable` with `clippy` and `rustfmt` via
   that says "test-only" — proving that would need reachability analysis
   Deadwood does not have yet (`docs/SCOPE.md` has the reasoning).
 - An unsatisfiable gate is reported where it is written, and only for the
-  outermost gate; enum variants and struct fields are not walked, and neither
-  are items inside function bodies.
+  outermost gate — an inner `#![cfg(...)]` gates the whole file it is in, and
+  nothing below a dead gate is walked. Enum variants and struct fields are not
+  walked either, nor are items inside function bodies.
+- A module the matrix excludes takes its whole conventional subtree with it,
+  unread. An orphan file inside that subtree is therefore not reported as
+  dead: Deadwood did not resolve that module tree, and claiming a file is
+  unreachable from a tree it never read is the failure mode it refuses.
 - `include!()`-ed files are not tracked and may be reported as dead.
 - A `pub` item with consumers outside the workspace looks identical to a dead
   one; for library crates, these findings are advisory until the crate or its
