@@ -14,12 +14,20 @@
 //! - **Unused dependencies**: `Cargo.toml` entries whose crate name a
 //!   package's code never mentions, in any target and through any channel we
 //!   can see (`src/deps.rs`).
+//!
+//! What each detector reports can be tuned by a `deadwood.toml`
+//! (`src/config.rs`): files to ignore, a severity per finding kind, the crates
+//! and item paths that are deliberate public API, and the dependency entries
+//! that are load bearing without being named in code. With no config file the
+//! behavior is exactly as described above.
 
+pub mod config;
 pub mod metadata;
 pub mod modtree;
 pub mod report;
 
 mod deps;
+mod glob;
 mod resolve;
 mod unused;
 
@@ -27,10 +35,15 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+
+use crate::config::{Config, Severity};
 
 /// The category of a finding, used for grouping and JSON output.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+///
+/// The serde tags are also the keys of the config file's `[severity]` table,
+/// so a new kind becomes configurable the moment it is added here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FindingKind {
     /// A source file not reachable from any crate root via `mod` declarations.
@@ -47,6 +60,10 @@ pub enum FindingKind {
 #[derive(Debug, Clone, Serialize)]
 pub struct Finding {
     pub kind: FindingKind,
+    /// How much this finding matters, from the config file's `[severity]`
+    /// table. Only `deny` findings fail the run; `off` ones never reach here
+    /// at all.
+    pub severity: Severity,
     /// Path relative to the workspace root.
     pub file: PathBuf,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -72,9 +89,31 @@ pub struct Analysis {
     pub warnings: Vec<String>,
 }
 
+impl Analysis {
+    /// Whether the run should be treated as a failure.
+    ///
+    /// Only `deny` findings count: a `warn` finding is printed and forgiven,
+    /// which is the whole point of being able to configure one.
+    pub fn has_denied(&self) -> bool {
+        self.findings
+            .iter()
+            .any(|finding| finding.severity == Severity::Deny)
+    }
+}
+
 /// Analyze the workspace containing `path` and return all findings.
-pub fn analyze(path: &Path) -> Result<Analysis> {
+///
+/// `config_path` names a configuration file explicitly; `None` discovers one
+/// by walking up from `path` to the workspace root, and falls back to
+/// [`Config::default`] — which is exactly the behavior of a Deadwood with no
+/// configuration support at all.
+pub fn analyze(path: &Path, config_path: Option<&Path>) -> Result<Analysis> {
     let meta = metadata::load(path)?;
+    let config = match config_path {
+        Some(explicit) => Config::load(explicit)?,
+        None => Config::discover(path, &meta.workspace_root)?,
+    };
+    let ignore = config.ignore();
     let mut findings = Vec::new();
     let mut warnings = Vec::new();
 
@@ -99,7 +138,7 @@ pub fn analyze(path: &Path) -> Result<Analysis> {
         let mut package_reachable: HashSet<PathBuf> = HashSet::new();
         let mut package_references = deps::CrateReferences::default();
         for target in &package.targets {
-            let files = modtree::resolve(&target.src_path, &mut warnings);
+            let files = modtree::resolve(&target.src_path, ignore, &mut warnings);
             for file in &files {
                 package_reachable.insert(file.path.clone());
             }
@@ -144,6 +183,10 @@ pub fn analyze(path: &Path) -> Result<Analysis> {
                 if !package_reachable.contains(&file) {
                     findings.push(Finding {
                         kind: FindingKind::DeadFile,
+                        // Every construction site leaves the severity at its
+                        // default; `apply_config` sets the configured one for
+                        // all of them at once, below.
+                        severity: Severity::default(),
                         file: relative_to(&file, &meta.workspace_root),
                         line: None,
                         name: None,
@@ -164,7 +207,7 @@ pub fn analyze(path: &Path) -> Result<Analysis> {
     // missing, and unseen paths would turn into false positives.
     if warnings.is_empty() {
         findings.extend(
-            unused::find_unused_items(&crates, &mut warnings)
+            unused::find_unused_items(&crates, config.public_api(), &mut warnings)
                 .into_iter()
                 .map(|item| Finding {
                     kind: if item.reexport {
@@ -172,6 +215,7 @@ pub fn analyze(path: &Path) -> Result<Analysis> {
                     } else {
                         FindingKind::UnusedPubItem
                     },
+                    severity: Severity::default(),
                     file: relative_to(&item.file, &meta.workspace_root),
                     line: Some(item.line),
                     message: if item.reexport {
@@ -201,27 +245,34 @@ pub fn analyze(path: &Path) -> Result<Analysis> {
     for (package, package_references) in &references {
         let manifest = relative_to(&package.manifest_path, &meta.workspace_root);
         findings.extend(
-            deps::find_unused(package, package_references, &mut warnings)
-                .into_iter()
-                .map(|entry| Finding {
-                    kind: FindingKind::UnusedDependency,
-                    file: manifest.clone(),
-                    line: None,
-                    message: format!(
-                        "{} `{}` is never referenced by any target of package `{}`",
-                        match entry.kind {
-                            metadata::DependencyKind::Normal => "dependency",
-                            metadata::DependencyKind::Development => "dev-dependency",
-                            metadata::DependencyKind::Build => "build-dependency",
-                        },
-                        entry.name,
-                        package.name
-                    ),
-                    name: Some(entry.name),
-                }),
+            deps::find_unused(
+                package,
+                package_references,
+                config.dependencies(),
+                &mut warnings,
+            )
+            .into_iter()
+            .map(|entry| Finding {
+                kind: FindingKind::UnusedDependency,
+                severity: Severity::default(),
+                file: manifest.clone(),
+                line: None,
+                message: format!(
+                    "{} `{}` is never referenced by any target of package `{}`",
+                    match entry.kind {
+                        metadata::DependencyKind::Normal => "dependency",
+                        metadata::DependencyKind::Development => "dev-dependency",
+                        metadata::DependencyKind::Build => "build-dependency",
+                    },
+                    entry.name,
+                    package.name
+                ),
+                name: Some(entry.name),
+            }),
         );
     }
 
+    let mut findings = apply_config(findings, &config, &meta.workspace_root);
     findings.sort_by(|a, b| {
         (a.file.as_path(), a.line.unwrap_or(0)).cmp(&(b.file.as_path(), b.line.unwrap_or(0)))
     });
@@ -231,6 +282,31 @@ pub fn analyze(path: &Path) -> Result<Analysis> {
         findings,
         warnings,
     })
+}
+
+/// Drop the findings the configuration silences and label the rest with their
+/// configured severity.
+///
+/// One pass over every finding, rather than a check inside each detector, is
+/// the point: `ignore` and `[severity]` then cover a new detector by virtue of
+/// it producing findings at all, with no config plumbing of its own.
+///
+/// Note what this does *not* do: it never suppresses evidence, only reports.
+/// An ignored file has already been read, and the paths in it have already
+/// marked items used, because generated code that calls a `pub fn` is still
+/// calling it — dropping its references would make every `ignore` entry a
+/// source of false positives somewhere else.
+fn apply_config(findings: Vec<Finding>, config: &Config, workspace_root: &Path) -> Vec<Finding> {
+    let ignore = config.ignore();
+    findings
+        .into_iter()
+        .filter(|finding| !ignore.matches(&workspace_root.join(&finding.file)))
+        .map(|finding| Finding {
+            severity: config.severity(finding.kind),
+            ..finding
+        })
+        .filter(|finding| finding.severity != Severity::Off)
+        .collect()
 }
 
 /// Register every `foo = { package = "bar" }` rename as a name for the

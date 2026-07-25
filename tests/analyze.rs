@@ -10,7 +10,8 @@ use deadwood::{Analysis, FindingKind, analyze};
 /// makes a detector skip, which would make the assertions below vacuous.
 fn analyze_fixture(name: &str) -> Analysis {
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
-    let analysis = analyze(&fixture.join(name)).expect("analysis should succeed on the fixture");
+    let analysis =
+        analyze(&fixture.join(name), None).expect("analysis should succeed on the fixture");
     assert!(
         analysis.warnings.is_empty(),
         "unexpected warnings: {:?}",
@@ -99,7 +100,7 @@ fn path_attr_module_children_resolve_in_stem_directory() {
 #[test]
 fn detectors_skip_when_module_resolution_is_incomplete() {
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/broken");
-    let analysis = analyze(&fixture).expect("analysis should succeed on the fixture");
+    let analysis = analyze(&fixture, None).expect("analysis should succeed on the fixture");
 
     assert!(
         analysis.findings.is_empty(),
@@ -272,7 +273,7 @@ fn paths_resolve_across_workspace_members() {
 #[test]
 fn unused_dependencies_are_reported_and_every_reference_channel_counts() {
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/deps");
-    let analysis = analyze(&fixture).expect("analysis should succeed on the fixture");
+    let analysis = analyze(&fixture, None).expect("analysis should succeed on the fixture");
 
     assert_eq!(
         reported(&analysis, FindingKind::UnusedDependency),

@@ -82,14 +82,22 @@
 //! other. Reporting the wrong table as its own finding is tracked in
 //! <https://github.com/rlorenzo/deadwood/issues/10>.
 //!
+//! # Entries that are load bearing without being named
+//!
+//! A dependency declared only to turn on a feature of a *transitive*
+//! dependency (the `getrandom = { features = ["js"] }` idiom), to select a
+//! vendored native library (`openssl = { features = ["vendored"] }`), or to
+//! force feature unification across a workspace is referenced by no code and
+//! by no `[features]` entry of its own package. There is no syntactic signal
+//! that separates it from a stale entry — the source genuinely never mentions
+//! the crate — so the answer is user intent: the `[dependencies]` allowlist in
+//! `deadwood.toml` (see [`crate::config`]) names such entries by their
+//! manifest key, workspace-wide or per package, and they are never judged.
+//! Allowlisting an entry that *is* referenced is not an error; the list says
+//! "do not judge this", not "assert this is unused".
+//!
 //! # Known limitations
 //!
-//! - A dependency declared only to turn on a feature of a *transitive*
-//!   dependency (the `getrandom = { features = ["js"] }` idiom) is not
-//!   referenced by any code or by this package's `[features]` table, and is
-//!   reported. There is no syntactic signal that distinguishes it from a
-//!   stale entry; an allowlist in the config file is the intended answer
-//!   (<https://github.com/rlorenzo/deadwood/issues/9>).
 //! - A dependency reachable only through a glob import of another crate's
 //!   prelude (a derive macro re-exported by a facade crate) is invisible.
 //! - Only the source tree in front of us counts. A crate unpacked from a
@@ -105,6 +113,7 @@ use std::path::{Path, PathBuf};
 use proc_macro2::{TokenStream, TokenTree};
 use syn::visit::Visit;
 
+use crate::config::DependencyAllowList;
 use crate::metadata::{DependencyKind, Package};
 use crate::modtree::ParsedFile;
 
@@ -257,10 +266,12 @@ pub struct UnusedDependency {
     pub kind: DependencyKind,
 }
 
-/// Report the dependencies of `package` that `references` never names.
+/// Report the dependencies of `package` that `references` never names, other
+/// than the manifest keys `allowed` exempts from the check entirely.
 pub fn find_unused(
     package: &Package,
     references: &CrateReferences,
+    allowed: &DependencyAllowList,
     warnings: &mut Vec<String>,
 ) -> Vec<UnusedDependency> {
     if let Some(reason) = references.hidden_code {
@@ -281,6 +292,12 @@ pub fn find_unused(
     let mut platform = Vec::new();
 
     for dependency in &package.dependencies {
+        // Before anything else, including the skip warnings: an allowlisted
+        // entry is one the user has already ruled on, and reporting that we
+        // declined to judge it would be noise about noise.
+        if allowed.allows(&package.name, dependency.manifest_name()) {
+            continue;
+        }
         // Feature- and platform-gated entries are used by code Deadwood
         // cannot tell is compiled at all; guessing either way would be wrong
         // for somebody's feature set.
@@ -569,7 +586,12 @@ mod tests {
     /// Names reported unused, with the warnings the run produced.
     fn unused(package: &Package, refs: &CrateReferences) -> (Vec<String>, Vec<String>) {
         let mut warnings = Vec::new();
-        let found = find_unused(package, refs, &mut warnings);
+        let found = find_unused(
+            package,
+            refs,
+            &DependencyAllowList::default(),
+            &mut warnings,
+        );
         (
             found.into_iter().map(|entry| entry.name).collect(),
             warnings,

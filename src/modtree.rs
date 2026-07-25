@@ -12,10 +12,21 @@
 //! - `#[path]` is resolved relative to the declaring file's directory, which
 //!   matches rustc for the common cases but not every inline-module corner.
 //! - Files included via `include!()` are not tracked yet.
+//!
+//! Configured `ignore` patterns touch exactly one thing here: a `mod`
+//! declaration pointing at a *missing* file that an ignore pattern covers is
+//! skipped silently instead of warned about. Without that, ignoring a
+//! generated module would leave the declaration behind as an unresolved-module
+//! warning, which skips the whole package's checks — an ignored file turning
+//! into a reason to stop analyzing everything around it. Files that do exist
+//! are read as usual whether ignored or not: their contents are still evidence
+//! about the code that is *not* ignored (see [`crate::config`]).
 
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+
+use crate::config::Ignore;
 
 /// A source file reached during module resolution.
 pub struct ParsedFile {
@@ -42,7 +53,7 @@ struct Pending {
 ///
 /// Unresolvable modules and unparsable files are reported through `warnings`
 /// rather than failing the whole analysis.
-pub fn resolve(root: &Path, warnings: &mut Vec<String>) -> Vec<ParsedFile> {
+pub fn resolve(root: &Path, ignore: Ignore<'_>, warnings: &mut Vec<String>) -> Vec<ParsedFile> {
     let mut visited: HashSet<PathBuf> = HashSet::new();
     let mut result = Vec::new();
     let mut queue: Vec<Pending> = vec![Pending {
@@ -83,12 +94,16 @@ pub fn resolve(root: &Path, warnings: &mut Vec<String>) -> Vec<ParsedFile> {
             } else {
                 file_dir.join(path.file_stem().unwrap_or_default())
             };
+            let declaring = Declaring {
+                dir: file_dir,
+                file: &path,
+                ignore,
+            };
             collect_mod_decls(
                 &ast.items,
-                file_dir,
+                &declaring,
                 &child_base,
                 &module,
-                &path,
                 &mut queue,
                 warnings,
             );
@@ -100,12 +115,20 @@ pub fn resolve(root: &Path, warnings: &mut Vec<String>) -> Vec<ParsedFile> {
     result
 }
 
+/// What stays fixed while one file's `mod` declarations are walked: where its
+/// `#[path]` targets are resolved from, what to blame in a warning, and which
+/// missing files are not worth warning about.
+struct Declaring<'a> {
+    dir: &'a Path,
+    file: &'a Path,
+    ignore: Ignore<'a>,
+}
+
 fn collect_mod_decls(
     items: &[syn::Item],
-    file_dir: &Path,
+    declaring: &Declaring<'_>,
     child_base: &Path,
     module: &[String],
-    declaring_file: &Path,
     queue: &mut Vec<Pending>,
     warnings: &mut Vec<String>,
 ) {
@@ -120,10 +143,9 @@ fn collect_mod_decls(
                 let nested_base = child_base.join(m.ident.to_string());
                 collect_mod_decls(
                     inner,
-                    file_dir,
+                    declaring,
                     &nested_base,
                     &child_module,
-                    declaring_file,
                     queue,
                     warnings,
                 );
@@ -131,7 +153,7 @@ fn collect_mod_decls(
             // External module: find the file it refers to.
             None => {
                 if let Some(explicit) = path_attr(&m.attrs) {
-                    let target = file_dir.join(explicit);
+                    let target = declaring.dir.join(explicit);
                     if target.is_file() {
                         // Only a file literally named `mod.rs` owns its parent
                         // directory; any other `#[path]` target keeps the
@@ -142,11 +164,11 @@ fn collect_mod_decls(
                             is_mod_root: owns_dir,
                             module: child_module,
                         });
-                    } else {
+                    } else if !declaring.ignore.matches(&target) {
                         warnings.push(format!(
                             "`mod {}` in `{}` points at missing file `{}`",
                             m.ident,
-                            declaring_file.display(),
+                            declaring.file.display(),
                             target.display()
                         ));
                     }
@@ -167,10 +189,11 @@ fn collect_mod_decls(
                         is_mod_root: true,
                         module: child_module,
                     });
-                } else {
+                } else if !declaring.ignore.matches(&as_file) && !declaring.ignore.matches(&as_dir)
+                {
                     warnings.push(format!(
                         "`mod {name}` in `{}` has no file at `{}` or `{}`",
-                        declaring_file.display(),
+                        declaring.file.display(),
                         as_file.display(),
                         as_dir.display()
                     ));
@@ -258,8 +281,9 @@ mod tests {
     #[test]
     fn module_paths_follow_declarations_not_file_names() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/pathmod/src/lib.rs");
+        let config = crate::config::Config::default();
         let mut warnings = Vec::new();
-        let files = resolve(&root, &mut warnings);
+        let files = resolve(&root, config.ignore(), &mut warnings);
         assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
 
         let mut modules: Vec<Vec<String>> = files.iter().map(|f| f.module.clone()).collect();
