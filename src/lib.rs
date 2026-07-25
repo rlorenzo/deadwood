@@ -14,6 +14,10 @@
 //! - **Unused dependencies**: `Cargo.toml` entries whose crate name a
 //!   package's code never mentions, in any target and through any channel we
 //!   can see (`src/deps.rs`).
+//! - **Misplaced dependencies**: `Cargo.toml` entries declared in a table the
+//!   code that names them cannot see — a `[dependencies]` entry only the
+//!   tests, examples and benches use, or a `[build-dependencies]` entry the
+//!   build script never touches (`src/deps.rs`).
 //! - **Unsatisfiable `cfg` gates**: `#[cfg(...)]` gates that can hold in no
 //!   build of the package — a `mod` behind a feature its manifest does not
 //!   declare is dead by construction (`src/cfg.rs`).

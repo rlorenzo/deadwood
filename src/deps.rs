@@ -1,9 +1,21 @@
-//! Unused dependency detection.
+//! Dependency checks: entries nothing names, and entries in the wrong table.
 //!
 //! A dependency declared in a package's `Cargo.toml` that the package's code
 //! never refers to is dead weight: it slows builds, widens the supply-chain
 //! surface, and misleads readers about what the crate actually needs. Cargo
 //! never complains, because it has no reason to look.
+//!
+//! Two questions are asked of every entry, and they are deliberately separate
+//! functions with separate finding kinds:
+//!
+//! - [`find_unused`] — *does anything in this package name the crate at all?*
+//! - [`find_misplaced`] — *is the entry in a table the code that names it can
+//!   see?* A `[dependencies]` entry only the tests use belongs in
+//!   `[dev-dependencies]`, where it stays out of every consumer's build.
+//!
+//! Folding the second into the first was tried on paper and rejected; the
+//! reasoning is under "Dependency kinds" below, and it is the reason
+//! [`find_unused`] still judges an entry against every target of its package.
 //!
 //! # How it works
 //!
@@ -81,25 +93,85 @@
 //!   pointing at a missing file), handled by the caller, since a file we
 //!   could not read may hold the only reference.
 //!
-//! Each skip is surfaced as a warning rather than guessed at.
+//! Each skip is surfaced as a warning rather than guessed at, once per check,
+//! since silencing one detector says nothing about the other.
 //!
 //! # Dependency kinds
 //!
-//! A manifest entry is judged against references from *every* target of its
-//! package, not only the targets that can legitimately see it. Narrowing that
-//! per kind — `[dev-dependencies]` against tests only, `[dependencies]`
-//! against lib and bins only — would turn "declared in the wrong table" into
-//! an unused-dependency finding, and a user staring at `cc::Build::new()` in
-//! their `build.rs` would rightly call that a false positive. Whether an
-//! entry sits in the right table is a different check; this one answers only
-//! whether the code names it at all. The reported kind still comes from the
-//! entry, so the message names the table to edit.
+//! [`find_unused`] judges a manifest entry against references from *every*
+//! target of its package, not only the targets that can legitimately see it.
+//! Narrowing that per kind — `[dev-dependencies]` against tests only,
+//! `[dependencies]` against lib and bins only — would turn "declared in the
+//! wrong table" into an unused-dependency finding, and a user staring at
+//! `cc::Build::new()` in their `build.rs` would rightly call that a false
+//! positive. Whether an entry sits in the right table is a different question
+//! with a different noise profile, so it is a different check with a finding
+//! kind of its own. The reported kind still comes from the entry, so the
+//! unused message names the table to edit.
 //!
-//! This also means the acceptance-critical cases fall out directly: a
-//! dev-dependency used only in `tests/`, and a build-dependency used only in
-//! `build.rs`, are both seen, because those targets are scanned like any
-//! other. Reporting the wrong table as its own finding is tracked in
-//! <https://github.com/rlorenzo/deadwood/issues/10>.
+//! ## Where a mention counts: [`Contexts`]
+//!
+//! [`find_misplaced`] needs what the unused check does not: *which* code names
+//! a crate. Every mention is therefore attributed to one of four places —
+//! runtime targets (lib, bins, proc-macro), dev targets (test, example,
+//! bench), the build script, or nowhere in particular — and a name accumulates
+//! the set of places it was seen in. An entry is misplaced only when *every*
+//! mention of it lands outside what its table serves.
+//!
+//! Two attributions are load bearing enough to state on their own, because
+//! getting either wrong is what would sink the check.
+//!
+//! **`#[cfg(test)]` code is dev code, wherever it sits.** The unit tests of a
+//! library live in the library target and still link the `[dev-dependencies]`,
+//! so a naive per-target split calls every dev-dependency used by a
+//! `#[cfg(test)] mod tests` misplaced — in essentially every crate that has
+//! one. [`crate::cfg::Gates::test_only`] answers "does this gate confine the
+//! item to a test build?" against the maximal matrix, and anything it answers
+//! yes for moves its whole subtree into the dev context. Judging it against
+//! the maximal matrix rather than the configured one is deliberate: where an
+//! item can be compiled is a property of the code, not of what the user asked
+//! to analyze.
+//!
+//! **A doc comment attributes to nowhere.** Doc examples are compiled as
+//! doctests, and a doctest links the normal *and* the dev dependencies — so a
+//! dependency named only in a doc example is correctly declared under either
+//! table, and a mention there proves nothing about placement in either
+//! direction. The mining is word-level besides ("`itoa`" in prose is
+//! indistinguishable from `itoa::Buffer`), which is fine for keeping an entry
+//! alive and far too weak to move one. Doc words therefore land in the opaque
+//! context, which every table serves, so they can only ever silence a finding.
+//!
+//! The same reasoning covers the other channels that name a crate without
+//! placing it, and they land in the same context: identifiers inside macro
+//! input (a `macro_rules!` body expands wherever it is invoked, which may be a
+//! different target entirely — serde_json's only mention of `itoa` outside
+//! plain code is exactly that), identifiers and strings in attribute
+//! arguments, and every name in a `.rs` file that no `mod` declaration
+//! reaches. That last one is worth spelling out: those files are read at all
+//! *because* a macro we cannot expand declares them (`automod::dir!`), and
+//! that macro is the only thing that knows which target compiles them.
+//!
+//! ## Which claims are made
+//!
+//! "No target of the right kind names it" is a weaker statement than "it is in
+//! the wrong table", and only two directions clear the gap:
+//!
+//! - A `[dependencies]` entry every mention of which is dev code belongs in
+//!   `[dev-dependencies]`. Nothing is lost by moving it and every consumer of
+//!   the crate stops building it.
+//! - A `[build-dependencies]` entry the build script never names is in a table
+//!   nothing reads, since the build script is the only thing compiled against
+//!   that table. The code that *does* name it says which table it should have
+//!   been in.
+//!
+//! Three directions are deliberately never reported. An entry nothing names is
+//! [`find_unused`]'s answer, not this one's. An entry mentioned only opaquely
+//! is not placed, in any direction. And a `[dev-dependencies]` entry the
+//! library appears to name is left alone: such a manifest does not compile at
+//! all, so the likelier explanation is that we attributed the mention wrongly
+//! — through a `#[cfg(test)] mod tests;` in a file of its own, say, whose gate
+//! is written in the parent and which this module therefore reads as runtime
+//! code (<https://github.com/rlorenzo/deadwood/issues/14>).
 //!
 //! # Entries that are load bearing without being named
 //!
@@ -123,7 +195,20 @@
 //!   published `.crate` archive usually has its `tests/` and `benches/`
 //!   stripped, so the dev-dependencies those used are correctly reported as
 //!   unreferenced *by that tree* — and would not be, in the repository it was
-//!   published from.
+//!   published from. The placement check is unaffected in the direction that
+//!   matters: fewer dev targets means less evidence, and less evidence never
+//!   turns into a finding.
+//! - Placement is only as good as the attribution. One mention through a
+//!   macro, an attribute or a doc comment is enough to make an entry
+//!   unplaceable, which is most of the recall the check gives up — across the
+//!   34 crates in the local registry it is the reason every entry declared in
+//!   the wrong table would have to be found by hand.
+//! - A `mod` whose `#[cfg(test)]` gate is written in the parent file, with the
+//!   module's own body in a file of its own, is read as runtime code: the gate
+//!   is not carried down by module resolution
+//!   (<https://github.com/rlorenzo/deadwood/issues/14>). It costs findings
+//!   rather than inventing them, and the never-reported dev-dependency
+//!   direction is what keeps it from doing worse.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;

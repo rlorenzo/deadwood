@@ -2,9 +2,9 @@
 
 A codebase health analyzer for Rust workspaces. Deadwood finds maintainability
 issues that `rustc` and `clippy` stay quiet about — starting with dead module
-files, unused `pub` items, unused re-exports, unused dependencies, and `cfg`
-gates that can never hold, in the spirit of Fallow/knip-style analyzers for
-other ecosystems.
+files, unused `pub` items, unused re-exports, unused and misplaced
+dependencies, and `cfg` gates that can never hold, in the spirit of
+Fallow/knip-style analyzers for other ecosystems.
 
 **Status:** v0.1 — early, narrow, and honest about it. Tunable through a
 `deadwood.toml`, and correct without one. See
@@ -20,6 +20,7 @@ this project was bootstrapped from.
 | **Unused pub items** | Fully-`pub` fns, structs, enums, traits, type aliases, consts, statics, and unions that no path in the workspace resolves to | `dead_code` assumes `pub` items have external consumers |
 | **Unused re-exports** | `pub use` re-exports nothing in the workspace goes through, where outside code cannot reach them either | `unused_imports` only sees imports the crate itself does not use, not ones re-exported for nobody |
 | **Unused dependencies** | `Cargo.toml` entries — normal, dev, or build — whose crate name the declaring package's code never mentions | Cargo has no reason to look, and an unused entry still costs build time and supply-chain surface |
+| **Misplaced dependencies** | `Cargo.toml` entries declared in a table the code naming them cannot see: a `[dependencies]` entry only tests, examples and benches use, or a `[build-dependencies]` entry the build script never touches | Cargo builds the entry wherever you put it; a normal dependency only your tests need is compiled by everyone who depends on you |
 | **Unsatisfiable `cfg` gates** | `#[cfg(...)]` gates that can hold in no build of the package, e.g. a `mod` behind a feature the manifest does not declare | The code is never compiled, so no lint ever sees it — and the gate reads as deliberate |
 
 What each check reports can be tuned by a `deadwood.toml` — see
@@ -61,6 +62,33 @@ feature in a narrowed `cfg` matrix can turn on, and a
 `[target.'cfg(any())'.dependencies]` entry, which is how a crate pins the
 version of something it deliberately never compiles.
 
+Whether an entry sits in the *right* table is a separate check, because it is a
+separate question: the unused check asks whether anything names the crate, and
+this one asks whether the code that does can see the table it is declared in.
+It needs stronger evidence, so it accepts less. Every mention is attributed to
+the code it was written in — runtime targets, test/example/bench targets, the
+build script — and only two claims are ever made: a `[dependencies]` entry
+every mention of which is test code belongs in `[dev-dependencies]`, and a
+`[build-dependencies]` entry the build script never names belongs wherever the
+code that does name it lives.
+
+Everything else stays quiet, by design:
+
+- **`#[cfg(test)]` code counts as test code wherever it sits**, so the unit
+  tests inside a library do not make every dev-dependency they use look
+  misplaced. That is the single largest false positive the check could make.
+- **A mention in a doc comment places nothing.** Doc examples are compiled as
+  doctests, which link the normal *and* the dev dependencies, so a crate named
+  in one is correctly declared under either table.
+- **A mention through a macro, an attribute, or a file no `mod` declaration
+  names places nothing either.** These keep an entry alive for the unused check
+  precisely because we cannot see through them; a reference that cannot be
+  attributed to a target cannot prove misplacement. This is most of what the
+  check gives up.
+- **A dev-dependency is never reported.** The only claim available — "the
+  library names it" — describes a manifest that does not compile, so a
+  mis-attribution on our side is the likelier explanation.
+
 `cfg` gates are evaluated rather than always followed, but the *default* set of
 builds analyzed is the union of every possibility — every feature on and off,
 every target, tests included — so a gate is followed whenever it could hold
@@ -100,7 +128,10 @@ Unused re-exports:
 Unused dependencies:
   Cargo.toml: dev-dependency `tempfile` is never referenced by any target of package `demo`
 
-6 finding(s) in workspace `/path/to/workspace`.
+Misplaced dependencies:
+  Cargo.toml: dependency `assert_cmd` is referenced only by the test, example and bench code of package `demo`, so it belongs in `[dev-dependencies]` rather than `[dependencies]`
+
+7 finding(s) in workspace `/path/to/workspace`.
 ```
 
 - `deadwood check [PATH]` — analyze the package/workspace at `PATH` (default `.`)
@@ -145,6 +176,7 @@ dead_file = "deny"
 unused_pub_item = "warn"
 unused_reexport = "warn"
 unused_dependency = "deny"
+misplaced_dependency = "deny"
 unsatisfiable_cfg = "deny"
 
 # Crates and items whose `pub` surface is API rather than leftovers. Deadwood
@@ -157,9 +189,10 @@ crates = ["my-library"]
 # ...or `crate::module::Item` paths, as globs, for finer control.
 items = ["my-app::prelude::*", "my-app::error::**"]
 
-# Manifest entries the unused-dependency check must never judge: the ones that
-# are load bearing without any code naming them. Matched on the manifest key
-# exactly as written, so a renamed entry is listed by its alias.
+# Manifest entries the dependency checks must never judge — neither whether
+# anything names them nor which table they belong in: the ones that are load
+# bearing without any code naming them. Matched on the manifest key exactly as
+# written, so a renamed entry is listed by its alias.
 # Default: every entry is judged.
 [dependencies]
 # Exempt in every package of the workspace.
@@ -276,7 +309,8 @@ toolchain is pinned to `stable` with `clippy` and `rustfmt` via
    `cfg`-excluded set; unused pub items and re-exports are the definitions no
    resolved path reached (`src/unused.rs`); unused dependencies are the
    manifest entries whose crate name appears nowhere in the package, reachable
-   or not (`src/deps.rs`).
+   or not, and misplaced ones are the entries every mention of which lands in
+   code their table does not serve (`src/deps.rs`).
 6. **Configuration** — `deadwood.toml` is applied in one pass over the
    findings, so `ignore` and `[severity]` cover every detector identically
    (`src/config.rs`); `public-api`, the dependency allowlist, and the `cfg`
@@ -338,6 +372,16 @@ toolchain is pinned to `stable` with `clippy` and `rustfmt` via
   unpacked from a published `.crate` archive usually has `tests/` and
   `benches/` stripped, so the dev-dependencies they used are reported —
   correctly for that tree, not for the repository it came from.
+- One mention through a macro, an attribute, or a doc comment is enough to
+  make an entry unplaceable, so the misplaced-dependency check is much quieter
+  than the unused one. Across the 34 crates in a local registry it reports
+  nothing at all.
+- A `#[cfg(test)] mod tests;` whose body is a file of its own is read as
+  runtime code: the gate is written in the parent file and module resolution
+  does not carry it down. That costs placement findings and never invents
+  one — the never-reported dev-dependency direction is what keeps it from
+  doing worse
+  ([#14](https://github.com/rlorenzo/deadwood/issues/14)).
 - A `[target.'...'.dependencies]` table keyed by a bare target triple rather
   than a `cfg(...)` expression is not modelled, so narrowing `target-os` does
   not reach its entries; they are judged as if always built.
