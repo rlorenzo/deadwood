@@ -6,9 +6,17 @@
 //! `#[path = "..."]` attribute). Anything under `src/` that is never reached
 //! this way is a dead file.
 //!
+//! `cfg`-gated `mod` declarations are followed whenever the gate can hold in
+//! some build the configured matrix admits ([`crate::cfg`]), which with the
+//! default matrix is every gate that can hold anywhere — so platform-specific
+//! files are still never reported dead. A `mod` the matrix *does* rule out is
+//! not followed and not reported dead either: the file it names, and the
+//! directory its children would live in, are returned in [`Resolved::excluded`]
+//! so the dead-file check can tell "not in this build" from "reachable by
+//! nothing". Each file's AST is then pruned of the items the matrix leaves
+//! out, so every detector downstream sees only the build being analyzed.
+//!
 //! Known simplifications, tracked for later:
-//! - `cfg`-gated `mod` declarations are always followed, so platform-specific
-//!   files are never reported dead (conservative, no false positives).
 //! - `#[path]` is resolved relative to the declaring file's directory, which
 //!   matches rustc for the common cases but not every inline-module corner.
 //! - Files included via `include!()` are not tracked yet.
@@ -26,7 +34,19 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::cfg::Gates;
 use crate::config::Ignore;
+
+/// What module resolution found from one crate root.
+pub struct Resolved {
+    /// Every file reached, in the analyzed build.
+    pub files: Vec<ParsedFile>,
+    /// Files a `cfg` the configured matrix rules out keeps out of the
+    /// analysis. They are neither read nor analyzed — and, crucially, not
+    /// dead either: nothing reaches them because this build does not contain
+    /// them, which is not the same as nothing reaching them at all.
+    pub excluded: Vec<PathBuf>,
+}
 
 /// A source file reached during module resolution.
 pub struct ParsedFile {
@@ -53,9 +73,17 @@ struct Pending {
 ///
 /// Unresolvable modules and unparsable files are reported through `warnings`
 /// rather than failing the whole analysis.
-pub fn resolve(root: &Path, ignore: Ignore<'_>, warnings: &mut Vec<String>) -> Vec<ParsedFile> {
+pub fn resolve(
+    root: &Path,
+    ignore: Ignore<'_>,
+    gates: &Gates<'_>,
+    warnings: &mut Vec<String>,
+) -> Resolved {
     let mut visited: HashSet<PathBuf> = HashSet::new();
-    let mut result = Vec::new();
+    let mut resolved = Resolved {
+        files: Vec::new(),
+        excluded: Vec::new(),
+    };
     let mut queue: Vec<Pending> = vec![Pending {
         path: root.to_path_buf(),
         is_mod_root: true,
@@ -79,7 +107,7 @@ pub fn resolve(root: &Path, ignore: Ignore<'_>, warnings: &mut Vec<String>) -> V
                 continue;
             }
         };
-        let ast = match syn::parse_file(&source) {
+        let mut ast = match syn::parse_file(&source) {
             Ok(ast) => Some(ast),
             Err(err) => {
                 warnings.push(format!("could not parse `{}`: {err}", path.display()));
@@ -87,7 +115,7 @@ pub fn resolve(root: &Path, ignore: Ignore<'_>, warnings: &mut Vec<String>) -> V
             }
         };
 
-        if let Some(ast) = &ast {
+        if let Some(ast) = &mut ast {
             let file_dir = path.parent().unwrap_or(Path::new(""));
             let child_base = if is_mod_root {
                 file_dir.to_path_buf()
@@ -98,6 +126,7 @@ pub fn resolve(root: &Path, ignore: Ignore<'_>, warnings: &mut Vec<String>) -> V
                 dir: file_dir,
                 file: &path,
                 ignore,
+                gates,
             };
             collect_mod_decls(
                 &ast.items,
@@ -105,23 +134,28 @@ pub fn resolve(root: &Path, ignore: Ignore<'_>, warnings: &mut Vec<String>) -> V
                 &child_base,
                 &module,
                 &mut queue,
+                &mut resolved.excluded,
                 warnings,
             );
+            // After the walk: the declarations above are read from the file as
+            // written, and pruning would hide the excluded ones from it.
+            crate::cfg::prune(gates, ast);
         }
 
-        result.push(ParsedFile { path, ast, module });
+        resolved.files.push(ParsedFile { path, ast, module });
     }
 
-    result
+    resolved
 }
 
 /// What stays fixed while one file's `mod` declarations are walked: where its
-/// `#[path]` targets are resolved from, what to blame in a warning, and which
-/// missing files are not worth warning about.
+/// `#[path]` targets are resolved from, what to blame in a warning, which
+/// missing files are not worth warning about, and which builds are analyzed.
 struct Declaring<'a> {
     dir: &'a Path,
     file: &'a Path,
     ignore: Ignore<'a>,
+    gates: &'a Gates<'a>,
 }
 
 fn collect_mod_decls(
@@ -130,23 +164,33 @@ fn collect_mod_decls(
     child_base: &Path,
     module: &[String],
     queue: &mut Vec<Pending>,
+    excluded: &mut Vec<PathBuf>,
     warnings: &mut Vec<String>,
 ) {
     for item in items {
         let syn::Item::Mod(m) = item else { continue };
+        let name = m.ident.to_string();
+        // A `mod` the configured matrix rules out is not part of this build:
+        // neither it nor the files under it are read, and neither is dead.
+        if !declaring.gates.compiled(&m.attrs) {
+            let named = path_attr(&m.attrs).map(|explicit| declaring.dir.join(explicit));
+            exclude_subtree(named.as_deref(), child_base, &name, excluded);
+            continue;
+        }
         let mut child_module = module.to_vec();
-        child_module.push(m.ident.to_string());
+        child_module.push(name.clone());
         match &m.content {
             // Inline module: its own file-backed children live one directory
             // level deeper (`mod a { mod b; }` in lib.rs -> src/a/b.rs).
             Some((_, inner)) => {
-                let nested_base = child_base.join(m.ident.to_string());
+                let nested_base = child_base.join(&name);
                 collect_mod_decls(
                     inner,
                     declaring,
                     &nested_base,
                     &child_module,
                     queue,
+                    excluded,
                     warnings,
                 );
             }
@@ -174,7 +218,6 @@ fn collect_mod_decls(
                     }
                     continue;
                 }
-                let name = m.ident.to_string();
                 let as_file = child_base.join(format!("{name}.rs"));
                 let as_dir = child_base.join(&name).join("mod.rs");
                 if as_file.is_file() {
@@ -201,6 +244,33 @@ fn collect_mod_decls(
             }
         }
     }
+}
+
+/// Every file a `mod` outside the analyzed build takes with it.
+///
+/// The file it names — `#[path]` target, `name.rs`, or `name/mod.rs` — plus
+/// everything under the directory its own children would live in. Listing them
+/// by layout rather than by reading them is deliberate: a module that is not
+/// part of this build should not be parsed, and a file that is not there is
+/// still a path the dead-file check must not report.
+fn exclude_subtree(
+    named: Option<&Path>,
+    child_base: &Path,
+    name: &str,
+    excluded: &mut Vec<PathBuf>,
+) {
+    let (file, directory) = match named {
+        Some(target) => (
+            target.to_path_buf(),
+            target
+                .parent()
+                .unwrap_or(Path::new(""))
+                .join(target.file_stem().unwrap_or_default()),
+        ),
+        None => (child_base.join(format!("{name}.rs")), child_base.join(name)),
+    };
+    excluded.push(normalize(&file));
+    excluded.extend(rs_files_under(&directory));
 }
 
 /// Extract the value of a `#[path = "..."]` attribute, if present.
@@ -282,11 +352,14 @@ mod tests {
     fn module_paths_follow_declarations_not_file_names() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/pathmod/src/lib.rs");
         let config = crate::config::Config::default();
+        let package = crate::cfg::tests_support::bare_package();
+        let gates = crate::cfg::Gates::new(config.cfg(), &package);
         let mut warnings = Vec::new();
-        let files = resolve(&root, config.ignore(), &mut warnings);
+        let resolved = resolve(&root, config.ignore(), &gates, &mut warnings);
         assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
 
-        let mut modules: Vec<Vec<String>> = files.iter().map(|f| f.module.clone()).collect();
+        let mut modules: Vec<Vec<String>> =
+            resolved.files.iter().map(|f| f.module.clone()).collect();
         modules.sort();
         assert_eq!(
             modules,

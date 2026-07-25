@@ -36,12 +36,21 @@ readme_crate = "1"
 feature_only_crate = "1"
 # Named nowhere: the finding.
 unused_crate = "1"
-# Feature-gated: skipped with a warning until `cfg` evaluation lands.
+# Optional, and named by nothing: the default `cfg` matrix compiles every
+# feature combination, so this is judgeable and is a finding.
 optional_crate = { version = "1", optional = true }
+# Optional too, but named from behind its own feature gate, which that same
+# matrix compiles — so it is not a finding.
+gated_used_crate = { version = "1", optional = true }
 
 [target.'cfg(unix)'.dependencies]
-# Platform-gated: skipped with a warning for the same reason.
+# Platform-gated and named nowhere: judgeable for the same reason, and a
+# finding.
 platform_crate = "1"
+
+[target.'cfg(windows)'.dependencies]
+# Platform-gated and named under exactly that gate.
+platform_used_crate = "1"
 
 [features]
 # Forwarding a feature to a dependency is a use of it with no code behind it.

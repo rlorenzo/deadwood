@@ -45,19 +45,31 @@ impl Package {
     /// A feature can enable an optional dependency (`dep:foo`) or turn on a
     /// feature of one (`foo/bar`, `foo?/bar`). Either way the entry is load
     /// bearing: deleting the dependency would break the feature.
+    ///
+    /// With one exception. Cargo synthesizes `foo = ["dep:foo"]` for every
+    /// optional dependency no other feature mentions, and reports it here
+    /// exactly like a hand-written feature. That entry is the dependency
+    /// restated, not a second place naming it — counting it would keep every
+    /// optional dependency alive by its own existence, which is precisely the
+    /// verdict the `cfg` matrix now makes it possible to reach.
     pub fn dependencies_named_by_features(&self) -> HashSet<String> {
         let mut names = HashSet::new();
-        for enabled in self.features.values().flatten() {
-            // A bare entry names another feature of this package, not a
-            // dependency, and must not be mistaken for one.
-            let name = match enabled.split_once('/') {
-                Some((dependency, _)) => dependency.trim_end_matches('?'),
-                None => match enabled.strip_prefix("dep:") {
-                    Some(dependency) => dependency,
-                    None => continue,
-                },
-            };
-            names.insert(name.replace('-', "_"));
+        for (feature, enabled) in &self.features {
+            for entry in enabled {
+                // A bare entry names another feature of this package, not a
+                // dependency, and must not be mistaken for one.
+                let name = match entry.split_once('/') {
+                    Some((dependency, _)) => dependency.trim_end_matches('?'),
+                    None => match entry.strip_prefix("dep:") {
+                        Some(dependency) => dependency,
+                        None => continue,
+                    },
+                };
+                if enabled.len() == 1 && name == feature && entry.starts_with("dep:") {
+                    continue;
+                }
+                names.insert(name.replace('-', "_"));
+            }
         }
         names
     }

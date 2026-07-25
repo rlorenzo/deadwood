@@ -1,0 +1,19 @@
+# Test fixture: `cfg` gate evaluation. The features below are the whole
+# manifest side of the question — `extra` exists, `gone` and `vanished` do not,
+# and that difference is what separates a gate that is followed from one that
+# is dead by construction.
+[package]
+name = "cfggates"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+extra = []
+
+[dependencies]
+# Optional, and named by nothing. Judgeable under the default matrix, which
+# compiles every feature combination; not judgeable once `features = []` means
+# nothing can turn it on.
+optional_helper = { version = "1", optional = true }
+
+[workspace]

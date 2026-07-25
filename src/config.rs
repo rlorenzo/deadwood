@@ -48,6 +48,13 @@
 //!   a *transitive* dependency, and `openssl = { features = ["vendored"] }` to
 //!   select a native library. There is no syntactic signal that separates
 //!   those from a stale entry, so the answer is user intent.
+//! - **`cfg`** — which builds to analyze: the features to treat as enabled,
+//!   the targets to consider, and whether `#[cfg(test)]` code is part of the
+//!   build. Every axis defaults to the *union of every possibility*, because
+//!   that is what a Deadwood with no `cfg` evaluation does — a
+//!   `#[cfg(windows)] mod win;` is followed on Linux because some build
+//!   compiles it. Narrowing an axis is how a project says "analyze the build I
+//!   actually ship"; see [`crate::cfg`] for what each answer then means.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
@@ -56,6 +63,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::FindingKind;
+use crate::cfg::Matrix;
 use crate::glob::Glob;
 
 /// The file name Deadwood looks for when no `--config` is given.
@@ -103,6 +111,7 @@ pub struct Config {
     severity: HashMap<FindingKind, Severity>,
     public_api: PublicApi,
     dependencies: DependencyAllowList,
+    cfg: Matrix,
 }
 
 impl Config {
@@ -122,6 +131,7 @@ impl Config {
             severity: raw.severity,
             public_api: PublicApi::compile(raw.public_api),
             dependencies: DependencyAllowList::compile(raw.dependencies),
+            cfg: Matrix::new(raw.cfg.features, raw.cfg.target_os, raw.cfg.test),
         })
     }
 
@@ -183,6 +193,12 @@ impl Config {
 
     pub fn dependencies(&self) -> &DependencyAllowList {
         &self.dependencies
+    }
+
+    /// The set of builds to analyze. Defaults to every one of them, which is
+    /// the behavior of a Deadwood that does not evaluate `cfg` at all.
+    pub fn cfg(&self) -> &Matrix {
+        &self.cfg
     }
 }
 
@@ -345,6 +361,8 @@ struct RawConfig {
     public_api: RawPublicApi,
     #[serde(default)]
     dependencies: RawDependencies,
+    #[serde(default)]
+    cfg: RawCfg,
     //
     // The baseline file from <https://github.com/rlorenzo/deadwood/issues/6>
     // belongs here, as `baseline: Option<PathBuf>` resolved against `base`.
@@ -361,6 +379,21 @@ struct RawPublicApi {
     /// Glob patterns over `crate::module::Item` paths.
     #[serde(default)]
     items: Vec<String>,
+}
+
+/// The `[cfg]` section: which builds to analyze.
+///
+/// Every field is an `Option`, and `None` is not "empty" but "not narrowed":
+/// omitting `features` admits every feature combination, while
+/// `features = []` admits only the one with none of them on. The distinction
+/// is the whole reason these are not plain `Vec`s — an absent section has to
+/// mean the union of every possibility, which is today's behavior.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+struct RawCfg {
+    features: Option<Vec<String>>,
+    target_os: Option<Vec<String>>,
+    test: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]

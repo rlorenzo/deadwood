@@ -41,3 +41,17 @@ pub fn renamed() {
 pub fn in_macro() {
     println!("{}", macro_body_crate::VALUE);
 }
+
+/// Named only from behind the feature gate that pulls it in. The default
+/// matrix compiles every feature combination, so this is a use.
+#[cfg(feature = "gated_used_crate")]
+pub fn gated() {
+    gated_used_crate::go();
+}
+
+/// Same, for a platform gate: `platform_used_crate` is declared under
+/// `[target.'cfg(windows)'.dependencies]` and named only under `cfg(windows)`.
+#[cfg(windows)]
+pub fn on_windows() {
+    platform_used_crate::go();
+}
