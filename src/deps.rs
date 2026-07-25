@@ -606,6 +606,8 @@ pub fn find_misplaced(
         return Vec::new();
     }
 
+    let named_by_features = package.dependencies_named_by_features();
+
     let mut misplaced = Vec::new();
     for dependency in &package.dependencies {
         if allowed.allows(&package.name, dependency.manifest_name()) {
@@ -620,12 +622,10 @@ pub fn find_misplaced(
             continue;
         }
         // An entry the `[features]` table names is load bearing for a reason
-        // that has no code and therefore no target: nothing here can say where
-        // it belongs.
-        if package
-            .dependencies_named_by_features()
-            .contains(&dependency.crate_name())
-        {
+        // that has no code and therefore no target — and `[features]` cannot
+        // refer to a dev-dependency at all, so moving it would break the
+        // feature that names it.
+        if named_by_features.contains(&dependency.crate_name()) {
             continue;
         }
         let found = references
