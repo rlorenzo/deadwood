@@ -274,7 +274,7 @@ impl Contexts {
     }
 
     fn contains(self, other: Contexts) -> bool {
-        self.0 & other.0 != 0
+        self.0 & other.0 == other.0
     }
 
     fn insert(&mut self, other: Contexts) {

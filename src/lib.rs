@@ -195,16 +195,16 @@ pub fn analyze(path: &Path, config_path: Option<&Path>) -> Result<Analysis> {
         // incomplete, and files it would have reached would be reported as
         // false-positive dead files — skip the check for this package.
         // A file we could not read or parse may hold the only reference to a
-        // dependency, so that check is skipped for the package too.
+        // dependency, so both dependency checks are skipped for the package
+        // too — the unseen file could name a crate nothing else names, and it
+        // could name one from code no other target has.
         if warnings.len() > warnings_before {
-            warnings.push(format!(
-                "dead-file check skipped for package `{}`: module resolution was incomplete (see warnings above)",
-                package.name
-            ));
-            warnings.push(format!(
-                "unused-dependency check skipped for package `{}`: module resolution was incomplete (see warnings above)",
-                package.name
-            ));
+            for check in ["dead-file", "unused-dependency", "misplaced-dependency"] {
+                warnings.push(format!(
+                    "{check} check skipped for package `{}`: module resolution was incomplete (see warnings above)",
+                    package.name
+                ));
+            }
             continue;
         }
         // Reachability is the wrong question for a dependency: a file that no

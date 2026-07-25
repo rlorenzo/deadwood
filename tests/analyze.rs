@@ -149,15 +149,18 @@ fn detectors_skip_when_module_resolution_is_incomplete() {
         analysis.warnings
     );
     // A file that failed to parse could hold the only reference to a
-    // dependency, so that check skips the package too.
-    assert!(
-        analysis
-            .warnings
-            .iter()
-            .any(|w| w.contains("unused-dependency check skipped")),
-        "the unused-dependency skip must be surfaced: {:?}",
-        analysis.warnings
-    );
+    // dependency, and could hold it in code from a target no other file
+    // covers, so both dependency checks skip the package too.
+    for check in ["unused-dependency", "misplaced-dependency"] {
+        assert!(
+            analysis
+                .warnings
+                .iter()
+                .any(|w| w.contains(&format!("{check} check skipped"))),
+            "the {check} skip must be surfaced: {:?}",
+            analysis.warnings
+        );
+    }
 }
 
 /// A file included by several workspace members via `#[path]` is a module of
