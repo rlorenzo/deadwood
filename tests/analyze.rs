@@ -176,6 +176,18 @@ fn file_shared_between_packages_is_counted_once() {
         "shared_dead is unused and must be reported exactly once: {:?}",
         analysis.findings
     );
+
+    // The same file is compiled by two packages with different feature
+    // tables, so `#[cfg(feature = "wide")]` in it is impossible for the member
+    // that does not declare `wide` and ordinary for the one that does. A gate
+    // is only dead by construction when *no* package that compiles it can
+    // satisfy it — otherwise every shared file would report against whichever
+    // member happened to be judged first.
+    assert!(
+        reported(&analysis, FindingKind::UnsatisfiableCfg).is_empty(),
+        "one member declares the feature, so the gate can hold: {:?}",
+        analysis.findings
+    );
 }
 
 /// The three classes of dead code the old identifier census could not see:

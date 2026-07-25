@@ -113,7 +113,10 @@ impl Truth {
 /// behavior of a Deadwood with no `cfg` evaluation at all: every feature may
 /// be on or off, every target is possible, and `#[cfg(test)]` code is part of
 /// the build.
-#[derive(Debug)]
+///
+/// Equality is over the builds a matrix admits, which is what the config tests
+/// need to assert about a parsed file.
+#[derive(Debug, PartialEq, Eq)]
 pub struct Matrix {
     /// Feature names to analyze as enabled, closed over the features they
     /// enable in each package. `None` means every feature may be on or off.

@@ -435,12 +435,48 @@ mod tests {
             FindingKind::UnusedPubItem,
             FindingKind::UnusedReexport,
             FindingKind::UnusedDependency,
+            FindingKind::UnsatisfiableCfg,
         ] {
             assert_eq!(config.severity(kind), Severity::Deny);
         }
         assert!(!config.ignore().matches(Path::new("/ws/src/lib.rs")));
         assert!(!config.public_api().covers(Some("anything"), "any::path"));
         assert!(!config.dependencies().allows("pkg", "entry"));
+        // The `cfg` matrix has the same property, and it is the one setting
+        // where "unset" is not "empty": every build is possible until narrowed.
+        assert_eq!(config.cfg(), &crate::cfg::Matrix::default());
+    }
+
+    /// `None` on a `[cfg]` axis is "not narrowed", which is not the same as an
+    /// empty list — omitting `features` admits every combination, while
+    /// `features = []` admits only the build with none of them.
+    #[test]
+    fn an_omitted_cfg_axis_is_not_an_empty_one() {
+        let untouched = load("[cfg]\ntest = false\n").unwrap();
+        assert_eq!(
+            untouched.cfg(),
+            &crate::cfg::Matrix::new(None, None, Some(false)),
+            "features and targets stay unnarrowed"
+        );
+
+        let empty = load("[cfg]\nfeatures = []\ntarget-os = [\"linux\"]\n").unwrap();
+        assert_eq!(
+            empty.cfg(),
+            &crate::cfg::Matrix::new(Some(Vec::new()), Some(vec!["linux".to_string()]), None)
+        );
+    }
+
+    /// The keys are kebab-case like the rest of the file, and a typo in one is
+    /// the same hard failure as a typo anywhere else.
+    #[test]
+    fn an_unknown_cfg_key_is_an_error_naming_the_alternatives() {
+        assert!(load("[cfg]\ntarget-os = [\"linux\"]\n").is_ok());
+        let err = format!(
+            "{:#}",
+            load("[cfg]\ntarget_os = [\"linux\"]\n").unwrap_err()
+        );
+        assert!(err.contains("unknown field `target_os`"), "{err}");
+        assert!(err.contains("target-os"), "{err}");
     }
 
     #[test]

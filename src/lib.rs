@@ -158,6 +158,11 @@ pub fn analyze(path: &Path, config_path: Option<&Path>) -> Result<Analysis> {
             let resolved = modtree::resolve(&target.src_path, ignore, &gates, &mut warnings);
             for file in &resolved.files {
                 package_reachable.insert(file.path.clone());
+                // Unlike the detectors below, this one is not gated on the
+                // package resolving completely. Whether a gate can hold is a
+                // property of one file's attributes and the manifest's feature
+                // list; a sibling file that failed to parse says nothing about
+                // it, and cannot turn a non-finding into a finding.
                 if let Some(ast) = &file.ast {
                     gate_sites.record(&file.path, &package.name, gates.gate_sites(ast));
                 }
