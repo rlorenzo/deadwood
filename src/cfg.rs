@@ -237,6 +237,25 @@ impl<'a> Gates<'a> {
         eval_attrs(attrs, &self.maximal()) == Truth::Never
     }
 
+    /// Whether `attrs` confine the item to a test build: it is compiled by
+    /// some build of the package, and by none that is not a test build.
+    ///
+    /// This is `#[cfg(test)]` and everything that implies it
+    /// (`#[cfg(all(test, unix))]`), judged against the maximal matrix rather
+    /// than the configured one — the question is a property of the code, not
+    /// of what the user asked to analyze. An item behind a gate that can hold
+    /// in *no* build answers `false`: it is dead by construction
+    /// ([`Gates::gate_sites`] reports it), not test-only.
+    ///
+    /// [`crate::deps`] uses this to tell a dev-dependency used by the unit
+    /// tests inside a library from one the library itself depends on.
+    pub fn test_only(&self, attrs: &[syn::Attribute]) -> bool {
+        let mut non_test = self.maximal();
+        non_test.test = false;
+        eval_attrs(attrs, &non_test) == Truth::Never
+            && eval_attrs(attrs, &self.maximal()) != Truth::Never
+    }
+
     /// The features named by `gate` that the manifest does not declare, when
     /// the gate can hold in no build at all.
     fn verdict(&self, gate: &syn::Meta) -> Verdict {
@@ -779,7 +798,7 @@ fn attribute_line(attr: &syn::Attribute) -> usize {
         .map_or(0, |segment| segment.ident.span().start().line)
 }
 
-fn attrs_of(item: &syn::Item) -> &[syn::Attribute] {
+pub(crate) fn attrs_of(item: &syn::Item) -> &[syn::Attribute] {
     match item {
         syn::Item::Const(i) => &i.attrs,
         syn::Item::Enum(i) => &i.attrs,
@@ -818,7 +837,7 @@ fn item_name(item: &syn::Item) -> Option<String> {
     Some(ident.to_string())
 }
 
-fn impl_item_attrs(item: &syn::ImplItem) -> &[syn::Attribute] {
+pub(crate) fn impl_item_attrs(item: &syn::ImplItem) -> &[syn::Attribute] {
     match item {
         syn::ImplItem::Const(i) => &i.attrs,
         syn::ImplItem::Fn(i) => &i.attrs,
@@ -837,7 +856,7 @@ fn impl_item_name(item: &syn::ImplItem) -> Option<String> {
     }
 }
 
-fn trait_item_attrs(item: &syn::TraitItem) -> &[syn::Attribute] {
+pub(crate) fn trait_item_attrs(item: &syn::TraitItem) -> &[syn::Attribute] {
     match item {
         syn::TraitItem::Const(i) => &i.attrs,
         syn::TraitItem::Fn(i) => &i.attrs,
@@ -856,7 +875,7 @@ fn trait_item_name(item: &syn::TraitItem) -> Option<String> {
     }
 }
 
-fn foreign_item_attrs(item: &syn::ForeignItem) -> &[syn::Attribute] {
+pub(crate) fn foreign_item_attrs(item: &syn::ForeignItem) -> &[syn::Attribute] {
     match item {
         syn::ForeignItem::Fn(i) => &i.attrs,
         syn::ForeignItem::Static(i) => &i.attrs,

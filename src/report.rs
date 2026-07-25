@@ -25,6 +25,7 @@ pub fn render_text(analysis: &Analysis) -> String {
         (FindingKind::UnusedPubItem, "Unused public items"),
         (FindingKind::UnusedReexport, "Unused re-exports"),
         (FindingKind::UnusedDependency, "Unused dependencies"),
+        (FindingKind::MisplacedDependency, "Misplaced dependencies"),
     ] {
         let group: Vec<_> = analysis
             .findings

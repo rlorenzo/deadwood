@@ -125,7 +125,7 @@
 //!   unreferenced *by that tree* — and would not be, in the repository it was
 //!   published from.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -134,7 +134,7 @@ use syn::visit::Visit;
 
 use crate::cfg::{Gates, TargetVerdict};
 use crate::config::DependencyAllowList;
-use crate::metadata::{DependencyKind, Package};
+use crate::metadata::{DependencyKind, Package, Target};
 use crate::modtree::ParsedFile;
 
 /// Why a package's reference set is incomplete, phrased for a warning.
@@ -148,21 +148,86 @@ const UNPARSABLE_REASON: &str = "a source file could not be read or parsed";
 /// How deep a chain of `include!`d files is followed. Real code never nests.
 const MAX_INCLUDE_DEPTH: usize = 8;
 
-/// Every crate name a package's code could be referring to.
+/// Which code of a package a mention of a crate name was found in.
+///
+/// A set rather than a single value, because a crate name is usually mentioned
+/// in several places and the placement question is about all of them at once:
+/// an entry sits in the wrong table only when *every* mention of it lands
+/// somewhere that table does not serve.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+struct Contexts(u8);
+
+impl Contexts {
+    /// Library, binary and proc-macro targets: the code that ships to
+    /// consumers, and the only code a `[dependencies]` entry exists for.
+    const RUNTIME: Contexts = Contexts(1 << 0);
+    /// Test, example and bench targets, plus `#[cfg(test)]` code inside any
+    /// other target. All of it links `[dev-dependencies]`.
+    const DEV: Contexts = Contexts(1 << 1);
+    /// The build script, the only target a `[build-dependencies]` entry is
+    /// compiled for.
+    const BUILD_SCRIPT: Contexts = Contexts(1 << 2);
+    /// A mention no target can be held responsible for. See the module docs:
+    /// this is what keeps doc comments, macro input and files no `mod`
+    /// declaration names from proving anything about placement.
+    const OPAQUE: Contexts = Contexts(1 << 3);
+
+    /// Where the files of `target` are attributed.
+    fn of_target(target: &Target) -> Contexts {
+        let kind = |name| target.kind.iter().any(|k| k == name);
+        if kind("custom-build") {
+            Contexts::BUILD_SCRIPT
+        } else if kind("test") || kind("example") || kind("bench") {
+            Contexts::DEV
+        } else {
+            Contexts::RUNTIME
+        }
+    }
+
+    fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    fn contains(self, other: Contexts) -> bool {
+        self.0 & other.0 != 0
+    }
+
+    fn insert(&mut self, other: Contexts) {
+        self.0 |= other.0;
+    }
+}
+
+/// Where one file's mentions are attributed, and what decides it.
+#[derive(Clone, Copy)]
+struct Origin<'a> {
+    context: Contexts,
+    /// `None` for a file no target claims, where nothing is attributable
+    /// anyway and there is no package to evaluate `#[cfg(test)]` against.
+    gates: Option<&'a Gates<'a>>,
+}
+
+/// Every crate name a package's code could be referring to, and where.
 #[derive(Default)]
 pub struct CrateReferences {
-    names: HashSet<String>,
+    /// Name to the set of places it was mentioned. The keys alone answer the
+    /// unused-dependency question; the values answer the placement one.
+    names: HashMap<String, Contexts>,
     /// Set when the package pulls in code Deadwood never sees, which would
     /// make any "never referenced" verdict a guess.
     hidden_code: Option<&'static str>,
 }
 
 impl CrateReferences {
-    /// Add every crate name the files of one target refer to.
-    pub fn add_target(&mut self, files: &[ParsedFile]) {
+    /// Add every crate name the files of one target refer to, attributed to
+    /// the code that target is.
+    pub fn add_target(&mut self, files: &[ParsedFile], target: &Target, gates: &Gates<'_>) {
+        let origin = Origin {
+            context: Contexts::of_target(target),
+            gates: Some(gates),
+        };
         for file in files {
             match &file.ast {
-                Some(ast) => self.add_file(ast, parent_of(&file.path)),
+                Some(ast) => self.add_file(ast, parent_of(&file.path), origin),
                 None => self.hidden_code = Some(UNPARSABLE_REASON),
             }
         }
@@ -173,13 +238,23 @@ impl CrateReferences {
     ///
     /// `already_read` holds the files [`Self::add_target`] has covered, taken
     /// from module resolution; the rest are read and parsed here.
+    ///
+    /// Everything found this way is [`Contexts::OPAQUE`]. The reason these
+    /// files are read at all is that a macro we cannot expand declares them
+    /// (`automod::dir!`), and that macro is the only thing that knows which
+    /// target compiles them — so a mention here says a crate is used, and
+    /// nothing about where.
     pub fn add_unreached_sources(&mut self, dir: &Path, already_read: &HashSet<PathBuf>) {
+        let origin = Origin {
+            context: Contexts::OPAQUE,
+            gates: None,
+        };
         for path in package_sources(dir) {
             if already_read.contains(&path) {
                 continue;
             }
             match parse(&path) {
-                Some(ast) => self.add_file(&ast, parent_of(&path)),
+                Some(ast) => self.add_file(&ast, parent_of(&path), origin),
                 // Unlike module resolution, this walk is speculative: it finds
                 // files nothing declares. One we cannot read may still be
                 // compiled, and may hold the only reference to a dependency.
@@ -188,15 +263,27 @@ impl CrateReferences {
         }
     }
 
-    fn add_file(&mut self, ast: &syn::File, dir: PathBuf) {
-        self.add_file_at_depth(ast, dir, 0);
+    fn add_file(&mut self, ast: &syn::File, dir: PathBuf, origin: Origin<'_>) {
+        self.add_file_at_depth(ast, dir, origin, 0);
     }
 
-    fn add_file_at_depth(&mut self, ast: &syn::File, dir: PathBuf, depth: usize) {
+    fn add_file_at_depth(
+        &mut self,
+        ast: &syn::File,
+        dir: PathBuf,
+        origin: Origin<'_>,
+        depth: usize,
+    ) {
+        // An inner `#![cfg(test)]` makes the whole file unit-test code, wherever
+        // its target would otherwise put it.
+        let mut origin = origin;
+        origin.context = test_shifted(origin, &ast.attrs);
+
         let mut collector = Collector {
             names: &mut self.names,
             hidden_code: &mut self.hidden_code,
             dir,
+            origin,
             included_code: Vec::new(),
             included_text: Vec::new(),
         };
@@ -224,17 +311,42 @@ impl CrateReferences {
             return;
         }
         for path in code {
+            // An included file is compiled as part of the file that includes
+            // it, so it belongs to the same target — and to the same
+            // `#[cfg(test)]` context, which `origin` already carries.
             match parse(&path) {
-                Some(ast) => self.add_file_at_depth(&ast, parent_of(&path), depth + 1),
+                Some(ast) => self.add_file_at_depth(&ast, parent_of(&path), origin, depth + 1),
                 None => self.hidden_code = Some(INCLUDE_REASON),
             }
         }
         for path in text {
             match fs::read_to_string(&path) {
-                Ok(documentation) => words_into(&mut self.names, &documentation),
+                // Documentation, wherever it came from: opaque like every
+                // other doc comment.
+                Ok(documentation) => {
+                    words_into(&mut self.names, &documentation, Contexts::OPAQUE);
+                }
                 Err(_) => self.hidden_code = Some(DOC_FILE_REASON),
             }
         }
+    }
+}
+
+/// `origin`'s context, moved to [`Contexts::DEV`] when `attrs` confine the
+/// item they sit on to a test build.
+///
+/// Only runtime code moves. A test target is already dev code, an opaque
+/// mention must not become attributable, and a build script's `#[cfg(test)]`
+/// module is not compiled by `cargo test` at all — it is still build-script
+/// code, and treating it as dev code would be inventing a claim.
+fn test_shifted(origin: Origin<'_>, attrs: &[syn::Attribute]) -> Contexts {
+    let test_only = origin
+        .gates
+        .is_some_and(|gates| gates.test_only(attrs));
+    if origin.context == Contexts::RUNTIME && test_only {
+        Contexts::DEV
+    } else {
+        origin.context
     }
 }
 
@@ -342,7 +454,7 @@ pub fn find_unused(
             }
         }
         let name = dependency.crate_name();
-        if !references.names.contains(&name) && !named_by_features.contains(&name) {
+        if !references.names.contains_key(&name) && !named_by_features.contains(&name) {
             unused.push(UnusedDependency {
                 name: dependency.manifest_name().to_string(),
                 kind: dependency.dependency_kind(),
@@ -376,6 +488,109 @@ pub fn find_unused(
     unused
 }
 
+/// A manifest entry every mention of which lands outside the code its table
+/// serves.
+pub struct MisplacedDependency {
+    /// The entry as written in `Cargo.toml`, which is the key to move.
+    pub name: String,
+    /// The table it is declared in.
+    pub declared: DependencyKind,
+    /// The table the references say it belongs in.
+    pub belongs_in: DependencyKind,
+}
+
+/// Report the dependencies of `package` that are declared in a table no code
+/// referencing them can see.
+///
+/// The skips are [`find_unused`]'s, for the same reasons: an entry whose
+/// references may be missing cannot be placed any more than it can be
+/// declared dead. Only the package-scope one is warned about here — repeating
+/// the per-entry lists would double the noisiest warnings a run produces
+/// without adding a fact, since both checks skip the same entries for the same
+/// reason and [`find_unused`] has already named them.
+pub fn find_misplaced(
+    package: &Package,
+    references: &CrateReferences,
+    allowed: &DependencyAllowList,
+    gates: &Gates<'_>,
+    warnings: &mut Vec<String>,
+) -> Vec<MisplacedDependency> {
+    if let Some(reason) = references.hidden_code {
+        warnings.push(format!(
+            "misplaced-dependency check skipped for package `{}`: {reason}",
+            package.name
+        ));
+        return Vec::new();
+    }
+
+    let mut misplaced = Vec::new();
+    for dependency in &package.dependencies {
+        if allowed.allows(&package.name, dependency.manifest_name()) {
+            continue;
+        }
+        if dependency.optional && !gates.optional_dependency_possible(dependency.manifest_name()) {
+            continue;
+        }
+        if let Some(target) = &dependency.target
+            && gates.target_expression(target) != TargetVerdict::Possible
+        {
+            continue;
+        }
+        // An entry the `[features]` table names is load bearing for a reason
+        // that has no code and therefore no target: nothing here can say where
+        // it belongs.
+        if package
+            .dependencies_named_by_features()
+            .contains(&dependency.crate_name())
+        {
+            continue;
+        }
+        let found = references
+            .names
+            .get(&dependency.crate_name())
+            .copied()
+            .unwrap_or_default();
+        if let Some(belongs_in) = misplacement(dependency.dependency_kind(), found) {
+            misplaced.push(MisplacedDependency {
+                name: dependency.manifest_name().to_string(),
+                declared: dependency.dependency_kind(),
+                belongs_in,
+            });
+        }
+    }
+    misplaced
+}
+
+/// The table `found` says an entry declared as `kind` belongs in, or `None`
+/// when the evidence does not support moving it.
+///
+/// Every `None` here is deliberate; see the module docs for the reasoning
+/// behind each.
+fn misplacement(kind: DependencyKind, found: Contexts) -> Option<DependencyKind> {
+    // Nothing names it: that is the unused-dependency check's question. And a
+    // mention we could not attribute to a target proves a use without proving
+    // where, which is exactly the evidence a placement claim needs.
+    if found.is_empty() || found.contains(Contexts::OPAQUE) {
+        return None;
+    }
+    match kind {
+        // Test, example and bench code links `[dev-dependencies]`, so an entry
+        // only they name costs every consumer of the crate a build for nothing.
+        DependencyKind::Normal if found == Contexts::DEV => Some(DependencyKind::Development),
+        // The build script is the only thing that compiles against a
+        // `[build-dependencies]` entry, so one it never names is in the wrong
+        // table — and the code that does name it says which.
+        DependencyKind::Build if !found.contains(Contexts::BUILD_SCRIPT) => {
+            Some(if found.contains(Contexts::RUNTIME) {
+                DependencyKind::Normal
+            } else {
+                DependencyKind::Development
+            })
+        }
+        _ => None,
+    }
+}
+
 /// Surface one warning per skip reason, listing the entries it covers.
 fn warn_skipped(warnings: &mut Vec<String>, package: &str, mut names: Vec<String>, reason: &str) {
     if names.is_empty() {
@@ -392,12 +607,12 @@ fn warn_skipped(warnings: &mut Vec<String>, package: &str, mut names: Vec<String
 }
 
 /// Every identifier-shaped word in a piece of text.
-fn words_into(names: &mut HashSet<String>, text: &str) {
+fn words_into(names: &mut HashMap<String, Contexts>, text: &str, context: Contexts) {
     for word in text
         .split(|c: char| !c.is_alphanumeric() && c != '_')
         .filter(|word| !word.is_empty())
     {
-        names.insert(word.to_string());
+        names.entry(word.to_string()).or_default().insert(context);
     }
 }
 
@@ -427,21 +642,35 @@ fn documentation_file(value: &syn::Expr) -> Option<String> {
 }
 
 /// Collects every name in a file that could be naming a crate.
-struct Collector<'a> {
-    names: &'a mut HashSet<String>,
+struct Collector<'a, 'g> {
+    names: &'a mut HashMap<String, Contexts>,
     hidden_code: &'a mut Option<&'static str>,
     /// Directory of the file being walked, which `include!` paths are
     /// relative to.
     dir: PathBuf,
+    /// Where the mentions found here are attributed. Its context follows
+    /// `#[cfg(test)]` down the item tree.
+    origin: Origin<'g>,
     /// Files spliced into this one by `include!`.
     included_code: Vec<PathBuf>,
     /// Files spliced in as documentation, whose examples become doctests.
     included_text: Vec<PathBuf>,
 }
 
-impl Collector<'_> {
+impl Collector<'_, '_> {
+    /// A mention we can attribute to the code it was written in: a path head,
+    /// a `use`, an `extern crate`, a macro's own name.
     fn insert(&mut self, name: String) {
-        self.names.insert(name);
+        let context = self.origin.context;
+        self.names.entry(name).or_default().insert(context);
+    }
+
+    /// A mention that names a crate without saying which code uses it.
+    fn insert_opaque(&mut self, name: String) {
+        self.names
+            .entry(name)
+            .or_default()
+            .insert(Contexts::OPAQUE);
     }
 
     /// The first segment of a path: the only position a crate name can take.
@@ -455,13 +684,21 @@ impl Collector<'_> {
     /// a macro will do with them is unknown.
     fn path_idents(&mut self, path: &syn::Path) {
         for segment in &path.segments {
-            self.insert(segment.ident.to_string());
+            self.insert_opaque(segment.ident.to_string());
         }
     }
 
     /// Every identifier-shaped word in a piece of text.
     fn words_in(&mut self, text: &str) {
-        words_into(self.names, text);
+        words_into(self.names, text, Contexts::OPAQUE);
+    }
+
+    /// Walk `body` with the context `attrs` puts it in, then restore.
+    fn within(&mut self, attrs: &[syn::Attribute], body: impl FnOnce(&mut Self)) {
+        let outer = self.origin.context;
+        self.origin.context = test_shifted(self.origin, attrs);
+        body(self);
+        self.origin.context = outer;
     }
 
     /// Every identifier in an unexpanded token stream, at any nesting depth.
@@ -472,7 +709,7 @@ impl Collector<'_> {
     fn tokens(&mut self, tokens: &TokenStream, strings: bool) {
         for tree in tokens.clone() {
             match tree {
-                TokenTree::Ident(ident) => self.insert(ident.to_string()),
+                TokenTree::Ident(ident) => self.insert_opaque(ident.to_string()),
                 TokenTree::Group(group) => self.tokens(&group.stream(), strings),
                 TokenTree::Literal(literal) if strings => self.words_in(&literal.to_string()),
                 _ => {}
@@ -498,7 +735,36 @@ impl Collector<'_> {
     }
 }
 
-impl<'ast> Visit<'ast> for Collector<'_> {
+impl<'ast> Visit<'ast> for Collector<'_, '_> {
+    // `#[cfg(test)]` moves everything under it into the package's test code,
+    // wherever the item sits. Four entry points cover every place an item can
+    // be written: the module tree, `impl` blocks, `trait` bodies and
+    // `extern` blocks. Items inside function bodies arrive through
+    // `visit_item` as well, since `syn` walks a `Stmt::Item` into it.
+    fn visit_item(&mut self, node: &'ast syn::Item) {
+        self.within(crate::cfg::attrs_of(node), |this| {
+            syn::visit::visit_item(this, node);
+        });
+    }
+
+    fn visit_impl_item(&mut self, node: &'ast syn::ImplItem) {
+        self.within(crate::cfg::impl_item_attrs(node), |this| {
+            syn::visit::visit_impl_item(this, node);
+        });
+    }
+
+    fn visit_trait_item(&mut self, node: &'ast syn::TraitItem) {
+        self.within(crate::cfg::trait_item_attrs(node), |this| {
+            syn::visit::visit_trait_item(this, node);
+        });
+    }
+
+    fn visit_foreign_item(&mut self, node: &'ast syn::ForeignItem) {
+        self.within(crate::cfg::foreign_item_attrs(node), |this| {
+            syn::visit::visit_foreign_item(this, node);
+        });
+    }
+
     fn visit_item_use(&mut self, node: &'ast syn::ItemUse) {
         for attr in &node.attrs {
             self.visit_attribute(attr);
@@ -594,15 +860,47 @@ mod tests {
 
     /// One target's worth of source, as a package would present it.
     fn references(sources: &[&str]) -> CrateReferences {
+        let sources: Vec<(&str, &str)> = sources.iter().map(|source| ("lib", *source)).collect();
+        references_from(&sources)
+    }
+
+    /// Several targets' worth of source, each with the target kind
+    /// `cargo metadata` would report for it.
+    fn references_from(sources: &[(&str, &str)]) -> CrateReferences {
         let mut refs = CrateReferences::default();
-        for source in sources {
-            refs.add_target(&[ParsedFile {
-                path: PathBuf::from("/ws/src/lib.rs"),
-                ast: syn::parse_file(source).ok(),
-                module: Vec::new(),
-            }]);
+        for (kind, source) in sources {
+            add_one(
+                &mut refs,
+                kind,
+                PathBuf::from("/ws/src/lib.rs"),
+                syn::parse_file(source).ok(),
+            );
         }
         refs
+    }
+
+    /// One file, added as the sole file of a target of the given kind.
+    fn add_one(refs: &mut CrateReferences, kind: &str, path: PathBuf, ast: Option<syn::File>) {
+        let manifest = crate::cfg::tests_support::bare_package();
+        let matrix = crate::cfg::Matrix::default();
+        let gates = Gates::new(&matrix, &manifest);
+        refs.add_target(
+            &[ParsedFile {
+                path,
+                ast,
+                module: Vec::new(),
+            }],
+            &target(kind),
+            &gates,
+        );
+    }
+
+    fn target(kind: &str) -> Target {
+        Target {
+            name: "fixture".to_string(),
+            kind: vec![kind.to_string()],
+            src_path: PathBuf::from("/ws/src/lib.rs"),
+        }
     }
 
     fn dependency(name: &str) -> Dependency {
@@ -866,11 +1164,12 @@ mod tests {
         let mut refs = CrateReferences::default();
         // Nothing reads `probe.rs` itself — only the directory it names
         // matters, and `deps.rs` next to it certainly exists.
-        refs.add_target(&[ParsedFile {
-            path: Path::new(env!("CARGO_MANIFEST_DIR")).join("src/probe.rs"),
-            ast: syn::parse_file("include!(\"deps.rs\");\n").ok(),
-            module: Vec::new(),
-        }]);
+        add_one(
+            &mut refs,
+            "lib",
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("src/probe.rs"),
+            syn::parse_file("include!(\"deps.rs\");\n").ok(),
+        );
         let manifest = package(vec![dependency("proc-macro2")]);
         let (unused, warnings) = unused(&manifest, &refs);
         assert!(
@@ -889,11 +1188,12 @@ mod tests {
     #[test]
     fn documentation_included_from_a_file_is_read() {
         let mut refs = CrateReferences::default();
-        refs.add_target(&[ParsedFile {
-            path: Path::new(env!("CARGO_MANIFEST_DIR")).join("src/probe.rs"),
-            ast: syn::parse_file("#![doc = include_str!(\"deps.rs\")]\n").ok(),
-            module: Vec::new(),
-        }]);
+        add_one(
+            &mut refs,
+            "lib",
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("src/probe.rs"),
+            syn::parse_file("#![doc = include_str!(\"deps.rs\")]\n").ok(),
+        );
         let manifest = package(vec![dependency("proc-macro2")]);
         let (unused, warnings) = unused(&manifest, &refs);
         assert!(
@@ -925,11 +1225,12 @@ mod tests {
     #[test]
     fn documentation_from_a_missing_file_names_that_as_the_reason() {
         let mut refs = CrateReferences::default();
-        refs.add_target(&[ParsedFile {
-            path: Path::new(env!("CARGO_MANIFEST_DIR")).join("src/probe.rs"),
-            ast: syn::parse_file("#![doc = include_str!(\"no_such_file.md\")]\n").ok(),
-            module: Vec::new(),
-        }]);
+        add_one(
+            &mut refs,
+            "lib",
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("src/probe.rs"),
+            syn::parse_file("#![doc = include_str!(\"no_such_file.md\")]\n").ok(),
+        );
         let manifest = package(vec![dependency("dead_crate")]);
         let (unused, warnings) = unused(&manifest, &refs);
         assert!(unused.is_empty(), "unread docs may hold the only reference");
