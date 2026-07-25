@@ -183,6 +183,11 @@ impl CrateReferences {
         // `#![doc = include_str!("../README.md")]` splices in documentation
         // whose examples become doctests. Both are ordinary files most of the
         // time, and reading them beats giving up on the whole package.
+        if code.is_empty() && text.is_empty() {
+            return;
+        }
+        // Only a file that includes another can be this deep, so this is a
+        // cycle rather than an unusually deep chain: the rest is unread.
         if depth >= MAX_INCLUDE_DEPTH {
             self.hidden_code = Some(INCLUDE_REASON);
             return;

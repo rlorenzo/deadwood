@@ -62,11 +62,13 @@ pub struct Analysis {
     pub workspace_root: PathBuf,
     pub findings: Vec<Finding>,
     /// Non-fatal problems hit during analysis (unparsable files, unresolved
-    /// `mod` declarations). Whenever a warning could cause a detector to
-    /// report false positives — incomplete module resolution for dead files,
-    /// unseen definitions or paths for unused pub items — that detector is
-    /// skipped for the affected scope, so findings stay trustworthy but the
-    /// analysis is incomplete until the warnings are resolved.
+    /// `mod` declarations, dependency entries behind a `cfg`). Whenever
+    /// something could cause a detector to report false positives —
+    /// incomplete module resolution for dead files, unseen definitions or
+    /// paths for unused pub items, unseen code or an unevaluated gate for
+    /// dependencies — that detector is skipped for the affected scope, so
+    /// findings stay trustworthy but the analysis is incomplete until the
+    /// warnings are resolved.
     pub warnings: Vec<String>,
 }
 
