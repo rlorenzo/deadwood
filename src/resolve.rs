@@ -54,7 +54,13 @@
 //!   helper`). Findings are lost, never invented — fixing it means tracking
 //!   bindings per namespace, since a value binding must not silence a *type*
 //!   of the same name, and a wrong suppression would invent false positives.
-//! - `cfg` is not evaluated, so `#[cfg(test)]` code counts as a use.
+//! - Only the code in the analyzed build reaches here: items a `cfg` the
+//!   configured matrix rules out are removed before the symbol table is built
+//!   ([`crate::cfg`]), so they neither define nor use anything. With the
+//!   default matrix that is every item there is — every feature combination
+//!   and every target is analyzed, and `#[cfg(test)]` code counts as a use, so
+//!   an item only tests reach is not reported. `[cfg] test = false` is how a
+//!   project asks the other question.
 //! - Edition 2015 crate-relative `use` paths are supported by falling back to
 //!   the crate root; other 2015-only path forms may resolve to nothing (which
 //!   only ever hides findings).

@@ -2,8 +2,9 @@
 
 A codebase health analyzer for Rust workspaces. Deadwood finds maintainability
 issues that `rustc` and `clippy` stay quiet about — starting with dead module
-files, unused `pub` items, unused re-exports, and unused dependencies, in the
-spirit of Fallow/knip-style analyzers for other ecosystems.
+files, unused `pub` items, unused re-exports, unused dependencies, and `cfg`
+gates that can never hold, in the spirit of Fallow/knip-style analyzers for
+other ecosystems.
 
 **Status:** v0.1 — early, narrow, and honest about it. Tunable through a
 `deadwood.toml`, and correct without one. See
@@ -19,6 +20,7 @@ this project was bootstrapped from.
 | **Unused pub items** | Fully-`pub` fns, structs, enums, traits, type aliases, consts, statics, and unions that no path in the workspace resolves to | `dead_code` assumes `pub` items have external consumers |
 | **Unused re-exports** | `pub use` re-exports nothing in the workspace goes through, where outside code cannot reach them either | `unused_imports` only sees imports the crate itself does not use, not ones re-exported for nobody |
 | **Unused dependencies** | `Cargo.toml` entries — normal, dev, or build — whose crate name the declaring package's code never mentions | Cargo has no reason to look, and an unused entry still costs build time and supply-chain surface |
+| **Unsatisfiable `cfg` gates** | `#[cfg(...)]` gates that can hold in no build of the package, e.g. a `mod` behind a feature the manifest does not declare | The code is never compiled, so no lint ever sees it — and the gate reads as deliberate |
 
 What each check reports can be tuned by a `deadwood.toml` — see
 [Configuration](#configuration).
@@ -47,11 +49,29 @@ and often use a dependency that appears nowhere else), and not the
 `[features]` table, where `test = ["helper/all-features"]` is a use with no
 code behind it. Reachability is not required either: files no `mod`
 declaration names are read too, because `automod::dir!` and friends expand
-into declarations Deadwood never sees. Entries it cannot judge — optional
-ones, and `[target.'cfg(...)'.dependencies]`, both gated by a `cfg` Deadwood
-does not evaluate — are skipped with a warning instead of guessed at, as is
-any package pulling in code from a file that cannot be read
-(`include!(concat!(env!("OUT_DIR"), ...))`).
+into declarations Deadwood never sees. A package pulling in code from a file
+that cannot be read (`include!(concat!(env!("OUT_DIR"), ...))`) is skipped with
+a warning instead of guessed at.
+
+Optional and `[target.'cfg(...)'.dependencies]` entries are judged like any
+other, because the default analysis covers every feature combination and every
+target: the code that uses them *is* read, so a reference to one is found
+wherever it exists. Two cases are still skipped, out loud — an entry that no
+feature in a narrowed `cfg` matrix can turn on, and a
+`[target.'cfg(any())'.dependencies]` entry, which is how a crate pins the
+version of something it deliberately never compiles.
+
+`cfg` gates are evaluated rather than always followed, but the *default* set of
+builds analyzed is the union of every possibility — every feature on and off,
+every target, tests included — so a gate is followed whenever it could hold
+anywhere. That is exactly the old always-follow behavior;
+[Configuration](#configuration) is where a project narrows it. What the
+evaluation adds is a finding: a gate that can hold in *no* build, which in
+practice means one naming a feature the manifest does not declare. Such a gate
+is reported and the code behind it is still analyzed, so the new finding never
+moves the others. Gates Deadwood cannot read at all —
+`cfg(accessible(..))`, a `cfg` a build script sets, a `cfg_attr` indirection —
+are followed as before.
 
 Re-exports get one extra filter, because a `pub use` exists *only* to expose a
 name outward: one that is reachable from a library's crate root (`pub use
@@ -67,6 +87,9 @@ $ cargo run -- check path/to/workspace
 Dead files:
   src/orphan.rs: not reachable from any target of package `simple` via `mod` declarations
 
+Unsatisfiable cfg gates:
+  src/lib.rs:14: `#[cfg(feature = "legacy")]` can never hold: package `demo` declares no feature `legacy`
+
 Unused public items:
   src/lib.rs:3: pub fn `entry` is never referenced by any resolved path in this workspace
   src/lib.rs:7: pub fn `dead_fn` is never referenced by any resolved path in this workspace
@@ -77,7 +100,7 @@ Unused re-exports:
 Unused dependencies:
   Cargo.toml: dev-dependency `tempfile` is never referenced by any target of package `demo`
 
-5 finding(s) in workspace `/path/to/workspace`.
+6 finding(s) in workspace `/path/to/workspace`.
 ```
 
 - `deadwood check [PATH]` — analyze the package/workspace at `PATH` (default `.`)
@@ -95,8 +118,9 @@ Requires `cargo` on `PATH` (workspace discovery shells out to
 Deadwood needs no configuration, and with no `deadwood.toml` present it
 behaves exactly as described above. The file exists to express what the
 analysis cannot infer: which files are not yours to fix, which checks you are
-ready to enforce, which crates have consumers Deadwood cannot see, and which
-manifest entries are load bearing without being named in code.
+ready to enforce, which crates have consumers Deadwood cannot see, which
+manifest entries are load bearing without being named in code, and which
+builds — features, targets, tests — you actually care about.
 
 It is looked for by walking up from the analyzed path to the workspace root,
 and the nearest one wins; `--config PATH` overrides the search and fails if
@@ -121,6 +145,7 @@ dead_file = "deny"
 unused_pub_item = "warn"
 unused_reexport = "warn"
 unused_dependency = "deny"
+unsatisfiable_cfg = "deny"
 
 # Crates and items whose `pub` surface is API rather than leftovers. Deadwood
 # only sees consumers inside the workspace, so for a published library this is
@@ -143,9 +168,31 @@ allow = ["getrandom", "openssl"]
 # Exempt only in the package named.
 [dependencies.allow-in]
 my-app = ["vendored-native"]
+
+# Which builds to analyze. Every key here *narrows* the analysis, and omitting
+# one means "not narrowed" rather than "empty": the default is the union of
+# every possibility, which is what makes an absent `[cfg]` section a no-op.
+[cfg]
+# Feature names to treat as enabled, closed over the features they enable, in
+# every package. `#[cfg(feature = "...")]` code behind anything else is not
+# analyzed at all.
+# Default (key omitted): every feature may be on or off, so every gate holds
+# somewhere. `features = []` is different — it is the build with none of them.
+features = ["default", "serde"]
+
+# `target_os` values to analyze, which also decide `cfg(unix)`, `cfg(windows)`
+# and `target_family`. Other target predicates (`target_arch`, `target_env`,
+# ...) are not modelled and are never narrowed.
+# Default: every target is possible.
+target-os = ["linux", "macos"]
+
+# Whether `#[cfg(test)]` code is part of the build being analyzed. With it on,
+# a test is a use, so an item only tests reach is not reported.
+# Default: true.
+test = true
 ```
 
-Three things are worth knowing about how these behave.
+Four things are worth knowing about how these behave.
 
 **`ignore` suppresses findings, not evidence.** An ignored file is still read,
 and the paths in it still count as uses. Generated code that calls your
@@ -166,6 +213,16 @@ finding does not exist: it is absent from the output, the JSON, and the count.
 is not an error — the list means "do not judge this", not "assert this is
 unused".
 
+**`cfg` narrows what is analyzed, not what is reported.** Code the matrix
+leaves out is not read, so it neither defines nor uses anything — and it is not
+a dead file either, because nothing reaches it only in the sense that this
+build does not contain it. That is the lever's real cost and its real value:
+`test = false` turns a test-only helper into an unused-pub finding, which is
+either the question you wanted answered or a page of noise, depending on the
+project. The `unsatisfiable_cfg` finding is the one thing the matrix does *not*
+affect — a gate is judged impossible against every build there could be, so
+narrowing the matrix never invents one and never silences one.
+
 Configuration mistakes are hard failures (exit 2), including unknown keys. A
 `deadwood.toml` that quietly does nothing because of a typo is worse than none
 at all, so a misspelled key names itself, its file, and the keys that do exist:
@@ -176,7 +233,7 @@ error: invalid config file `deadwood.toml`: TOML parse error at line 1, column 1
   |
 1 | ignor = ["vendor"]
   | ^^^^^
-unknown field `ignor`, expected one of `ignore`, `severity`, `public-api`, `dependencies`
+unknown field `ignor`, expected one of `ignore`, `severity`, `public-api`, `dependencies`, `cfg`
 ```
 
 ## Development
@@ -202,20 +259,29 @@ toolchain is pinned to `stable` with `clippy` and `rustfmt` via
 2. **Module-tree resolution** — from each target root, `mod` declarations
    (including nested inline modules and `#[path]`) are followed to the files
    they name; everything reached is parsed with `syn`, and each file records
-   the module path its items live in (`src/modtree.rs`).
-3. **Usage resolution** — every target is a crate. For each one, a symbol
+   the module path its items live in (`src/modtree.rs`). A `mod` behind a
+   `cfg` the configured build matrix rules out is not followed, and neither it
+   nor the files under it can be reported dead.
+3. **`cfg` evaluation** — each gate is answered against two matrices
+   (`src/cfg.rs`): the configured one, which decides whether the code is part
+   of the build being analyzed, and every build there could be, which decides
+   whether the gate can hold at all. Items the first rules out are pruned from
+   the AST, so the detectors below simply never see them; gates the second
+   rules out are the `unsatisfiable_cfg` findings.
+4. **Usage resolution** — every target is a crate. For each one, a symbol
    table maps its modules to the items they define, the `use` aliases they
    bind, and the globs they import; then every path in every file is resolved
    from the module it is written in, marking what it names (`src/resolve.rs`).
-4. **Detectors** — dead files are `src/**.rs` minus the reachable set; unused
-   pub items and re-exports are the definitions no resolved path reached
-   (`src/unused.rs`); unused dependencies are the manifest entries whose crate
-   name appears nowhere in the package, reachable or not (`src/deps.rs`).
-5. **Configuration** — `deadwood.toml` is applied in one pass over the
+5. **Detectors** — dead files are `src/**.rs` minus the reachable set and the
+   `cfg`-excluded set; unused pub items and re-exports are the definitions no
+   resolved path reached (`src/unused.rs`); unused dependencies are the
+   manifest entries whose crate name appears nowhere in the package, reachable
+   or not (`src/deps.rs`).
+6. **Configuration** — `deadwood.toml` is applied in one pass over the
    findings, so `ignore` and `[severity]` cover every detector identically
-   (`src/config.rs`); `public-api` and the dependency allowlist are consulted
-   by the detectors they belong to.
-6. **Reporting** — grouped text or JSON (`src/report.rs`).
+   (`src/config.rs`); `public-api`, the dependency allowlist, and the `cfg`
+   matrix are consulted by the detectors they belong to.
+7. **Reporting** — grouped text or JSON (`src/report.rs`).
 
 ## Known limitations (tracked, not hidden)
 
@@ -231,9 +297,22 @@ toolchain is pinned to `stable` with `clippy` and `rustfmt` via
 - A glob import that leads outside the workspace makes its module opaque:
   names not otherwise in scope there count as uses of every item with that
   name. Globs within the workspace are expanded and hide nothing.
-- `cfg` is not evaluated. `cfg`-gated `mod`s are always followed, so
-  platform-specific files are never reported dead, and `#[cfg(test)]` code
-  counts as a use — an item used only by tests is not reported.
+- `cfg` evaluation covers `feature`, `test`, `target_os`, `target_family`,
+  `unix` and `windows`, and `not`/`all`/`any` over those. Every other
+  predicate — `target_arch`, `debug_assertions`, a `cfg` a build script sets,
+  `cfg(accessible(..))`, anything reached through `cfg_attr` — reads as
+  "could go either way", so the code behind it is analyzed exactly as before.
+- Gate evaluation does not track correlation between atoms:
+  `all(feature = "a", not(feature = "a"))` reads as satisfiable even though it
+  provably is not. The finding is lost, never invented.
+- Under the default matrix `#[cfg(test)]` code counts as a use, so an item
+  only tests reach is not reported. `[cfg] test = false` asks the other
+  question, and the answers are `unused_pub_item` findings rather than a kind
+  that says "test-only" — proving that would need reachability analysis
+  Deadwood does not have yet (`docs/SCOPE.md` has the reasoning).
+- An unsatisfiable gate is reported where it is written, and only for the
+  outermost gate; enum variants and struct fields are not walked, and neither
+  are items inside function bodies.
 - `include!()`-ed files are not tracked and may be reported as dead.
 - A `pub` item with consumers outside the workspace looks identical to a dead
   one; for library crates, these findings are advisory until the crate or its
@@ -254,6 +333,9 @@ toolchain is pinned to `stable` with `clippy` and `rustfmt` via
   unpacked from a published `.crate` archive usually has `tests/` and
   `benches/` stripped, so the dev-dependencies they used are reported —
   correctly for that tree, not for the repository it came from.
+- A `[target.'...'.dependencies]` table keyed by a bare target triple rather
+  than a `cfg(...)` expression is not modelled, so narrowing `target-os` does
+  not reach its entries; they are judged as if always built.
 
 ## License
 

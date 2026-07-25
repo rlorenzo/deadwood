@@ -88,7 +88,8 @@ pub struct Analysis {
     pub workspace_root: PathBuf,
     pub findings: Vec<Finding>,
     /// Non-fatal problems hit during analysis (unparsable files, unresolved
-    /// `mod` declarations, dependency entries behind a `cfg`). Whenever
+    /// `mod` declarations, dependency entries the configured `cfg` matrix
+    /// leaves out of the build being analyzed). Whenever
     /// something could cause a detector to report false positives —
     /// incomplete module resolution for dead files, unseen definitions or
     /// paths for unused pub items, unseen code or an unevaluated gate for
