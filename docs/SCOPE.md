@@ -42,22 +42,59 @@ attribute arguments, globs leading outside the workspace, ambiguity of any
 kind) count as uses of every item with that name. Resolution stays syntactic
 — no rustc or rust-analyzer.
 
+## Phase 2 — unused dependency detection (shipped)
+
+A `Cargo.toml` entry whose crate name the declaring package's code never
+mentions is reported (`src/deps.rs`), as `unused_dependency`. The semantics
+that were actually implemented, since several were judgement calls:
+
+- **Any mention counts, through any channel** — path heads, `extern crate`,
+  identifiers in macro input, identifiers in attributes including words
+  inside their strings, words in doc comments (doc examples are compiled as
+  doctests), and dependency names in the manifest's own `[features]` table
+  (`dep:foo`, `foo/bar`), which is a use with no code behind it.
+- **Reachability is not required.** Unlike the other detectors, this one also
+  reads `.rs` files no `mod` declaration names, because macros expand into
+  `mod` declarations Deadwood never sees (`automod::dir!`). `include!` and
+  `#![doc = include_str!(..)]` are followed for the same reason.
+- **Kinds are reported, not scoped.** An entry is judged against every target
+  of its package rather than only the ones that can legitimately see it.
+  Scoping per kind would turn "declared in the wrong table" into an
+  unused-dependency finding, which reads as a false positive; the message
+  still names the table to edit. A dev-dependency used only in `tests/` and a
+  build-dependency used only in `build.rs` are both seen, because those
+  targets are scanned like any other.
+- **What cannot be judged is skipped out loud**: optional and
+  `[target.'cfg(...)'.dependencies]` entries (both gated by a `cfg` we do not
+  evaluate — item 2 below), packages whose module tree did not resolve, and
+  packages including code from a file that cannot be read.
+
+Known gap: a dependency declared only to enable a feature of a transitive
+dependency (`getrandom = { features = ["js"] }`) is named by nothing and is
+reported. The intended answer is an allowlist in the config file (item 1),
+tracked in [#9](https://github.com/rlorenzo/deadwood/issues/9).
+
 ## Next (sequenced, one slice at a time)
 
-1. **Unused dependency detection** — compare `Cargo.toml` dependencies
-   against `use`/path references per crate.
-2. **Config file** (`deadwood.toml`): ignore globs, per-check severity,
-   public-API allowlist for library crates.
-3. **`cfg` awareness** — evaluate simple `cfg(feature = ...)` / platform
-   gates instead of always following them.
-4. **Baseline/suppress file** for adopting Deadwood on brownfield codebases.
-5. **Reachability over reference counting** — an item referenced only by
+1. **Config file** (`deadwood.toml`): ignore globs, per-check severity,
+   public-API allowlist for library crates, and an allowlist for dependency
+   entries kept for their side effects.
+2. **`cfg` awareness** — evaluate simple `cfg(feature = ...)` / platform
+   gates instead of always following them. Unblocks the optional and
+   platform-gated dependency entries phase 2 skips.
+3. **Baseline/suppress file** for adopting Deadwood on brownfield codebases.
+4. **Reachability over reference counting** — an item referenced only by
    other dead items is still dead; today each item is judged on whether
    anything names it, not on whether that something is alive.
-6. **Lexical scope tracking** — a local, parameter, or generic parameter
+5. **Lexical scope tracking** — a local, parameter, or generic parameter
    sharing a name with a module item currently resolves to that item and
    keeps it alive. Costs findings only; the fix must be namespace-aware, as
    a value binding must not silence a type of the same name.
+6. **Misplaced dependency kinds** — a `[dependencies]` entry used only by
+   tests belongs in `[dev-dependencies]`. Deliberately not folded into the
+   unused-dependency check, whose question is whether an entry is named at
+   all; this is a separate finding with its own noise profile, tracked in
+   [#10](https://github.com/rlorenzo/deadwood/issues/10).
 
 ## Explicitly out of scope for now
 
@@ -66,7 +103,8 @@ kind) count as uses of every item with that name. Resolution stays syntactic
 - **Architecture analysis** (layering, cycles, module coupling metrics).
 - **IDE integration, LSP, or any UI/visual reporting** — the JSON output is
   the seam where these will attach later.
-- **Plugin system** — no third detector exists yet; premature.
+- **Plugin system** — three detectors share one analysis pass and one report;
+  nothing yet wants to be pluggable.
 - **Semantic (type-level) analysis** via rustc internals or rust-analyzer —
   revisit once the syntactic approach hits its accuracy ceiling (tracked in
   `docs/ENVIRONMENT.md`).
@@ -78,6 +116,8 @@ kind) count as uses of every item with that name. Resolution stays syntactic
   uninstalled.
 - Every limitation is documented where it lives (module docs) and in the
   README.
-- New dependencies only for confirmed problems; std + `syn` + `serde` +
-  `clap` + `anyhow` is the current ceiling. (Path resolution needed no new
-  crate, only `syn`'s `visit` feature.)
+- New dependencies only for confirmed problems; std + `syn` + `proc-macro2` +
+  `serde` + `serde_json` + `clap` + `anyhow` is the current ceiling. (Path
+  resolution needed no new crate, only `syn`'s `visit` feature; unused
+  dependency detection needed none at all — `cargo metadata` already reports
+  the manifest, so no TOML parser was pulled in.)

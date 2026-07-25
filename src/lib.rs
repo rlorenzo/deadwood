@@ -11,11 +11,15 @@
 //!   established by resolving `use` declarations and qualified paths against
 //!   a per-crate symbol table (`src/resolve.rs`), with a conservative
 //!   fallback wherever resolution is not possible (`src/unused.rs`).
+//! - **Unused dependencies**: `Cargo.toml` entries whose crate name a
+//!   package's code never mentions, in any target and through any channel we
+//!   can see (`src/deps.rs`).
 
 pub mod metadata;
 pub mod modtree;
 pub mod report;
 
+mod deps;
 mod resolve;
 mod unused;
 
@@ -35,6 +39,8 @@ pub enum FindingKind {
     UnusedPubItem,
     /// A `pub use` re-export no resolved path in the workspace goes through.
     UnusedReexport,
+    /// A `Cargo.toml` dependency the declaring package's code never names.
+    UnusedDependency,
 }
 
 /// A single issue reported by the analyzer.
@@ -56,11 +62,13 @@ pub struct Analysis {
     pub workspace_root: PathBuf,
     pub findings: Vec<Finding>,
     /// Non-fatal problems hit during analysis (unparsable files, unresolved
-    /// `mod` declarations). Whenever a warning could cause a detector to
-    /// report false positives — incomplete module resolution for dead files,
-    /// unseen definitions or paths for unused pub items — that detector is
-    /// skipped for the affected scope, so findings stay trustworthy but the
-    /// analysis is incomplete until the warnings are resolved.
+    /// `mod` declarations, dependency entries behind a `cfg`). Whenever
+    /// something could cause a detector to report false positives —
+    /// incomplete module resolution for dead files, unseen definitions or
+    /// paths for unused pub items, unseen code or an unevaluated gate for
+    /// dependencies — that detector is skipped for the affected scope, so
+    /// findings stay trustworthy but the analysis is incomplete until the
+    /// warnings are resolved.
     pub warnings: Vec<String>,
 }
 
@@ -77,6 +85,9 @@ pub fn analyze(path: &Path) -> Result<Analysis> {
     // Package name to its library crate, so a dependency rename can be
     // attached to the crate the alias actually names.
     let mut lib_of_package: HashMap<&str, usize> = HashMap::new();
+    // Crate names each package's code refers to, for the dependency check.
+    // Packages whose module tree did not resolve are left out entirely.
+    let mut references: Vec<(&metadata::Package, deps::CrateReferences)> = Vec::new();
 
     for package in &meta.packages {
         let manifest_dir = package
@@ -86,11 +97,15 @@ pub fn analyze(path: &Path) -> Result<Analysis> {
 
         let warnings_before = warnings.len();
         let mut package_reachable: HashSet<PathBuf> = HashSet::new();
+        let mut package_references = deps::CrateReferences::default();
         for target in &package.targets {
             let files = modtree::resolve(&target.src_path, &mut warnings);
             for file in &files {
                 package_reachable.insert(file.path.clone());
             }
+            // Every target of the package can name a dependency, including
+            // its tests, examples, benches, and build script.
+            package_references.add_target(&files);
             let names = crate_names(package, target);
             if !names.is_empty() {
                 lib_of_package.insert(package.name.as_str(), crates.len());
@@ -101,13 +116,24 @@ pub fn analyze(path: &Path) -> Result<Analysis> {
         // An unparsable file or unresolved `mod` means the reachable set is
         // incomplete, and files it would have reached would be reported as
         // false-positive dead files — skip the check for this package.
+        // A file we could not read or parse may hold the only reference to a
+        // dependency, so that check is skipped for the package too.
         if warnings.len() > warnings_before {
             warnings.push(format!(
                 "dead-file check skipped for package `{}`: module resolution was incomplete (see warnings above)",
                 package.name
             ));
+            warnings.push(format!(
+                "unused-dependency check skipped for package `{}`: module resolution was incomplete (see warnings above)",
+                package.name
+            ));
             continue;
         }
+        // Reachability is the wrong question for a dependency: a file that no
+        // `mod` declaration names can still be compiled (a macro that expands
+        // to `mod`s, a `cfg` we skipped) and can hold the only reference.
+        package_references.add_unreached_sources(manifest_dir, &package_reachable);
+        references.push((package, package_references));
 
         // Dead-file detection only covers src/: tests/, examples/, and
         // benches/ roots are auto-discovered targets and already covered
@@ -166,6 +192,33 @@ pub fn analyze(path: &Path) -> Result<Analysis> {
         warnings.push(
             "unused-pub check skipped: module resolution was incomplete (see warnings above)"
                 .to_string(),
+        );
+    }
+
+    // Last, because the warnings it raises about entries it cannot judge
+    // (optional, platform-gated) say nothing about the checks above, which
+    // gate themselves on the warning list being clean.
+    for (package, package_references) in &references {
+        let manifest = relative_to(&package.manifest_path, &meta.workspace_root);
+        findings.extend(
+            deps::find_unused(package, package_references, &mut warnings)
+                .into_iter()
+                .map(|entry| Finding {
+                    kind: FindingKind::UnusedDependency,
+                    file: manifest.clone(),
+                    line: None,
+                    message: format!(
+                        "{} `{}` is never referenced by any target of package `{}`",
+                        match entry.kind {
+                            metadata::DependencyKind::Normal => "dependency",
+                            metadata::DependencyKind::Development => "dev-dependency",
+                            metadata::DependencyKind::Build => "build-dependency",
+                        },
+                        entry.name,
+                        package.name
+                    ),
+                    name: Some(entry.name),
+                }),
         );
     }
 

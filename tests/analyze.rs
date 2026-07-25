@@ -130,6 +130,16 @@ fn detectors_skip_when_module_resolution_is_incomplete() {
         "the unused-pub skip must be surfaced: {:?}",
         analysis.warnings
     );
+    // A file that failed to parse could hold the only reference to a
+    // dependency, so that check skips the package too.
+    assert!(
+        analysis
+            .warnings
+            .iter()
+            .any(|w| w.contains("unused-dependency check skipped")),
+        "the unused-dependency skip must be surfaced: {:?}",
+        analysis.warnings
+    );
 }
 
 /// A file included by several workspace members via `#[path]` is a module of
@@ -250,6 +260,98 @@ fn paths_resolve_across_workspace_members() {
         ],
         "`start` and `Handle` are reached from `app`, and `aliased_only` from \
          `aliased` through the `motor` dependency rename; none may be reported"
+    );
+}
+
+/// Dependencies a package declares but never names are reported, and every
+/// channel through which one *can* be named keeps its entry alive: plain
+/// paths, a rename, a re-export, `extern crate`, macro bodies, attribute
+/// paths and attribute strings, a doc example, a test target, a build script,
+/// a file only a macro expansion declares, and the `[features]` table.
+/// The entries Deadwood cannot judge are skipped out loud.
+#[test]
+fn unused_dependencies_are_reported_and_every_reference_channel_counts() {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/deps");
+    let analysis = analyze(&fixture).expect("analysis should succeed on the fixture");
+
+    assert_eq!(
+        reported(&analysis, FindingKind::UnusedDependency),
+        vec![
+            // `[dependencies]`: named nowhere in the package.
+            ("Cargo.toml".to_string(), "unused_crate"),
+            // `[dev-dependencies]`: the other one is used by `tests/it.rs`.
+            ("Cargo.toml".to_string(), "unused_dev_crate"),
+            // `[build-dependencies]`: the other one is used by `build.rs`.
+            ("Cargo.toml".to_string(), "unused_build_crate"),
+        ],
+        "every other entry is named somewhere Deadwood has to look"
+    );
+
+    // Two channels with no reachable code behind them at all: a file that
+    // only `automod::dir!` declares, and a `[features]` entry forwarding to a
+    // dependency. Both were false positives before they were closed.
+    for entry in ["regression_only_crate", "feature_only_crate"] {
+        assert!(
+            !analysis
+                .findings
+                .iter()
+                .any(|f| f.name.as_deref() == Some(entry)),
+            "`{entry}` is named where module resolution cannot see it: {:?}",
+            analysis.findings
+        );
+    }
+
+    // The rename is reported (and matched) by the manifest key, not by the
+    // package name behind it.
+    assert!(
+        !analysis
+            .findings
+            .iter()
+            .any(|f| f.name.as_deref() == Some("engine-widget")),
+        "a renamed entry is judged by its alias: {:?}",
+        analysis.findings
+    );
+
+    // Feature- and platform-gated entries are not judgeable until `cfg`
+    // evaluation lands, and are skipped out loud rather than guessed at.
+    for entry in ["optional_crate", "platform_crate"] {
+        assert!(
+            analysis
+                .warnings
+                .iter()
+                .any(|w| w.contains(entry) && w.contains("unused-dependency check skipped")),
+            "`{entry}` must be skipped with a warning: {:?}",
+            analysis.warnings
+        );
+        assert!(
+            !analysis
+                .findings
+                .iter()
+                .any(|f| f.name.as_deref() == Some(entry)),
+            "`{entry}` must not be reported: {:?}",
+            analysis.findings
+        );
+    }
+
+    // A skipped dependency entry says nothing about the other detectors, so
+    // they must still run: the fixture's unused pub items are still reported.
+    assert!(
+        !reported(&analysis, FindingKind::UnusedPubItem).is_empty(),
+        "dependency warnings must not silence the unused-pub check: {:?}",
+        analysis.warnings
+    );
+}
+
+/// Path dependencies between workspace members are dependencies like any
+/// other: `app` uses `engine_core::`, `aliased` uses the `motor` rename, and
+/// neither entry may be reported.
+#[test]
+fn dependencies_between_workspace_members_are_seen() {
+    let analysis = analyze_fixture("crosscrate");
+    assert_eq!(
+        reported(&analysis, FindingKind::UnusedDependency),
+        Vec::new(),
+        "both members name the crate they depend on"
     );
 }
 
