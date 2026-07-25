@@ -253,8 +253,10 @@ impl PublicApi {
     ///
     /// `krate` is the library crate the item belongs to, and is `None` for
     /// targets nothing outside the workspace can name at all (bins, tests,
-    /// examples, benches) — those have no external consumers to protect, so
-    /// no listing applies to them.
+    /// examples, benches). A `crates` listing never covers those — there are
+    /// no external consumers to declare — and their `item_path` carries no
+    /// crate segment for the same reason, so a listing written the documented
+    /// way (`my-crate::module::Item`) cannot match one either.
     pub fn covers(&self, krate: Option<&str>, item_path: &str) -> bool {
         if let Some(krate) = krate
             && self.crates.contains(&normalize(krate))
