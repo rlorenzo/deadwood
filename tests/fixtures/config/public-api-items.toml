@@ -1,0 +1,5 @@
+# Only one module's items are API. Everything else in the crate — including
+# `surface::another_entry` one level up and `surface::internal::*` behind a
+# private module — is still judged.
+[public-api]
+items = ["surface::api::*"]

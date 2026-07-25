@@ -4,13 +4,31 @@
 
 use std::path::{Path, PathBuf};
 
+use deadwood::config::Severity;
 use deadwood::{Analysis, FindingKind, analyze};
+
+fn fixtures() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
+}
 
 /// Analyze the named fixture, asserting the run was complete: any warning
 /// makes a detector skip, which would make the assertions below vacuous.
 fn analyze_fixture(name: &str) -> Analysis {
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
-    let analysis = analyze(&fixture.join(name)).expect("analysis should succeed on the fixture");
+    let analysis =
+        analyze(&fixtures().join(name), None).expect("analysis should succeed on the fixture");
+    assert!(
+        analysis.warnings.is_empty(),
+        "unexpected warnings: {:?}",
+        analysis.warnings
+    );
+    analysis
+}
+
+/// Analyze a fixture under one of the config files stored beside it.
+fn analyze_configured(name: &str, config: &str) -> Analysis {
+    let fixture = fixtures().join(name);
+    let analysis = analyze(&fixture, Some(&fixture.join(config)))
+        .unwrap_or_else(|err| panic!("`{config}` should load: {err:#}"));
     assert!(
         analysis.warnings.is_empty(),
         "unexpected warnings: {:?}",
@@ -99,7 +117,7 @@ fn path_attr_module_children_resolve_in_stem_directory() {
 #[test]
 fn detectors_skip_when_module_resolution_is_incomplete() {
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/broken");
-    let analysis = analyze(&fixture).expect("analysis should succeed on the fixture");
+    let analysis = analyze(&fixture, None).expect("analysis should succeed on the fixture");
 
     assert!(
         analysis.findings.is_empty(),
@@ -272,7 +290,7 @@ fn paths_resolve_across_workspace_members() {
 #[test]
 fn unused_dependencies_are_reported_and_every_reference_channel_counts() {
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/deps");
-    let analysis = analyze(&fixture).expect("analysis should succeed on the fixture");
+    let analysis = analyze(&fixture, None).expect("analysis should succeed on the fixture");
 
     assert_eq!(
         reported(&analysis, FindingKind::UnusedDependency),
@@ -372,4 +390,388 @@ fn paths_through_a_dependency_rename_resolve() {
         !unused.iter().any(|(_, name)| *name == "Handle"),
         "`Handle` is named through the alias as `motor::api::Handle`: {unused:?}"
     );
+}
+
+// -- configuration ---------------------------------------------------------
+//
+// The `config` fixture produces at least one finding of every kind with no
+// configuration at all. Each test below applies one setting and asserts what
+// it removed from that baseline, and — just as important — what it left.
+
+/// Names of every finding, kind by kind, so a config's effect can be stated as
+/// a difference from the unconfigured run.
+fn all_reported(analysis: &Analysis) -> Vec<(FindingKind, String, String)> {
+    analysis
+        .findings
+        .iter()
+        .map(|f| {
+            (
+                f.kind,
+                f.file.display().to_string(),
+                f.name.clone().unwrap_or_default(),
+            )
+        })
+        .collect()
+}
+
+/// The baseline the rest of this section is measured against, and the property
+/// the whole feature is built around: with no config file, nothing changes.
+/// Every finding is `deny`, exactly as before severity existed.
+#[test]
+fn a_workspace_with_no_config_file_behaves_exactly_as_before() {
+    let fixture = fixtures().join("config");
+    assert!(
+        !fixture.join("deadwood.toml").exists(),
+        "the baseline fixture must have no discoverable config"
+    );
+
+    let analysis = analyze_fixture("config");
+    assert_eq!(
+        all_reported(&analysis)
+            .into_iter()
+            .map(|(kind, file, name)| (kind, format!("{file}:{name}")))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                FindingKind::UnusedDependency,
+                "app/Cargo.toml:stale_crate".into()
+            ),
+            (
+                FindingKind::UnusedDependency,
+                "app/Cargo.toml:vendored_native".into()
+            ),
+            (
+                FindingKind::UnusedDependency,
+                "surface/Cargo.toml:sidecar".into()
+            ),
+            (
+                FindingKind::UnusedPubItem,
+                "surface/src/api.rs:public_entry".into()
+            ),
+            (
+                FindingKind::UnusedPubItem,
+                "surface/src/generated.rs:generated_thing".into()
+            ),
+            (
+                FindingKind::UnusedPubItem,
+                "surface/src/generated.rs:call_helper".into()
+            ),
+            (
+                FindingKind::UnusedReexport,
+                "surface/src/internal.rs:Buried".into()
+            ),
+            (
+                FindingKind::UnusedPubItem,
+                "surface/src/internal.rs:internal_leftover".into()
+            ),
+            (
+                FindingKind::UnusedPubItem,
+                "surface/src/lib.rs:another_entry".into()
+            ),
+            (FindingKind::DeadFile, "surface/src/orphan.rs:".into()),
+        ]
+    );
+    assert!(
+        analysis
+            .findings
+            .iter()
+            .all(|f| f.severity == Severity::Deny),
+        "every kind defaults to deny: {:?}",
+        analysis.findings
+    );
+    assert!(
+        analysis.has_denied(),
+        "an unconfigured run with findings fails"
+    );
+}
+
+/// `ignore` removes findings *about* the matched files, and nothing else. The
+/// second assertion is the load-bearing one: `generated.rs` holds the only
+/// call to `api::helper`, so dropping its references along with its findings
+/// would invent a false positive next door — turning every `ignore` entry into
+/// a liability.
+#[test]
+fn ignore_patterns_suppress_findings_without_dropping_references() {
+    let analysis = analyze_configured("config", "ignore.toml");
+
+    assert!(
+        !analysis
+            .findings
+            .iter()
+            .any(|f| f.file.starts_with("surface/src/generated.rs")
+                || f.file.starts_with("surface/src/orphan.rs")),
+        "no finding may be reported about an ignored file: {:?}",
+        analysis.findings
+    );
+    assert!(
+        !analysis
+            .findings
+            .iter()
+            .any(|f| f.name.as_deref() == Some("helper")),
+        "an ignored file's references still count: {:?}",
+        analysis.findings
+    );
+    // Everything outside the ignored files is untouched.
+    assert_eq!(
+        reported(&analysis, FindingKind::UnusedPubItem),
+        vec![
+            ("surface/src/api.rs".to_string(), "public_entry"),
+            ("surface/src/internal.rs".to_string(), "internal_leftover"),
+            ("surface/src/lib.rs".to_string(), "another_entry"),
+        ]
+    );
+}
+
+/// The one place `ignore` has to reach inside module resolution. A live file
+/// declares `mod generated;` for a file a build step would have written; it is
+/// not there. Unignored, that is an unresolved module, which skips every check
+/// for the package — so an ignored file would silence the code around it.
+///
+/// This fixture also pins config *discovery*: its `deadwood.toml` is found by
+/// walking up, not passed with `--config`.
+#[test]
+fn an_ignored_module_declaration_does_not_skip_the_package() {
+    let discovered = analyze_fixture("ignoremod");
+    assert!(
+        discovered.warnings.is_empty(),
+        "an ignored module is not an unresolved one: {:?}",
+        discovered.warnings
+    );
+    assert_eq!(
+        reported(&discovered, FindingKind::UnusedPubItem),
+        vec![("src/lib.rs".to_string(), "leftover")],
+        "the rest of the package must still be checked"
+    );
+
+    // The contrast, with a config that sets nothing: the declaration is an
+    // unresolved module again, and every check for the package stands down.
+    let fixture = fixtures().join("ignoremod");
+    let unconfigured = analyze(&fixture, Some(&fixture.join("empty.toml"))).unwrap();
+    assert!(
+        unconfigured.findings.is_empty(),
+        "incomplete resolution must report nothing: {:?}",
+        unconfigured.findings
+    );
+    assert!(
+        unconfigured
+            .warnings
+            .iter()
+            .any(|w| w.contains("has no file at")),
+        "the unresolved module must be surfaced: {:?}",
+        unconfigured.warnings
+    );
+}
+
+/// `warn` keeps every finding visible and stops it failing the run. That split
+/// is the point: a project can adopt a check before it is clean.
+#[test]
+fn warn_severity_reports_everything_and_fails_nothing() {
+    let baseline = analyze_fixture("config");
+    let analysis = analyze_configured("config", "severity-warn.toml");
+
+    assert_eq!(
+        all_reported(&analysis),
+        all_reported(&baseline),
+        "`warn` changes no finding, only what it costs"
+    );
+    assert!(
+        analysis
+            .findings
+            .iter()
+            .all(|f| f.severity == Severity::Warn),
+        "{:?}",
+        analysis.findings
+    );
+    assert!(
+        !analysis.has_denied(),
+        "a run with only `warn` findings succeeds"
+    );
+
+    let text = deadwood::report::render_text(&analysis);
+    assert!(text.contains("Dead files (warn):"), "{text}");
+    assert!(text.contains("0 deny, 10 warn"), "{text}");
+}
+
+/// `off` is stronger than `warn`: the finding never exists, so it is absent
+/// from the text, the JSON, and the count.
+#[test]
+fn off_severity_removes_findings_entirely() {
+    let analysis = analyze_configured("config", "severity-off.toml");
+
+    assert!(
+        reported(&analysis, FindingKind::DeadFile).is_empty(),
+        "{:?}",
+        analysis.findings
+    );
+    assert!(
+        reported(&analysis, FindingKind::UnusedDependency).is_empty(),
+        "{:?}",
+        analysis.findings
+    );
+    // Kinds the file does not mention keep the default.
+    assert!(
+        analysis
+            .findings
+            .iter()
+            .all(|f| f.severity == Severity::Deny),
+        "{:?}",
+        analysis.findings
+    );
+    assert!(analysis.has_denied());
+
+    let text = deadwood::report::render_text(&analysis);
+    assert!(!text.contains("Dead files"), "{text}");
+    assert!(
+        !text.contains("deny,"),
+        "with nothing downgraded the summary keeps its original shape:\n{text}"
+    );
+}
+
+/// Severity is per kind, so a run can carry both at once — and one surviving
+/// `deny` finding is enough to fail it.
+#[test]
+fn a_single_deny_finding_fails_a_run_full_of_warnings() {
+    let analysis = analyze_configured("config", "severity-mixed.toml");
+
+    let dead_file = analysis
+        .findings
+        .iter()
+        .find(|f| f.kind == FindingKind::DeadFile)
+        .expect("the dead file is downgraded, not removed");
+    assert_eq!(dead_file.severity, Severity::Warn);
+    assert!(
+        reported(&analysis, FindingKind::UnusedPubItem).is_empty(),
+        "{:?}",
+        analysis.findings
+    );
+    assert!(
+        analysis.has_denied(),
+        "the re-export and dependency findings are still deny: {:?}",
+        analysis.findings
+    );
+}
+
+/// The noise lever the whole setting exists for: one line saying "this crate's
+/// surface is the API" instead of an entry per item.
+#[test]
+fn a_public_api_crate_listing_silences_that_crates_surface() {
+    let analysis = analyze_configured("config", "public-api-crate.toml");
+
+    assert!(
+        reported(&analysis, FindingKind::UnusedPubItem).is_empty(),
+        "the listed crate's pub items are declared API: {:?}",
+        analysis.findings
+    );
+    assert!(
+        reported(&analysis, FindingKind::UnusedReexport).is_empty(),
+        "a re-export is surface too: {:?}",
+        analysis.findings
+    );
+    // The other detectors are untouched — this is not a blanket mute.
+    assert_eq!(
+        reported(&analysis, FindingKind::DeadFile),
+        vec![("surface/src/orphan.rs".to_string(), "")]
+    );
+    assert_eq!(reported(&analysis, FindingKind::UnusedDependency).len(), 3);
+}
+
+/// An `items` glob covers what it names and no more, so a project can declare
+/// one module its API without losing the check everywhere else.
+#[test]
+fn public_api_item_globs_cover_only_what_they_name() {
+    let analysis = analyze_configured("config", "public-api-items.toml");
+
+    assert_eq!(
+        reported(&analysis, FindingKind::UnusedPubItem),
+        vec![
+            // `surface::api::*` covers `public_entry`, and nothing below.
+            ("surface/src/generated.rs".to_string(), "generated_thing"),
+            ("surface/src/generated.rs".to_string(), "call_helper"),
+            ("surface/src/internal.rs".to_string(), "internal_leftover"),
+            ("surface/src/lib.rs".to_string(), "another_entry"),
+        ],
+        "a single-segment `*` must not swallow other modules or the crate root"
+    );
+}
+
+/// Closes #9: entries that are load bearing without being named by any code.
+/// Workspace-wide and per-package lists both apply, and neither reaches an
+/// entry it does not name.
+#[test]
+fn allowlisted_dependency_entries_are_never_judged() {
+    let analysis = analyze_configured("config", "deps-allow.toml");
+
+    assert_eq!(
+        reported(&analysis, FindingKind::UnusedDependency),
+        vec![("app/Cargo.toml".to_string(), "stale_crate")],
+        "`sidecar` is allowed workspace-wide and `vendored_native` in `app`; \
+         the unlisted entry in the same manifest stays reported"
+    );
+}
+
+/// A configuration that does not do what it says is worse than none, so a
+/// misspelling stops the run with a message naming the file, the key, and the
+/// keys that do exist.
+#[test]
+fn a_malformed_config_fails_the_run_with_an_actionable_message() {
+    let fixture = fixtures().join("config");
+    let err = analyze(&fixture, Some(&fixture.join("broken.toml")))
+        .expect_err("a config error must not be survivable");
+    let message = format!("{err:#}");
+
+    assert!(message.contains("broken.toml"), "{message}");
+    assert!(message.contains("unknown field `ignor`"), "{message}");
+    assert!(message.contains("`ignore`"), "{message}");
+}
+
+/// A `--config` naming a file that is not there is an error too: silently
+/// falling back to the defaults would apply the wrong settings to a whole CI
+/// run, and the run would pass while checking something else.
+#[test]
+fn a_missing_config_file_is_an_error_rather_than_a_silent_fallback() {
+    let fixture = fixtures().join("config");
+    let err = analyze(&fixture, Some(&fixture.join("no-such-file.toml")))
+        .expect_err("a named config file must exist");
+    assert!(
+        format!("{err:#}").contains("could not read config file"),
+        "{err:#}"
+    );
+}
+
+/// The exit code is the whole interface for CI, so it is pinned on the binary
+/// rather than inferred from the library: 0 clean or advisory, 1 denied,
+/// 2 configuration error.
+#[test]
+fn exit_codes_follow_severity() {
+    let run = |config: Option<&str>| {
+        let fixture = fixtures().join("config");
+        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_deadwood"));
+        command.arg("check").arg(&fixture);
+        if let Some(config) = config {
+            command.arg("--config").arg(fixture.join(config));
+        }
+        let output = command.output().expect("the binary should run");
+        (
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+        )
+    };
+
+    let (code, stdout) = run(None);
+    assert_eq!(code, Some(1), "unconfigured findings fail the run");
+    assert!(stdout.contains("10 finding(s)"), "{stdout}");
+
+    let (code, stdout) = run(Some("severity-warn.toml"));
+    assert_eq!(code, Some(0), "advisory findings do not fail the run");
+    assert!(
+        stdout.contains("Unused public items (warn):"),
+        "and are still printed, marked:\n{stdout}"
+    );
+
+    let (code, _) = run(Some("severity-mixed.toml"));
+    assert_eq!(code, Some(1), "one surviving deny finding fails the run");
+
+    let (code, stdout) = run(Some("broken.toml"));
+    assert_eq!(code, Some(2), "a config error is an error, not a finding");
+    assert!(stdout.is_empty(), "no report is produced: {stdout}");
 }

@@ -1,0 +1,5 @@
+# One kind advisory, one silenced, the rest enforced: the run must still fail,
+# because a `deny` finding survives.
+[severity]
+dead_file = "warn"
+unused_pub_item = "off"

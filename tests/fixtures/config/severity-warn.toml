@@ -1,0 +1,6 @@
+# Everything advisory: findings are printed, marked, and the run still exits 0.
+[severity]
+dead_file = "warn"
+unused_pub_item = "warn"
+unused_reexport = "warn"
+unused_dependency = "warn"

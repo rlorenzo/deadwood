@@ -24,12 +24,19 @@
 //! `#[used]`, `#[export_name]`, or an `allow`/`expect` for
 //! `dead_code`/`unused` are skipped, as is `fn main`.
 //!
+//! The remaining gap is one Deadwood cannot close by looking harder: a `pub`
+//! item consumed by a crate *outside* the workspace is indistinguishable from
+//! a dead one, which is why these findings are advisory for libraries. The
+//! `public-api` setting in [`crate::config`] is how a project closes it, by
+//! declaring which crates and item paths are surface rather than leftovers.
+//!
 //! If any file failed to parse, the symbol table would be missing both
 //! definitions and the paths that use them, so the whole check is skipped for
 //! that run (with a warning) instead of reporting unreliable findings.
 
 use std::path::PathBuf;
 
+use crate::config::PublicApi;
 use crate::resolve::{CrateUnit, SymbolTable};
 
 /// A `pub` item or re-export that no path in the workspace resolves to.
@@ -43,8 +50,13 @@ pub struct UnusedItem {
     pub reexport: bool,
 }
 
-/// Report `pub` items and `pub use` re-exports that nothing refers to.
-pub fn find_unused_items(crates: &[CrateUnit], warnings: &mut Vec<String>) -> Vec<UnusedItem> {
+/// Report `pub` items and `pub use` re-exports that nothing refers to,
+/// excluding whatever `public_api` declares to be external surface.
+pub fn find_unused_items(
+    crates: &[CrateUnit],
+    public_api: &PublicApi,
+    warnings: &mut Vec<String>,
+) -> Vec<UnusedItem> {
     // Resolution must see every file: a file that failed to parse hides both
     // definitions and the paths that reach them, and missing paths turn into
     // false positives.
@@ -62,7 +74,7 @@ pub fn find_unused_items(crates: &[CrateUnit], warnings: &mut Vec<String>) -> Ve
     let mut table = SymbolTable::build(crates);
     table.record_references(crates);
     table
-        .unused_definitions()
+        .unused_definitions(public_api)
         .into_iter()
         .map(|def| UnusedItem {
             name: def.name,
@@ -101,7 +113,7 @@ mod tests {
 
     fn unused_names(crates: &[CrateUnit]) -> Vec<String> {
         let mut warnings = Vec::new();
-        let found = find_unused_items(crates, &mut warnings);
+        let found = find_unused_items(crates, &PublicApi::default(), &mut warnings);
         assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
         found.into_iter().map(|item| item.name).collect()
     }
@@ -137,7 +149,7 @@ mod tests {
     fn check_is_skipped_when_a_file_cannot_be_parsed() {
         let unit = crate_of(&[("", "pub fn dead() {}\n"), ("broken", "fn oops( {\n")]);
         let mut warnings = Vec::new();
-        let unused = find_unused_items(&[unit], &mut warnings);
+        let unused = find_unused_items(&[unit], &PublicApi::default(), &mut warnings);
         assert!(
             unused.is_empty(),
             "incomplete resolution must not report findings"
@@ -167,7 +179,7 @@ mod tests {
         ]);
         let unused = {
             let mut warnings = Vec::new();
-            let found = find_unused_items(&[unit], &mut warnings);
+            let found = find_unused_items(&[unit], &PublicApi::default(), &mut warnings);
             assert!(warnings.is_empty());
             found
         };
@@ -228,7 +240,7 @@ mod tests {
 
     fn unused_reexports(crates: &[CrateUnit]) -> Vec<String> {
         let mut warnings = Vec::new();
-        let found = find_unused_items(crates, &mut warnings);
+        let found = find_unused_items(crates, &PublicApi::default(), &mut warnings);
         assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
         found
             .into_iter()

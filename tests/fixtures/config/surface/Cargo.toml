@@ -1,0 +1,9 @@
+[package]
+name = "surface"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Named by no code in this package. It is the unused-dependency finding of the
+# baseline run, and the entry the workspace-wide allowlist silences.
+sidecar = "1"

@@ -1,0 +1,5 @@
+# `off` removes findings entirely — they are absent from the text output, from
+# the JSON, and from the count. The kinds left unmentioned stay at `deny`.
+[severity]
+dead_file = "off"
+unused_dependency = "off"

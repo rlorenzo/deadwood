@@ -1,0 +1,15 @@
+[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Named by `src/main.rs`, so never a finding.
+surface = { path = "../surface" }
+# The #9 case: load bearing without being named by any code, here to select a
+# vendored native library. Only the per-package allowlist silences it.
+vendored_native = "1"
+# Named by nothing and load bearing for nothing. Still reported under every
+# configuration in this fixture, which is what proves the allowlists are
+# scoped rather than blanket.
+stale_crate = "1"

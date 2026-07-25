@@ -1,0 +1,3 @@
+# A typo, one letter off from `ignore`. Deadwood must refuse to run rather than
+# apply a configuration that silently does nothing.
+ignor = ["surface/src/orphan.rs"]

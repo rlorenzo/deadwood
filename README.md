@@ -5,7 +5,8 @@ issues that `rustc` and `clippy` stay quiet about — starting with dead module
 files, unused `pub` items, unused re-exports, and unused dependencies, in the
 spirit of Fallow/knip-style analyzers for other ecosystems.
 
-**Status:** v0.1 — early, narrow, and honest about it. See
+**Status:** v0.1 — early, narrow, and honest about it. Tunable through a
+`deadwood.toml`, and correct without one. See
 [`docs/SCOPE.md`](docs/SCOPE.md) for what is in and out of scope, and
 [`docs/ENVIRONMENT.md`](docs/ENVIRONMENT.md) for the environment assessment
 this project was bootstrapped from.
@@ -18,6 +19,9 @@ this project was bootstrapped from.
 | **Unused pub items** | Fully-`pub` fns, structs, enums, traits, type aliases, consts, statics, and unions that no path in the workspace resolves to | `dead_code` assumes `pub` items have external consumers |
 | **Unused re-exports** | `pub use` re-exports nothing in the workspace goes through, where outside code cannot reach them either | `unused_imports` only sees imports the crate itself does not use, not ones re-exported for nobody |
 | **Unused dependencies** | `Cargo.toml` entries — normal, dev, or build — whose crate name the declaring package's code never mentions | Cargo has no reason to look, and an unused entry still costs build time and supply-chain surface |
+
+What each check reports can be tuned by a `deadwood.toml` — see
+[Configuration](#configuration).
 
 Usage is decided by *resolving paths*, not by counting identifiers: `use`
 declarations (renames, nested trees, `pub use`), qualified paths (`crate::`,
@@ -78,10 +82,102 @@ Unused dependencies:
 
 - `deadwood check [PATH]` — analyze the package/workspace at `PATH` (default `.`)
 - `--json` — machine-readable output (findings + warnings)
-- Exit codes: `0` clean, `1` findings, `2` error — suitable for CI gates.
+- `--config PATH` — use this configuration file instead of searching for
+  `deadwood.toml`
+- Exit codes: `0` clean, `1` findings that are configured `deny` (the default
+  for every kind), `2` error — suitable for CI gates.
 
 Requires `cargo` on `PATH` (workspace discovery shells out to
 `cargo metadata --no-deps`, which works offline).
+
+## Configuration
+
+Deadwood needs no configuration, and with no `deadwood.toml` present it
+behaves exactly as described above. The file exists to express what the
+analysis cannot infer: which files are not yours to fix, which checks you are
+ready to enforce, which crates have consumers Deadwood cannot see, and which
+manifest entries are load bearing without being named in code.
+
+It is looked for by walking up from the analyzed path to the workspace root,
+and the nearest one wins; `--config PATH` overrides the search and fails if
+that file is missing. Relative patterns are resolved against the directory
+holding the file.
+
+```toml
+# deadwood.toml — every setting, with its default behavior noted.
+
+# Files no finding may be reported about. Patterns are `/`-separated globs
+# where `*` stays inside one segment, `**` spans any number of them, and `?` is
+# one character; a pattern matching a directory covers everything under it.
+# Default: nothing is ignored.
+ignore = ["crates/*/src/generated/**", "vendor"]
+
+# What each finding kind costs. `deny` reports it and fails the run (exit 1),
+# `warn` reports it and exits 0, `off` never reports it at all. The keys are
+# the finding kinds as they appear in `--json`.
+# Default: `deny` for every kind, which is the pre-config behavior.
+[severity]
+dead_file = "deny"
+unused_pub_item = "warn"
+unused_reexport = "warn"
+unused_dependency = "deny"
+
+# Crates and items whose `pub` surface is API rather than leftovers. Deadwood
+# only sees consumers inside the workspace, so for a published library this is
+# the difference between a usable report and a page of noise.
+# Default: nothing is treated as declared API.
+[public-api]
+# Every `pub` item in these crates. Dashes and underscores are interchangeable.
+crates = ["my-library"]
+# ...or `crate::module::Item` paths, as globs, for finer control.
+items = ["my-app::prelude::*", "my-app::error::**"]
+
+# Manifest entries the unused-dependency check must never judge: the ones that
+# are load bearing without any code naming them. Matched on the manifest key
+# exactly as written, so a renamed entry is listed by its alias.
+# Default: every entry is judged.
+[dependencies]
+# Exempt in every package of the workspace.
+allow = ["getrandom", "openssl"]
+
+# Exempt only in the package named.
+[dependencies.allow-in]
+my-app = ["vendored-native"]
+```
+
+Three things are worth knowing about how these behave.
+
+**`ignore` suppresses findings, not evidence.** An ignored file is still read,
+and the paths in it still count as uses. Generated code that calls your
+`pub fn` is still calling it, and dropping that would make every `ignore` entry
+a source of false positives in the code beside it. The one thing `ignore` does
+reach into is module resolution: a `mod` declaration pointing at a *missing*
+file the patterns cover is skipped silently instead of warned about, so
+ignoring a generated module does not stop Deadwood checking the rest of its
+package.
+
+**Severity is per kind, and only `deny` fails the run.** A `warn` finding is
+printed with its group marked `(warn)` and carries `"severity": "warn"` in the
+JSON, so a project can adopt a check as advisory before enforcing it. An `off`
+finding does not exist: it is absent from the output, the JSON, and the count.
+
+**`public-api` covers unused-pub items and unused re-exports alike**, since a
+`pub use` is surface too. An allowlisted dependency entry that *is* referenced
+is not an error — the list means "do not judge this", not "assert this is
+unused".
+
+Configuration mistakes are hard failures (exit 2), including unknown keys. A
+`deadwood.toml` that quietly does nothing because of a typo is worse than none
+at all, so a misspelled key names itself, its file, and the keys that do exist:
+
+```console
+$ deadwood check
+error: invalid config file `deadwood.toml`: TOML parse error at line 1, column 1
+  |
+1 | ignor = ["vendor"]
+  | ^^^^^
+unknown field `ignor`, expected one of `ignore`, `severity`, `public-api`, `dependencies`
+```
 
 ## Development
 
@@ -115,7 +211,11 @@ toolchain is pinned to `stable` with `clippy` and `rustfmt` via
    pub items and re-exports are the definitions no resolved path reached
    (`src/unused.rs`); unused dependencies are the manifest entries whose crate
    name appears nowhere in the package, reachable or not (`src/deps.rs`).
-5. **Reporting** — grouped text or JSON (`src/report.rs`).
+5. **Configuration** — `deadwood.toml` is applied in one pass over the
+   findings, so `ignore` and `[severity]` cover every detector identically
+   (`src/config.rs`); `public-api` and the dependency allowlist are consulted
+   by the detectors they belong to.
+6. **Reporting** — grouped text or JSON (`src/report.rs`).
 
 ## Known limitations (tracked, not hidden)
 
@@ -136,24 +236,24 @@ toolchain is pinned to `stable` with `clippy` and `rustfmt` via
   counts as a use — an item used only by tests is not reported.
 - `include!()`-ed files are not tracked and may be reported as dead.
 - A `pub` item with consumers outside the workspace looks identical to a dead
-  one; for library crates, these findings are advisory. Re-exports on a
-  library's public surface are skipped for that reason, which also means a
-  genuinely dead one there is missed.
+  one; for library crates, these findings are advisory until the crate or its
+  item paths are listed under `[public-api]`. Re-exports on a library's public
+  surface are skipped for the same reason, which also means a genuinely dead
+  one there is missed.
 - Anything that resolves ambiguously (a name behind two modules, an alias
   chain we cannot follow) is treated as used.
 - A dependency whose name is a common word (`log`, `time`, `bytes`) is kept
   alive by any mention of that word anywhere in the package, including in
   macro input and doc comments. Findings are lost, never invented.
 - A dependency declared to turn on a feature of a *transitive* dependency
-  (`getrandom = { features = ["js"] }`) is named by no code and no
-  `[features]` entry, and is reported. An allowlist in the planned config
-  file is the intended answer ([#9]).
+  (`getrandom = { features = ["js"] }`), to select a vendored native library,
+  or to force feature unification is named by no code and no `[features]`
+  entry, and is reported. Nothing syntactic separates it from a stale entry,
+  so the answer is intent: list it under `[dependencies]` in `deadwood.toml`.
 - The dependency check judges the source tree in front of it. A crate
   unpacked from a published `.crate` archive usually has `tests/` and
   `benches/` stripped, so the dev-dependencies they used are reported —
   correctly for that tree, not for the repository it came from.
-
-[#9]: https://github.com/rlorenzo/deadwood/issues/9
 
 ## License
 

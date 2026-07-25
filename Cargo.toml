@@ -14,6 +14,9 @@ proc-macro2 = { version = "1", features = ["span-locations"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 syn = { version = "2", features = ["full", "visit"] }
+# Parsing only: Deadwood reads `deadwood.toml` and never writes TOML, so the
+# serializer and its formatting machinery stay out of the build.
+toml = { version = "1", default-features = false, features = ["parse", "serde"] }
 
 [lints.rust]
 unsafe_code = "forbid"

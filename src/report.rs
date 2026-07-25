@@ -1,7 +1,15 @@
 //! Rendering of analysis results for humans and machines.
+//!
+//! Severity is per finding *kind*, so it is rendered on the group header
+//! rather than repeated on every line: `Unused public items (warn)` says
+//! exactly once that nothing below it will fail the run. The summary line
+//! grows a breakdown only when some kind is not `deny`, which keeps the
+//! default output — the one every existing consumer already parses —
+//! unchanged.
 
 use anyhow::Result;
 
+use crate::config::Severity;
 use crate::{Analysis, FindingKind};
 
 /// Human-readable report, grouped by finding kind.
@@ -22,10 +30,13 @@ pub fn render_text(analysis: &Analysis) -> String {
             .iter()
             .filter(|f| f.kind == kind)
             .collect();
-        if group.is_empty() {
+        let Some(first) = group.first() else {
             continue;
-        }
+        };
         out.push_str(header);
+        if first.severity != Severity::Deny {
+            out.push_str(&format!(" ({})", first.severity.label()));
+        }
         out.push_str(":\n");
         for finding in group {
             match finding.line {
@@ -39,11 +50,23 @@ pub fn render_text(analysis: &Analysis) -> String {
         }
         out.push('\n');
     }
+    let denied = analysis
+        .findings
+        .iter()
+        .filter(|f| f.severity == Severity::Deny)
+        .count();
     out.push_str(&format!(
-        "{} finding(s) in workspace `{}`.\n",
+        "{} finding(s) in workspace `{}`",
         analysis.findings.len(),
         analysis.workspace_root.display()
     ));
+    if denied < analysis.findings.len() {
+        out.push_str(&format!(
+            ": {denied} deny, {} warn (warn findings do not fail the run)",
+            analysis.findings.len() - denied
+        ));
+    }
+    out.push_str(".\n");
     out
 }
 
@@ -65,6 +88,7 @@ mod tests {
             findings: vec![
                 Finding {
                     kind: FindingKind::UnusedPubItem,
+                    severity: Severity::Deny,
                     file: PathBuf::from("src/lib.rs"),
                     line: Some(3),
                     name: Some("dead".into()),
@@ -74,6 +98,7 @@ mod tests {
                 },
                 Finding {
                     kind: FindingKind::UnusedReexport,
+                    severity: Severity::Deny,
                     file: PathBuf::from("src/lib.rs"),
                     line: Some(9),
                     name: Some("Stale".into()),
@@ -83,6 +108,7 @@ mod tests {
                 },
                 Finding {
                     kind: FindingKind::UnusedDependency,
+                    severity: Severity::Deny,
                     file: PathBuf::from("Cargo.toml"),
                     line: None,
                     name: Some("regex".into()),
@@ -128,6 +154,34 @@ mod tests {
         );
     }
 
+    /// Default severities must render exactly as they did before severity
+    /// existed: no marker on the headers, no breakdown on the summary.
+    #[test]
+    fn an_all_deny_report_carries_no_severity_decoration() {
+        let text = render_text(&sample());
+        assert!(text.contains("Unused public items:\n"), "{text}");
+        assert!(
+            text.ends_with("3 finding(s) in workspace `/ws`.\n"),
+            "{text}"
+        );
+    }
+
+    /// A `warn` finding has to be visibly different from a `deny` one, or the
+    /// exit code and the output tell different stories.
+    #[test]
+    fn warn_findings_are_marked_on_their_group_and_counted_separately() {
+        let mut analysis = sample();
+        analysis.findings[2].severity = Severity::Warn;
+
+        let text = render_text(&analysis);
+        assert!(text.contains("Unused dependencies (warn):\n"), "{text}");
+        assert!(text.contains("Unused public items:\n"), "{text}");
+        assert!(
+            text.contains("3 finding(s) in workspace `/ws`: 2 deny, 1 warn"),
+            "the summary must separate what fails the run from what does not:\n{text}"
+        );
+    }
+
     #[test]
     fn empty_analysis_reports_clean() {
         let clean = Analysis {
@@ -152,5 +206,17 @@ mod tests {
             value["findings"][2].get("line").is_none(),
             "a manifest finding carries no line number"
         );
+    }
+
+    /// Machine consumers gate on the JSON, so severity has to be there too —
+    /// a CI job that only fails on `deny` needs to see which is which.
+    #[test]
+    fn json_report_carries_the_severity_of_every_finding() {
+        let mut analysis = sample();
+        analysis.findings[1].severity = Severity::Warn;
+        let value: serde_json::Value =
+            serde_json::from_str(&render_json(&analysis).unwrap()).unwrap();
+        assert_eq!(value["findings"][0]["severity"], "deny");
+        assert_eq!(value["findings"][1]["severity"], "warn");
     }
 }

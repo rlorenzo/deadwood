@@ -1,0 +1,2 @@
+# Discovered by walking up from the analyzed path to the workspace root.
+ignore = ["src/generated.rs"]

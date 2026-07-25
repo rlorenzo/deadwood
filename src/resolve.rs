@@ -65,6 +65,7 @@ use std::path::PathBuf;
 use proc_macro2::{TokenStream, TokenTree};
 use syn::visit::Visit;
 
+use crate::config::PublicApi;
 use crate::modtree::ParsedFile;
 
 /// How deep a chain of `use` aliases is followed before giving up and falling
@@ -242,6 +243,10 @@ pub(crate) struct SymbolTable {
     /// Whether each crate is a library, i.e. whether anything outside the
     /// workspace could name its public items at all.
     is_library: Vec<bool>,
+    /// The name each crate is spelled by in paths, for the `public-api`
+    /// allowlist. `None` for targets nothing can name (bins, tests, examples,
+    /// benches), which have no external consumers to declare.
+    crate_names: Vec<Option<String>>,
     used: HashSet<usize>,
 }
 
@@ -265,6 +270,10 @@ impl SymbolTable {
             by_name: HashMap::new(),
             by_path: HashMap::new(),
             is_library: crates.iter().map(|unit| !unit.names.is_empty()).collect(),
+            crate_names: crates
+                .iter()
+                .map(|unit| unit.names.first().cloned())
+                .collect(),
             used: HashSet::new(),
         };
 
@@ -349,8 +358,11 @@ impl SymbolTable {
     ///
     /// Definitions are deduplicated by location: a file pulled into several
     /// crates (via `#[path]`) defines the same item once per crate, and it
-    /// counts as used if *any* of those crates uses it.
-    pub(crate) fn unused_definitions(&self) -> Vec<UnusedDef> {
+    /// counts as used if *any* of those crates uses it. `public_api` is
+    /// consulted before that deduplication, so a file shared between a listed
+    /// crate and an unlisted one is judged by each crate's own listing rather
+    /// than by whichever copy happened to be indexed first.
+    pub(crate) fn unused_definitions(&self, public_api: &PublicApi) -> Vec<UnusedDef> {
         let site = |def: &Def| (def.file.clone(), def.line, def.name.clone());
         let used: HashSet<_> = self.used.iter().map(|&id| site(&self.defs[id])).collect();
 
@@ -359,6 +371,7 @@ impl SymbolTable {
             .defs
             .iter()
             .filter(|def| def.reportable && self.is_worth_reporting(def))
+            .filter(|def| !self.is_declared_api(def, public_api))
             .filter(|def| !used.contains(&site(def)) && seen.insert(site(def)))
             .map(|def| UnusedDef {
                 name: def.name.clone(),
@@ -384,6 +397,27 @@ impl SymbolTable {
     /// over-permissive `pub` is exactly what that check is for.
     fn is_worth_reporting(&self, def: &Def) -> bool {
         !def.kind.is_reexport() || !self.is_externally_reachable(def.module)
+    }
+
+    /// Whether the project has declared this item part of a crate's public
+    /// API, so that having no consumer inside the workspace is expected.
+    ///
+    /// The item is offered to the allowlist as `crate::module::path::Item`,
+    /// with the crate name the crate answers to in paths — the same spelling
+    /// a `use` would need.
+    fn is_declared_api(&self, def: &Def, public_api: &PublicApi) -> bool {
+        let module = &self.modules[def.module];
+        let krate = self.crate_names[module.krate].as_deref();
+        let mut path = String::new();
+        for segment in krate
+            .into_iter()
+            .chain(module.path.iter().map(String::as_str))
+        {
+            path.push_str(segment);
+            path.push_str("::");
+        }
+        path.push_str(&def.name);
+        public_api.covers(krate, &path)
     }
 
     /// Whether code outside the workspace could name items in this module:
@@ -1235,11 +1269,11 @@ mod tests {
         );
         table.record_references(&crates);
 
+        let unused = table.unused_definitions(&PublicApi::default());
         assert!(
-            table.unused_definitions().is_empty(),
+            unused.is_empty(),
             "an ambiguous head segment keeps every candidate alive: {:?}",
-            table
-                .unused_definitions()
+            unused
                 .iter()
                 .map(|def| def.name.clone())
                 .collect::<Vec<_>>()

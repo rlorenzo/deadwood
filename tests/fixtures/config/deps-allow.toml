@@ -1,0 +1,9 @@
+# Manifest entries that are load bearing without being named by code.
+[dependencies]
+# Exempt in every package of the workspace.
+allow = ["sidecar"]
+
+# Exempt only in the package named. `stale_crate`, in the same manifest, is
+# not listed and stays reported.
+[dependencies.allow-in]
+app = ["vendored_native"]
