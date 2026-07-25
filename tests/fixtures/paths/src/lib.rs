@@ -2,6 +2,9 @@ mod alpha;
 mod beta;
 mod surface;
 
+// Reachable from outside the crate, unlike `surface` below.
+pub mod facade;
+
 // Renamed import: the item it points at is what counts as used.
 use alpha::shared as alpha_shared;
 // Nested use tree, mixing a plain name and a deeper path.

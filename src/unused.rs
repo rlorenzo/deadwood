@@ -15,7 +15,9 @@
 //! - A type's own `impl` blocks are not uses of it, so a struct that only
 //!   ever appears in `impl Struct { ... }` is reported.
 //! - A `pub use` re-export nothing goes through is reported in its own right
-//!   ([`UnusedItem::reexport`]), instead of being invisible.
+//!   ([`UnusedItem::reexport`]), instead of being invisible — unless it sits
+//!   on a library's public surface, where having no workspace-internal user
+//!   is the point rather than a defect.
 //!
 //! Whatever cannot be resolved is still treated as a use — see
 //! [`crate::resolve`] for the exact fallbacks. Items carrying `#[no_mangle]`,
@@ -77,7 +79,8 @@ mod tests {
     use super::*;
     use crate::modtree::ParsedFile;
 
-    /// A single-file crate whose root is `lib.rs`.
+    /// A library crate from `(module path, source)` pairs, where the module
+    /// path is `/`-separated and empty for the crate root.
     fn crate_of(sources: &[(&str, &str)]) -> CrateUnit {
         CrateUnit {
             names: vec!["fixture".to_string()],
@@ -86,11 +89,11 @@ mod tests {
                 .map(|(module, source)| ParsedFile {
                     path: PathBuf::from(format!("/ws/src/{module}.rs")),
                     ast: syn::parse_file(source).ok(),
-                    module: if module.is_empty() {
-                        Vec::new()
-                    } else {
-                        vec![(*module).to_string()]
-                    },
+                    module: module
+                        .split('/')
+                        .filter(|segment| !segment.is_empty())
+                        .map(str::to_string)
+                        .collect(),
                 })
                 .collect(),
         }
@@ -223,24 +226,62 @@ mod tests {
         assert_eq!(unused_names(&[unit]), vec!["Holder"]);
     }
 
+    fn unused_reexports(crates: &[CrateUnit]) -> Vec<String> {
+        let mut warnings = Vec::new();
+        let found = find_unused_items(crates, &mut warnings);
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+        found
+            .into_iter()
+            .filter(|item| item.reexport)
+            .map(|item| item.name)
+            .collect()
+    }
+
+    /// Inside a private module, a `pub use` nothing goes through is dead with
+    /// certainty: no code outside the workspace can reach it either.
     #[test]
-    fn unused_reexport_is_reported_and_used_one_is_not() {
+    fn unused_reexport_out_of_public_reach_is_reported() {
         let unit = crate_of(&[
             (
                 "",
-                "mod inner;\npub use inner::Used;\npub use inner::Unused;\nfn go() -> Used { Used }\n",
+                "mod wrapper;\nfn go() -> wrapper::Used { wrapper::Used }\n",
             ),
-            ("inner", "pub struct Used;\npub struct Unused;\n"),
+            (
+                "wrapper",
+                "mod inner;\npub use inner::Used;\npub use inner::Unused;\n",
+            ),
+            ("wrapper/inner", "pub struct Used;\npub struct Unused;\n"),
         ]);
-        let mut warnings = Vec::new();
-        let found = find_unused_items(&[unit], &mut warnings);
-        assert!(warnings.is_empty());
-        let reexports: Vec<_> = found
-            .iter()
-            .filter(|item| item.reexport)
-            .map(|item| item.name.as_str())
-            .collect();
-        assert_eq!(reexports, vec!["Unused"]);
+        assert_eq!(unused_reexports(&[unit]), vec!["Unused"]);
+    }
+
+    /// A re-export reachable from a library's crate root is the public-API
+    /// idiom; nothing in the workspace going through it is its normal state,
+    /// not a finding.
+    #[test]
+    fn reexport_on_a_librarys_public_surface_is_left_alone() {
+        let unit = crate_of(&[
+            ("", "pub mod facade;\n"),
+            ("facade", "mod inner;\npub use inner::Exported;\n"),
+            ("facade/inner", "pub struct Exported;\n"),
+        ]);
+        assert!(unused_reexports(&[unit]).is_empty());
+    }
+
+    /// ...but the same re-export in a target nothing can import (a bin, a
+    /// test) has no external consumer to serve.
+    #[test]
+    fn reexport_in_a_non_library_target_is_reported() {
+        let binary = CrateUnit {
+            names: Vec::new(),
+            files: crate_of(&[
+                ("", "pub mod facade;\nfn main() {}\n"),
+                ("facade", "mod inner;\npub use inner::Exported;\n"),
+                ("facade/inner", "pub struct Exported;\n"),
+            ])
+            .files,
+        };
+        assert_eq!(unused_reexports(&[binary]), vec!["Exported"]);
     }
 
     #[test]

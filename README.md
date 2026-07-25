@@ -16,7 +16,7 @@ this project was bootstrapped from.
 | --- | --- | --- |
 | **Dead files** | `.rs` files under `src/` not reachable from any target root via `mod` declarations | Files outside the module tree are never compiled, so no lint ever sees them |
 | **Unused pub items** | Fully-`pub` fns, structs, enums, traits, type aliases, consts, statics, and unions that no path in the workspace resolves to | `dead_code` assumes `pub` items have external consumers |
-| **Unused re-exports** | `pub use` re-exports nothing in the workspace goes through | `unused_imports` only sees imports the crate itself does not use, not ones re-exported for nobody |
+| **Unused re-exports** | `pub use` re-exports nothing in the workspace goes through, where outside code cannot reach them either | `unused_imports` only sees imports the crate itself does not use, not ones re-exported for nobody |
 
 Usage is decided by *resolving paths*, not by counting identifiers: `use`
 declarations (renames, nested trees, `pub use`), qualified paths (`crate::`,
@@ -31,8 +31,15 @@ identifiers inside macro invocations and attribute arguments, and names in a
 module holding a glob import that leads outside the workspace. Items marked
 `#[no_mangle]`, `#[used]`, `#[export_name]`, or
 `#[allow(dead_code)]`/`#[expect(dead_code)]` are skipped, as is `fn main`. For
-library crates with external consumers, treat unused-pub and unused-re-export
-findings as advisory — Deadwood cannot see your dependents.
+library crates with external consumers, treat unused-pub findings as advisory
+— Deadwood cannot see your dependents.
+
+Re-exports get one extra filter, because a `pub use` exists *only* to expose a
+name outward: one that is reachable from a library's crate root (`pub use
+inner::Thing;` in `lib.rs`, or in any `pub mod` under it) is doing its job
+even when nothing inside the workspace uses it, so it is never reported. A
+re-export that outside code cannot reach — because some module on the way is
+private — has no such excuse, and is reported.
 
 ## Usage
 
@@ -110,7 +117,9 @@ toolchain is pinned to `stable` with `clippy` and `rustfmt` via
   counts as a use — an item used only by tests is not reported.
 - `include!()`-ed files are not tracked and may be reported as dead.
 - A `pub` item with consumers outside the workspace looks identical to a dead
-  one; for library crates, these findings are advisory.
+  one; for library crates, these findings are advisory. Re-exports on a
+  library's public surface are skipped for that reason, which also means a
+  genuinely dead one there is missed.
 - Anything that resolves ambiguously (a name behind two modules, an alias
   chain we cannot follow) is treated as used.
 

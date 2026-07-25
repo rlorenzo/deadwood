@@ -188,6 +188,18 @@ fn resolution_sees_through_names_impls_and_reexports() {
         "re-export targets must not cascade into a second finding: {:?}",
         analysis.findings
     );
+
+    // `surface` is private, so its dead re-exports are dead with certainty.
+    // `facade` is `pub` from the crate root of a library, where an unused
+    // re-export is the public-API idiom rather than a finding.
+    assert!(
+        !analysis
+            .findings
+            .iter()
+            .any(|f| f.file.starts_with("src/facade")),
+        "a re-export on the public surface must be left alone: {:?}",
+        analysis.findings
+    );
 }
 
 /// Anything Deadwood cannot resolve counts as a use: identifiers in macro

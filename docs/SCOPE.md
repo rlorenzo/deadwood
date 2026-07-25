@@ -33,7 +33,10 @@ expanded.
 
 This removed three documented false-negative classes — items sharing a name
 with a used item, types whose only mention is their own `impl` block, and
-unused `pub use` re-exports (now their own finding kind). The conservatism
+unused `pub use` re-exports (now their own finding kind — reported only where
+outside code cannot reach them either, since a re-export on a library's
+public surface is doing its job with no workspace-internal user). The
+conservatism
 tenet is unchanged and load-bearing: unresolvable paths (macro input,
 attribute arguments, globs leading outside the workspace, ambiguity of any
 kind) count as uses of every item with that name. Resolution stays syntactic

@@ -177,6 +177,9 @@ struct Module {
     /// A glob import that could not be followed into the workspace, so a name
     /// missing from `items` might still refer to a workspace item.
     opaque: bool,
+    /// Whether the `mod` declaration that opens this module is `pub`. The
+    /// crate root has no declaration and is always considered public.
+    declared_pub: bool,
 }
 
 /// Where a name lookup in a module landed.
@@ -226,6 +229,9 @@ pub(crate) struct SymbolTable {
     by_name: HashMap<String, Vec<usize>>,
     /// Module lookup by crate and module path.
     by_path: HashMap<(usize, Vec<String>), usize>,
+    /// Whether each crate is a library, i.e. whether anything outside the
+    /// workspace could name its public items at all.
+    is_library: Vec<bool>,
     used: HashSet<usize>,
 }
 
@@ -247,6 +253,7 @@ impl SymbolTable {
             externs: HashMap::new(),
             by_name: HashMap::new(),
             by_path: HashMap::new(),
+            is_library: crates.iter().map(|unit| !unit.names.is_empty()).collect(),
             used: HashSet::new(),
         };
 
@@ -318,7 +325,8 @@ impl SymbolTable {
         let mut out: Vec<UnusedDef> = self
             .defs
             .iter()
-            .filter(|def| def.reportable && !used.contains(&site(def)) && seen.insert(site(def)))
+            .filter(|def| def.reportable && self.is_worth_reporting(def))
+            .filter(|def| !used.contains(&site(def)) && seen.insert(site(def)))
             .map(|def| UnusedDef {
                 name: def.name.clone(),
                 kind: def.kind,
@@ -328,6 +336,37 @@ impl SymbolTable {
             .collect();
         out.sort_by(|a, b| (&a.file, a.line, &a.name).cmp(&(&b.file, b.line, &b.name)));
         out
+    }
+
+    /// Whether an unreferenced definition of this kind, in this position, is
+    /// a finding a reader can act on.
+    ///
+    /// A `pub use` exists only to expose a name outward, so one that is
+    /// reachable from a library's crate root is doing its job even when
+    /// nothing inside the workspace goes through it — that is the whole
+    /// public-API idiom (`pub use inner::Thing;` in `lib.rs`), and reporting
+    /// it would bury the real findings. A re-export that outside code cannot
+    /// even reach, because a module on the way is private, has no such
+    /// excuse. Definitions are judged on their own `pub`ness, as before: an
+    /// over-permissive `pub` is exactly what that check is for.
+    fn is_worth_reporting(&self, def: &Def) -> bool {
+        !def.kind.is_reexport() || !self.is_externally_reachable(def.module)
+    }
+
+    /// Whether code outside the workspace could name items in this module:
+    /// it belongs to a library, and every `mod` on the way in is `pub`.
+    fn is_externally_reachable(&self, module: usize) -> bool {
+        let mut current = module;
+        loop {
+            let module = &self.modules[current];
+            if !module.declared_pub {
+                return false;
+            }
+            match module.parent {
+                Some(parent) => current = parent,
+                None => return self.is_library[module.krate],
+            }
+        }
     }
 
     // -- table construction ------------------------------------------------
@@ -342,6 +381,7 @@ impl SymbolTable {
             globs: Vec::new(),
             glob_sources: Vec::new(),
             opaque: false,
+            declared_pub: parent.is_none(),
         });
         self.by_path.insert((krate, path), id);
         id
@@ -392,6 +432,7 @@ impl SymbolTable {
                     let mut path = self.modules[module].path.clone();
                     path.push(m.ident.to_string());
                     let child = self.module_for(krate, &path);
+                    self.modules[child].declared_pub = matches!(m.vis, syn::Visibility::Public(_));
                     self.add_def(Def {
                         name: m.ident.to_string(),
                         kind: DefKind::Mod,
