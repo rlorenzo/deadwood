@@ -1,225 +1,143 @@
-//! Unused `pub` item detection.
+//! Unused `pub` item and re-export detection.
 //!
 //! Rustc's `dead_code` lint already covers private and crate-visible items,
 //! but it assumes fully-`pub` items are used, because it cannot see the
-//! consumers. Within a workspace we can do better: a `pub` item whose name is
-//! never mentioned anywhere else in the workspace is either dead or external
-//! API. Deadwood reports it and lets the author decide.
+//! consumers. Within a workspace we can do better: a `pub` item that no path
+//! anywhere in the workspace resolves to is either dead or external API.
+//! Deadwood reports it and lets the author decide.
 //!
-//! The check is a *name-based* heuristic, deliberately biased toward false
-//! negatives (staying quiet) over false positives:
+//! Usage comes from [`crate::resolve`], which resolves `use` declarations and
+//! qualified paths against a per-crate symbol table instead of counting bare
+//! identifiers. Consequences worth knowing:
 //!
-//! - Every identifier token in the workspace counts as a use, including
-//!   tokens inside macro invocations. An item is flagged only when its name
-//!   appears exactly once (its own definition).
-//! - Name collisions therefore hide dead code rather than causing noise.
-//! - A struct with an `impl` block is never flagged (the `impl` mentions the
-//!   name), and re-exported-but-unused items are missed. Both are accepted
-//!   for v0.1 and tracked as future work (proper path resolution).
+//! - Two items sharing a name no longer hide each other; each is judged on
+//!   the paths that actually reach it.
+//! - A type's own `impl` blocks are not uses of it, so a struct that only
+//!   ever appears in `impl Struct { ... }` is reported.
+//! - A `pub use` re-export nothing goes through is reported in its own right
+//!   ([`UnusedItem::reexport`]), instead of being invisible.
 //!
-//! Items carrying `#[no_mangle]`, `#[used]`, `#[export_name]`, or an
-//! `allow`/`expect` for `dead_code`/`unused` are skipped, as is `fn main`.
+//! Whatever cannot be resolved is still treated as a use — see
+//! [`crate::resolve`] for the exact fallbacks. Items carrying `#[no_mangle]`,
+//! `#[used]`, `#[export_name]`, or an `allow`/`expect` for
+//! `dead_code`/`unused` are skipped, as is `fn main`.
 //!
-//! If any file fails to tokenize, the census is incomplete and could produce
-//! false positives, so the whole check is skipped for that run (with a
-//! warning) instead of reporting unreliable findings.
+//! If any file failed to parse, the symbol table would be missing both
+//! definitions and the paths that use them, so the whole check is skipped for
+//! that run (with a warning) instead of reporting unreliable findings.
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 
-use proc_macro2::{TokenStream, TokenTree};
+use crate::resolve::{CrateUnit, SymbolTable};
 
-use crate::modtree::ParsedFile;
-
-/// A `pub` item that nothing else in the workspace refers to.
-pub struct UnusedPubItem {
+/// A `pub` item or re-export that no path in the workspace resolves to.
+pub struct UnusedItem {
     pub name: String,
-    /// Item kind for display: "fn", "struct", ...
+    /// Item kind for display: "fn", "struct", "re-export", ...
     pub kind: &'static str,
     pub file: PathBuf,
     pub line: usize,
+    /// True for a `pub use` re-export rather than a definition.
+    pub reexport: bool,
 }
 
-/// Report `pub` items whose name never occurs outside their own definition.
-pub fn find_unused_pub_items(
-    files: &[ParsedFile],
-    warnings: &mut Vec<String>,
-) -> Vec<UnusedPubItem> {
-    let mut items = Vec::new();
-    for file in files {
-        if let Some(ast) = &file.ast {
-            collect_pub_items(&ast.items, file, &mut items);
-        }
-    }
-
-    // The census must see every file: a file that fails to tokenize would
-    // undercount usages and turn missing data into false positives, so in
-    // that case the whole check is skipped rather than reported unreliably.
-    let mut counts: HashMap<String, usize> = HashMap::new();
-    let mut census_complete = true;
-    for file in files {
-        match tokenize(&file.source) {
-            Ok(tokens) => count_idents(tokens, &mut counts),
-            Err(err) => {
-                census_complete = false;
-                warnings.push(format!(
-                    "could not tokenize `{}` for usage counting: {err}",
-                    file.path.display()
-                ));
-            }
-        }
-    }
-    if !census_complete {
+/// Report `pub` items and `pub use` re-exports that nothing refers to.
+pub fn find_unused_items(crates: &[CrateUnit], warnings: &mut Vec<String>) -> Vec<UnusedItem> {
+    // Resolution must see every file: a file that failed to parse hides both
+    // definitions and the paths that reach them, and missing paths turn into
+    // false positives.
+    if crates
+        .iter()
+        .any(|unit| unit.files.iter().any(|file| file.ast.is_none()))
+    {
         warnings.push(
-            "unused-pub check skipped: usage counts would be unreliable with untokenizable files"
+            "unused-pub check skipped: usage resolution would be unreliable with unparsable files"
                 .to_string(),
         );
         return Vec::new();
     }
 
-    items.retain(|item| counts.get(&item.name).copied().unwrap_or(0) <= 1);
-    items
-}
-
-fn collect_pub_items(items: &[syn::Item], file: &ParsedFile, out: &mut Vec<UnusedPubItem>) {
-    for item in items {
-        let (ident, kind, attrs, vis) = match item {
-            syn::Item::Fn(i) => (&i.sig.ident, "fn", &i.attrs, &i.vis),
-            syn::Item::Struct(i) => (&i.ident, "struct", &i.attrs, &i.vis),
-            syn::Item::Enum(i) => (&i.ident, "enum", &i.attrs, &i.vis),
-            syn::Item::Trait(i) => (&i.ident, "trait", &i.attrs, &i.vis),
-            syn::Item::Type(i) => (&i.ident, "type alias", &i.attrs, &i.vis),
-            syn::Item::Const(i) => (&i.ident, "const", &i.attrs, &i.vis),
-            syn::Item::Static(i) => (&i.ident, "static", &i.attrs, &i.vis),
-            syn::Item::Union(i) => (&i.ident, "union", &i.attrs, &i.vis),
-            syn::Item::Mod(m) => {
-                // Descend into inline modules regardless of their visibility;
-                // each item is judged on its own `pub`-ness.
-                if let Some((_, inner)) = &m.content {
-                    collect_pub_items(inner, file, out);
-                }
-                continue;
-            }
-            _ => continue,
-        };
-
-        if !matches!(vis, syn::Visibility::Public(_)) {
-            continue;
-        }
-        let name = ident.to_string();
-        if name == "main" || has_skip_attr(attrs) {
-            continue;
-        }
-        out.push(UnusedPubItem {
-            line: ident.span().start().line,
-            name,
-            kind,
-            file: file.path.clone(),
-        });
-    }
-}
-
-/// Attributes that mark an item as used externally or deliberately kept.
-fn has_skip_attr(attrs: &[syn::Attribute]) -> bool {
-    attrs.iter().any(|attr| {
-        let path = attr.path();
-        if path.is_ident("no_mangle") || path.is_ident("used") || path.is_ident("export_name") {
-            return true;
-        }
-        if (path.is_ident("allow") || path.is_ident("expect"))
-            && let syn::Meta::List(list) = &attr.meta
-        {
-            let lints = list.tokens.to_string();
-            return lints.contains("dead_code") || lints.contains("unused");
-        }
-        false
-    })
-}
-
-/// Parse source text into a token stream, tolerating a leading shebang.
-fn tokenize(source: &str) -> Result<TokenStream, proc_macro2::LexError> {
-    let source = source.strip_prefix('\u{feff}').unwrap_or(source);
-    let source = if source.starts_with("#!") && !source.starts_with("#![") {
-        source.split_once('\n').map_or("", |(_, rest)| rest)
-    } else {
-        source
-    };
-    source.parse()
-}
-
-fn count_idents(tokens: TokenStream, counts: &mut HashMap<String, usize>) {
-    for tree in tokens {
-        match tree {
-            TokenTree::Ident(ident) => {
-                *counts.entry(ident.to_string()).or_insert(0) += 1;
-            }
-            TokenTree::Group(group) => count_idents(group.stream(), counts),
-            _ => {}
-        }
-    }
+    let mut table = SymbolTable::build(crates);
+    table.record_references(crates);
+    table
+        .unused_definitions()
+        .into_iter()
+        .map(|def| UnusedItem {
+            name: def.name,
+            kind: def.kind.label(),
+            file: def.file,
+            line: def.line,
+            reexport: def.kind.is_reexport(),
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::modtree::ParsedFile;
 
-    fn parsed(path: &str, source: &str) -> ParsedFile {
-        ParsedFile {
-            path: PathBuf::from(path),
-            source: source.to_string(),
-            ast: syn::parse_file(source).ok(),
+    /// A single-file crate whose root is `lib.rs`.
+    fn crate_of(sources: &[(&str, &str)]) -> CrateUnit {
+        CrateUnit {
+            names: vec!["fixture".to_string()],
+            files: sources
+                .iter()
+                .map(|(module, source)| ParsedFile {
+                    path: PathBuf::from(format!("/ws/src/{module}.rs")),
+                    ast: syn::parse_file(source).ok(),
+                    module: if module.is_empty() {
+                        Vec::new()
+                    } else {
+                        vec![(*module).to_string()]
+                    },
+                })
+                .collect(),
         }
+    }
+
+    fn unused_names(crates: &[CrateUnit]) -> Vec<String> {
+        let mut warnings = Vec::new();
+        let found = find_unused_items(crates, &mut warnings);
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+        found.into_iter().map(|item| item.name).collect()
     }
 
     #[test]
     fn flags_unreferenced_pub_fn_only() {
-        let files = vec![parsed(
-            "/ws/src/lib.rs",
+        let unit = crate_of(&[(
+            "",
             "pub fn dead() {}\npub fn alive() {}\nfn caller() { alive(); }\n",
-        )];
-        let mut warnings = Vec::new();
-        let unused = find_unused_pub_items(&files, &mut warnings);
-        assert_eq!(
-            unused.iter().map(|u| u.name.as_str()).collect::<Vec<_>>(),
-            vec!["dead"]
-        );
-        assert_eq!(unused[0].line, 1);
-        assert!(warnings.is_empty());
+        )]);
+        assert_eq!(unused_names(&[unit]), vec!["dead"]);
     }
 
     #[test]
     fn usage_inside_macro_body_counts() {
-        let files = vec![parsed(
-            "/ws/src/lib.rs",
+        let unit = crate_of(&[(
+            "",
             "pub fn helper() {}\nfn go() { println!(\"{}\", helper as usize); }\n",
-        )];
-        let mut warnings = Vec::new();
-        assert!(find_unused_pub_items(&files, &mut warnings).is_empty());
+        )]);
+        assert!(unused_names(&[unit]).is_empty());
     }
 
     #[test]
     fn skips_allow_dead_code_and_main() {
-        let files = vec![parsed(
-            "/ws/src/main.rs",
+        let unit = crate_of(&[(
+            "",
             "#[allow(dead_code)]\npub fn kept() {}\npub fn main() {}\n",
-        )];
-        let mut warnings = Vec::new();
-        assert!(find_unused_pub_items(&files, &mut warnings).is_empty());
+        )]);
+        assert!(unused_names(&[unit]).is_empty());
     }
 
     #[test]
-    fn check_is_skipped_when_a_file_cannot_be_tokenized() {
-        let files = vec![
-            parsed("/ws/src/lib.rs", "pub fn dead() {}\n"),
-            // Unbalanced delimiter: fails both parsing and tokenization, so
-            // the census cannot see this file's usages.
-            parsed("/ws/src/broken.rs", "fn oops( {\n"),
-        ];
+    fn check_is_skipped_when_a_file_cannot_be_parsed() {
+        let unit = crate_of(&[("", "pub fn dead() {}\n"), ("broken", "fn oops( {\n")]);
         let mut warnings = Vec::new();
-        let unused = find_unused_pub_items(&files, &mut warnings);
+        let unused = find_unused_items(&[unit], &mut warnings);
         assert!(
             unused.is_empty(),
-            "an incomplete census must not report findings"
+            "incomplete resolution must not report findings"
         );
         assert!(
             warnings
@@ -231,11 +149,106 @@ mod tests {
 
     #[test]
     fn non_pub_items_are_ignored() {
-        let files = vec![parsed(
-            "/ws/src/lib.rs",
-            "pub(crate) fn crate_only() {}\nfn private() {}\n",
-        )];
+        let unit = crate_of(&[("", "pub(crate) fn crate_only() {}\nfn private() {}\n")]);
+        assert!(unused_names(&[unit]).is_empty());
+    }
+
+    #[test]
+    fn same_name_in_another_module_does_not_count_as_a_use() {
+        // The old identifier census could not tell these apart and stayed
+        // quiet about both.
+        let unit = crate_of(&[
+            ("", "mod a;\nmod b;\nfn go() { a::helper(); }\n"),
+            ("a", "pub fn helper() {}\n"),
+            ("b", "pub fn helper() {}\n"),
+        ]);
+        let unused = {
+            let mut warnings = Vec::new();
+            let found = find_unused_items(&[unit], &mut warnings);
+            assert!(warnings.is_empty());
+            found
+        };
+        assert_eq!(unused.len(), 1, "only b::helper is dead");
+        assert_eq!(unused[0].name, "helper");
+        assert_eq!(unused[0].file, PathBuf::from("/ws/src/b.rs"));
+    }
+
+    #[test]
+    fn a_types_own_impl_block_is_not_a_use() {
+        let unit = crate_of(&[(
+            "",
+            "pub struct Lonely;\nimpl Lonely { pub fn new() -> Self { Lonely } }\n",
+        )]);
+        assert_eq!(unused_names(&[unit]), vec!["Lonely"]);
+    }
+
+    #[test]
+    fn impl_generic_arguments_and_traits_are_uses() {
+        let unit = crate_of(&[(
+            "",
+            "pub struct Held;\npub trait Marker {}\npub struct Holder<T>(T);\n\
+             impl Marker for Holder<Held> {}\n",
+        )]);
+        assert_eq!(unused_names(&[unit]), vec!["Holder"]);
+    }
+
+    #[test]
+    fn unused_reexport_is_reported_and_used_one_is_not() {
+        let unit = crate_of(&[
+            (
+                "",
+                "mod inner;\npub use inner::Used;\npub use inner::Unused;\nfn go() -> Used { Used }\n",
+            ),
+            ("inner", "pub struct Used;\npub struct Unused;\n"),
+        ]);
         let mut warnings = Vec::new();
-        assert!(find_unused_pub_items(&files, &mut warnings).is_empty());
+        let found = find_unused_items(&[unit], &mut warnings);
+        assert!(warnings.is_empty());
+        let reexports: Vec<_> = found
+            .iter()
+            .filter(|item| item.reexport)
+            .map(|item| item.name.as_str())
+            .collect();
+        assert_eq!(reexports, vec!["Unused"]);
+    }
+
+    #[test]
+    fn renamed_import_marks_the_original_used() {
+        let unit = crate_of(&[
+            (
+                "",
+                "mod inner;\nuse inner::original as renamed;\nfn go() { renamed(); }\n",
+            ),
+            ("inner", "pub fn original() {}\n"),
+        ]);
+        assert!(unused_names(&[unit]).is_empty());
+    }
+
+    #[test]
+    fn unresolvable_glob_import_keeps_everything_used() {
+        // `external::*` cannot be followed, so a name that is not otherwise
+        // in scope must be assumed to come from it.
+        let unit = crate_of(&[
+            (
+                "",
+                "mod inner;\nuse external_crate::*;\nfn go() { mystery(); }\n",
+            ),
+            ("inner", "pub fn mystery() {}\n"),
+        ]);
+        assert!(unused_names(&[unit]).is_empty());
+    }
+
+    #[test]
+    fn cross_crate_paths_resolve_by_crate_name() {
+        let library = crate_of(&[("", "pub fn exported() {}\npub fn unexported() {}\n")]);
+        let consumer = CrateUnit {
+            names: Vec::new(),
+            files: vec![ParsedFile {
+                path: PathBuf::from("/ws/src/main.rs"),
+                ast: syn::parse_file("fn main() { fixture::exported(); }\n").ok(),
+                module: Vec::new(),
+            }],
+        };
+        assert_eq!(unused_names(&[library, consumer]), vec!["unexported"]);
     }
 }

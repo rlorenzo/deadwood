@@ -20,9 +20,22 @@ use std::path::{Path, PathBuf};
 /// A source file reached during module resolution.
 pub struct ParsedFile {
     pub path: PathBuf,
-    pub source: String,
     /// `None` when the file failed to parse; it still counts as reachable.
     pub ast: Option<syn::File>,
+    /// Module path of the file's items relative to the crate root, taken from
+    /// the `mod` declarations that led here (empty for the crate root itself).
+    /// Names come from the declarations, not the file names, so `#[path]`
+    /// aliases land under the name paths actually use.
+    pub module: Vec<String>,
+}
+
+/// A file waiting to be loaded, with the context needed to place its items.
+struct Pending {
+    path: PathBuf,
+    /// Whether the file owns its parent directory for child modules
+    /// (`lib.rs`/`mod.rs`) or nests them in a stem-named directory.
+    is_mod_root: bool,
+    module: Vec<String>,
 }
 
 /// Follow `mod` declarations from `root` and return every file reached.
@@ -32,10 +45,18 @@ pub struct ParsedFile {
 pub fn resolve(root: &Path, warnings: &mut Vec<String>) -> Vec<ParsedFile> {
     let mut visited: HashSet<PathBuf> = HashSet::new();
     let mut result = Vec::new();
-    // (file to load, whether it owns its parent directory for child modules)
-    let mut queue: Vec<(PathBuf, bool)> = vec![(root.to_path_buf(), true)];
+    let mut queue: Vec<Pending> = vec![Pending {
+        path: root.to_path_buf(),
+        is_mod_root: true,
+        module: Vec::new(),
+    }];
 
-    while let Some((path, is_mod_root)) = queue.pop() {
+    while let Some(Pending {
+        path,
+        is_mod_root,
+        module,
+    }) = queue.pop()
+    {
         let path = normalize(&path);
         if !visited.insert(path.clone()) {
             continue;
@@ -66,13 +87,14 @@ pub fn resolve(root: &Path, warnings: &mut Vec<String>) -> Vec<ParsedFile> {
                 &ast.items,
                 file_dir,
                 &child_base,
+                &module,
                 &path,
                 &mut queue,
                 warnings,
             );
         }
 
-        result.push(ParsedFile { path, source, ast });
+        result.push(ParsedFile { path, ast, module });
     }
 
     result
@@ -82,12 +104,15 @@ fn collect_mod_decls(
     items: &[syn::Item],
     file_dir: &Path,
     child_base: &Path,
+    module: &[String],
     declaring_file: &Path,
-    queue: &mut Vec<(PathBuf, bool)>,
+    queue: &mut Vec<Pending>,
     warnings: &mut Vec<String>,
 ) {
     for item in items {
         let syn::Item::Mod(m) = item else { continue };
+        let mut child_module = module.to_vec();
+        child_module.push(m.ident.to_string());
         match &m.content {
             // Inline module: its own file-backed children live one directory
             // level deeper (`mod a { mod b; }` in lib.rs -> src/a/b.rs).
@@ -97,6 +122,7 @@ fn collect_mod_decls(
                     inner,
                     file_dir,
                     &nested_base,
+                    &child_module,
                     declaring_file,
                     queue,
                     warnings,
@@ -111,7 +137,11 @@ fn collect_mod_decls(
                         // directory; any other `#[path]` target keeps the
                         // stem-based rule for its own children.
                         let owns_dir = target.file_name().is_some_and(|n| n == "mod.rs");
-                        queue.push((target, owns_dir));
+                        queue.push(Pending {
+                            path: target,
+                            is_mod_root: owns_dir,
+                            module: child_module,
+                        });
                     } else {
                         warnings.push(format!(
                             "`mod {}` in `{}` points at missing file `{}`",
@@ -126,9 +156,17 @@ fn collect_mod_decls(
                 let as_file = child_base.join(format!("{name}.rs"));
                 let as_dir = child_base.join(&name).join("mod.rs");
                 if as_file.is_file() {
-                    queue.push((as_file, false));
+                    queue.push(Pending {
+                        path: as_file,
+                        is_mod_root: false,
+                        module: child_module,
+                    });
                 } else if as_dir.is_file() {
-                    queue.push((as_dir, true));
+                    queue.push(Pending {
+                        path: as_dir,
+                        is_mod_root: true,
+                        module: child_module,
+                    });
                 } else {
                     warnings.push(format!(
                         "`mod {name}` in `{}` has no file at `{}` or `{}`",

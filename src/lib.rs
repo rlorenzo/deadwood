@@ -6,14 +6,18 @@
 //!
 //! - **Dead module files**: `.rs` files under a package's `src/` that are not
 //!   reachable from any target root through `mod` declarations.
-//! - **Unused public items**: fully-`pub` items whose name is never mentioned
-//!   anywhere else in the workspace. This is a name-based heuristic (see
-//!   [`unused`] for the exact rules and known false-negative bias).
+//! - **Unused public items and re-exports**: fully-`pub` items, and `pub use`
+//!   re-exports, that no path anywhere in the workspace resolves to. Usage is
+//!   established by resolving `use` declarations and qualified paths against
+//!   a per-crate symbol table (`src/resolve.rs`), with a conservative
+//!   fallback wherever resolution is not possible (`src/unused.rs`).
 
 pub mod metadata;
 pub mod modtree;
 pub mod report;
-pub mod unused;
+
+mod resolve;
+mod unused;
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -27,8 +31,10 @@ use serde::Serialize;
 pub enum FindingKind {
     /// A source file not reachable from any crate root via `mod` declarations.
     DeadFile,
-    /// A `pub` item never referenced by name anywhere else in the workspace.
+    /// A `pub` item no resolved path in the workspace refers to.
     UnusedPubItem,
+    /// A `pub use` re-export no resolved path in the workspace goes through.
+    UnusedReexport,
 }
 
 /// A single issue reported by the analyzer.
@@ -52,7 +58,7 @@ pub struct Analysis {
     /// Non-fatal problems hit during analysis (unparsable files, unresolved
     /// `mod` declarations). Whenever a warning could cause a detector to
     /// report false positives — incomplete module resolution for dead files,
-    /// an incomplete usage census for unused pub items — that detector is
+    /// unseen definitions or paths for unused pub items — that detector is
     /// skipped for the affected scope, so findings stay trustworthy but the
     /// analysis is incomplete until the warnings are resolved.
     pub warnings: Vec<String>,
@@ -64,12 +70,10 @@ pub fn analyze(path: &Path) -> Result<Analysis> {
     let mut findings = Vec::new();
     let mut warnings = Vec::new();
 
-    // Parse every reachable file once; both detectors share the results.
-    // Dedup is workspace-wide, not per-package: a file shared by several
-    // packages (e.g. via `#[path]`) must enter the identifier census exactly
-    // once, or its definitions would count as uses and hide dead items.
-    let mut reachable: Vec<modtree::ParsedFile> = Vec::new();
-    let mut seen: HashSet<PathBuf> = HashSet::new();
+    // Every target is a crate of its own for name resolution: a bin and the
+    // lib it uses see different scopes, and the same file pulled into two
+    // packages via `#[path]` is a separate module in each.
+    let mut crates: Vec<resolve::CrateUnit> = Vec::new();
 
     for package in &meta.packages {
         let manifest_dir = package
@@ -80,13 +84,14 @@ pub fn analyze(path: &Path) -> Result<Analysis> {
         let warnings_before = warnings.len();
         let mut package_reachable: HashSet<PathBuf> = HashSet::new();
         for target in &package.targets {
-            let tree = modtree::resolve(&target.src_path, &mut warnings);
-            for file in tree {
+            let files = modtree::resolve(&target.src_path, &mut warnings);
+            for file in &files {
                 package_reachable.insert(file.path.clone());
-                if seen.insert(file.path.clone()) {
-                    reachable.push(file);
-                }
             }
+            crates.push(resolve::CrateUnit {
+                names: crate_names(package, target),
+                files,
+            });
         }
 
         // An unparsable file or unresolved `mod` means the reachable set is
@@ -122,22 +127,33 @@ pub fn analyze(path: &Path) -> Result<Analysis> {
         }
     }
 
-    // The usage census must see every file in the workspace: if module
-    // resolution hit any problem, files (and the usages inside them) may be
-    // missing, and undercounted usages would turn into false positives.
+    // Usage resolution must see every file in the workspace: if module
+    // resolution hit any problem, files (and the paths inside them) may be
+    // missing, and unseen paths would turn into false positives.
     if warnings.is_empty() {
         findings.extend(
-            unused::find_unused_pub_items(&reachable, &mut warnings)
+            unused::find_unused_items(&crates, &mut warnings)
                 .into_iter()
                 .map(|item| Finding {
-                    kind: FindingKind::UnusedPubItem,
+                    kind: if item.reexport {
+                        FindingKind::UnusedReexport
+                    } else {
+                        FindingKind::UnusedPubItem
+                    },
                     file: relative_to(&item.file, &meta.workspace_root),
                     line: Some(item.line),
-                    name: Some(item.name.clone()),
-                    message: format!(
-                        "pub {} `{}` is never referenced by name anywhere in this workspace",
-                        item.kind, item.name
-                    ),
+                    message: if item.reexport {
+                        format!(
+                            "`pub use` re-export of `{}` is never referenced through this module",
+                            item.name
+                        )
+                    } else {
+                        format!(
+                            "pub {} `{}` is never referenced by any resolved path in this workspace",
+                            item.kind, item.name
+                        )
+                    },
+                    name: Some(item.name),
                 }),
         );
     } else {
@@ -160,4 +176,26 @@ pub fn analyze(path: &Path) -> Result<Analysis> {
 
 fn relative_to(path: &Path, root: &Path) -> PathBuf {
     path.strip_prefix(root).unwrap_or(path).to_path_buf()
+}
+
+/// The names other crates can use for `target` in paths.
+///
+/// Only library targets can be named at all; cargo normalizes `-` to `_` in
+/// crate names. The package name is kept as a fallback for the usual case
+/// where a package does not rename its lib target.
+fn crate_names(package: &metadata::Package, target: &metadata::Target) -> Vec<String> {
+    const LIB_KINDS: [&str; 6] = ["lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro"];
+    if !target
+        .kind
+        .iter()
+        .any(|kind| LIB_KINDS.contains(&kind.as_str()))
+    {
+        return Vec::new();
+    }
+    let mut names = vec![target.name.replace('-', "_")];
+    let from_package = package.name.replace('-', "_");
+    if !names.contains(&from_package) {
+        names.push(from_package);
+    }
+    names
 }

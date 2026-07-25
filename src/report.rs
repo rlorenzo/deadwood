@@ -14,6 +14,7 @@ pub fn render_text(analysis: &Analysis) -> String {
     for (kind, header) in [
         (FindingKind::DeadFile, "Dead files"),
         (FindingKind::UnusedPubItem, "Unused public items"),
+        (FindingKind::UnusedReexport, "Unused re-exports"),
     ] {
         let group: Vec<_> = analysis
             .findings
