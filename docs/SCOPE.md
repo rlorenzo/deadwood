@@ -63,7 +63,9 @@ that were actually implemented, since several were judgement calls:
   unused-dependency finding, which reads as a false positive; the message
   still names the table to edit. A dev-dependency used only in `tests/` and a
   build-dependency used only in `build.rs` are both seen, because those
-  targets are scanned like any other.
+  targets are scanned like any other. The wrong-table question got its own
+  check and its own finding kind in phase 5 below, and this one still answers
+  only whether the code names the entry at all.
 - **What cannot be judged is skipped out loud**: optional and
   `[target.'cfg(...)'.dependencies]` entries (both gated by a `cfg` we did not
   evaluate then — closed by phase 4 below), packages whose module tree did not
@@ -177,6 +179,59 @@ shape was chosen for that risk rather than for coverage.
 
 Closes [#5](https://github.com/rlorenzo/deadwood/issues/5).
 
+## Phase 5 — misplaced dependency kinds (shipped)
+
+A `[dependencies]` entry only tests, examples and benches reference belongs in
+`[dev-dependencies]`, where it stays out of every consumer's build; a
+`[build-dependencies]` entry the build script never touches is in a table
+nothing reads. Both are `misplaced_dependency` findings, and both are a
+different question from `unused_dependency` — which is why phase 2 refused to
+answer them by scoping its own check per kind, and why nothing it reports has
+moved.
+
+The phase is entirely about noise, so the decisions are the deliverable.
+
+- **A reference now carries where it was written.** `src/deps.rs` attributes
+  every mention to runtime code (lib, bins, proc-macro), dev code (test,
+  example, bench), the build script, or nowhere in particular, and a crate name
+  accumulates the *set* of places it appeared in. The unused check reads the
+  key set and is unchanged by construction; the placement check reads the
+  values. Making the accumulation per-target was the whole mechanical change
+  phase 4 left as a seam.
+- **`#[cfg(test)]` is dev code wherever it sits**, which is the difference
+  between a check that ships and one that fires on every crate with unit tests
+  in its library. `cfg::Gates::test_only` asks whether a gate confines an item
+  to a test build — against the *maximal* matrix, since where code can be
+  compiled is a property of the code and not of what the user asked to analyze
+  — and moves its whole subtree.
+- **Doctests are why doc mentions place nothing.** A doc example links the
+  normal and the dev dependencies alike, so a crate named in one is correctly
+  declared under either table; and the mining is word-level anyway. Attributing
+  doc words to the lib target would have reported correctly-placed
+  dev-dependencies as misplaced, which is the check's second-worst failure
+  mode. They land in the opaque context, which every table serves, so they can
+  only silence a finding.
+- **Opaque channels stay opaque, for the same reason they always were.** Macro
+  input, attribute arguments, and files no `mod` declaration names keep an
+  entry alive precisely because we cannot see through them; a reference we
+  cannot attribute to a target cannot prove misplacement. This is most of the
+  recall the check gives up, deliberately.
+- **Only two claims are made.** An entry nothing names is the unused check's
+  answer. A dev-dependency the library appears to name is never reported: that
+  manifest does not compile, so a mis-attribution on our side is the likelier
+  explanation, and the known one is
+  [#14](https://github.com/rlorenzo/deadwood/issues/14) — a `#[cfg(test)] mod
+  tests;` whose gate lives in the parent file. Reporting only where the
+  evidence is positive is what keeps that gap from becoming a false positive.
+- **What it found.** Nothing, across the fixtures and the 34 crates in the
+  local registry: not one finding of any kind changed, and not one new one
+  appeared. Recall was checked the other way instead, by promoting four of
+  `syn`'s dev-dependencies into `[dependencies]` — two were reported, and the
+  two that were not are named only in a doc example and inside a
+  `macro_rules!` body, exactly as designed.
+
+Closes [#10](https://github.com/rlorenzo/deadwood/issues/10).
+
 ## Next (sequenced, one slice at a time)
 
 1. **Baseline/suppress file** for adopting Deadwood on brownfield codebases.
@@ -192,14 +247,11 @@ Closes [#5](https://github.com/rlorenzo/deadwood/issues/5).
    sharing a name with a module item currently resolves to that item and
    keeps it alive. Costs findings only; the fix must be namespace-aware, as
    a value binding must not silence a type of the same name.
-4. **Misplaced dependency kinds** — a `[dependencies]` entry used only by
-   tests belongs in `[dev-dependencies]`. Deliberately not folded into the
-   unused-dependency check, whose question is whether an entry is named at
-   all; this is a separate finding with its own noise profile, tracked in
-   [#10](https://github.com/rlorenzo/deadwood/issues/10). Phase 4 was its
-   prerequisite and left `src/deps.rs` the seam: a `cfg` matrix that already
-   knows which features and targets a build has, and a `find_unused` that
-   consults it per entry.
+4. **Carry a `cfg` gate from a `mod` declaration into the file it names**
+   ([#14](https://github.com/rlorenzo/deadwood/issues/14)), so a
+   `#[cfg(test)] mod tests;` in its own file is read as the test code it is.
+   Costs placement findings today; the fix is in `src/modtree.rs` and has to
+   handle a file two `mod` declarations reach with different gates.
 
 ## Explicitly out of scope for now
 
@@ -208,7 +260,7 @@ Closes [#5](https://github.com/rlorenzo/deadwood/issues/5).
 - **Architecture analysis** (layering, cycles, module coupling metrics).
 - **IDE integration, LSP, or any UI/visual reporting** — the JSON output is
   the seam where these will attach later.
-- **Plugin system** — three detectors share one analysis pass and one report;
+- **Plugin system** — every detector shares one analysis pass and one report;
   nothing yet wants to be pluggable.
 - **Semantic (type-level) analysis** via rustc internals or rust-analyzer —
   revisit once the syntactic approach hits its accuracy ceiling (tracked in

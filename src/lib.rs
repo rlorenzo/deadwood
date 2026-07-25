@@ -14,6 +14,10 @@
 //! - **Unused dependencies**: `Cargo.toml` entries whose crate name a
 //!   package's code never mentions, in any target and through any channel we
 //!   can see (`src/deps.rs`).
+//! - **Misplaced dependencies**: `Cargo.toml` entries declared in a table the
+//!   code that names them cannot see — a `[dependencies]` entry only the
+//!   tests, examples and benches use, or a `[build-dependencies]` entry the
+//!   build script never touches (`src/deps.rs`).
 //! - **Unsatisfiable `cfg` gates**: `#[cfg(...)]` gates that can hold in no
 //!   build of the package — a `mod` behind a feature its manifest does not
 //!   declare is dead by construction (`src/cfg.rs`).
@@ -60,6 +64,10 @@ pub enum FindingKind {
     UnusedReexport,
     /// A `Cargo.toml` dependency the declaring package's code never names.
     UnusedDependency,
+    /// A `Cargo.toml` dependency declared in a table that no code referencing
+    /// it can see: a `[dependencies]` entry only tests name, or a
+    /// `[build-dependencies]` entry the build script does not.
+    MisplacedDependency,
     /// A `#[cfg(...)]` gate that can hold in no build of its package, so the
     /// code behind it is never compiled by anyone.
     UnsatisfiableCfg,
@@ -169,8 +177,10 @@ pub fn analyze(path: &Path, config_path: Option<&Path>) -> Result<Analysis> {
             }
             package_excluded.extend(resolved.excluded);
             // Every target of the package can name a dependency, including
-            // its tests, examples, benches, and build script.
-            package_references.add_target(&resolved.files);
+            // its tests, examples, benches, and build script — and *which*
+            // target names it is what decides whether the entry is in the
+            // right table.
+            package_references.add_target(&resolved.files, target, &gates);
             let names = crate_names(package, target);
             if !names.is_empty() {
                 lib_of_package.insert(package.name.as_str(), crates.len());
@@ -185,16 +195,16 @@ pub fn analyze(path: &Path, config_path: Option<&Path>) -> Result<Analysis> {
         // incomplete, and files it would have reached would be reported as
         // false-positive dead files — skip the check for this package.
         // A file we could not read or parse may hold the only reference to a
-        // dependency, so that check is skipped for the package too.
+        // dependency, so both dependency checks are skipped for the package
+        // too — the unseen file could name a crate nothing else names, and it
+        // could name one from code no other target has.
         if warnings.len() > warnings_before {
-            warnings.push(format!(
-                "dead-file check skipped for package `{}`: module resolution was incomplete (see warnings above)",
-                package.name
-            ));
-            warnings.push(format!(
-                "unused-dependency check skipped for package `{}`: module resolution was incomplete (see warnings above)",
-                package.name
-            ));
+            for check in ["dead-file", "unused-dependency", "misplaced-dependency"] {
+                warnings.push(format!(
+                    "{check} check skipped for package `{}`: module resolution was incomplete (see warnings above)",
+                    package.name
+                ));
+            }
             continue;
         }
         // Reachability is the wrong question for a dependency: a file that no
@@ -293,13 +303,34 @@ pub fn analyze(path: &Path, config_path: Option<&Path>) -> Result<Analysis> {
                 line: None,
                 message: format!(
                     "{} `{}` is never referenced by any target of package `{}`",
-                    match entry.kind {
-                        metadata::DependencyKind::Normal => "dependency",
-                        metadata::DependencyKind::Development => "dev-dependency",
-                        metadata::DependencyKind::Build => "build-dependency",
-                    },
+                    dependency_noun(entry.kind),
                     entry.name,
                     package.name
+                ),
+                name: Some(entry.name),
+            }),
+        );
+        findings.extend(
+            deps::find_misplaced(
+                package,
+                package_references,
+                config.dependencies(),
+                gates,
+                &mut warnings,
+            )
+            .into_iter()
+            .map(|entry| Finding {
+                kind: FindingKind::MisplacedDependency,
+                severity: Severity::default(),
+                file: manifest.clone(),
+                line: None,
+                message: format!(
+                    "{} `{}` {}, so it belongs in `{}` rather than `{}`",
+                    dependency_noun(entry.declared),
+                    entry.name,
+                    misplacement_evidence(entry.declared, entry.belongs_in, &package.name),
+                    dependency_table(entry.belongs_in),
+                    dependency_table(entry.declared),
                 ),
                 name: Some(entry.name),
             }),
@@ -378,6 +409,53 @@ impl GateSites {
                 name: site.name,
             })
             .collect()
+    }
+}
+
+/// What a manifest entry of this kind is called in a finding message.
+fn dependency_noun(kind: metadata::DependencyKind) -> &'static str {
+    match kind {
+        metadata::DependencyKind::Normal => "dependency",
+        metadata::DependencyKind::Development => "dev-dependency",
+        metadata::DependencyKind::Build => "build-dependency",
+    }
+}
+
+/// The `Cargo.toml` table an entry of this kind is written in, which is what a
+/// misplacement finding has to name on both sides to be actionable.
+fn dependency_table(kind: metadata::DependencyKind) -> &'static str {
+    match kind {
+        metadata::DependencyKind::Normal => "[dependencies]",
+        metadata::DependencyKind::Development => "[dev-dependencies]",
+        metadata::DependencyKind::Build => "[build-dependencies]",
+    }
+}
+
+/// What the references say about an entry, phrased for its finding.
+///
+/// The two directions are stated differently on purpose. Moving a
+/// `[dependencies]` entry down is justified by where the references *are*;
+/// moving a `[build-dependencies]` entry is justified by where they are not,
+/// since the build script is the only thing that can use one at all.
+fn misplacement_evidence(
+    declared: metadata::DependencyKind,
+    belongs_in: metadata::DependencyKind,
+    package: &str,
+) -> String {
+    match (declared, belongs_in) {
+        (metadata::DependencyKind::Build, _) => format!(
+            "is never referenced by the build script of package `{package}`, only by its {}",
+            match belongs_in {
+                metadata::DependencyKind::Development => "test, example and bench code",
+                // Every target kind the runtime context covers, since a
+                // proc-macro crate has no other lib and would otherwise read
+                // its own finding as being about a target it does not have.
+                _ => "library, binaries and proc-macro code",
+            }
+        ),
+        _ => {
+            format!("is referenced only by the test, example and bench code of package `{package}`")
+        }
     }
 }
 

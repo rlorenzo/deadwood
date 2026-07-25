@@ -149,15 +149,18 @@ fn detectors_skip_when_module_resolution_is_incomplete() {
         analysis.warnings
     );
     // A file that failed to parse could hold the only reference to a
-    // dependency, so that check skips the package too.
-    assert!(
-        analysis
-            .warnings
-            .iter()
-            .any(|w| w.contains("unused-dependency check skipped")),
-        "the unused-dependency skip must be surfaced: {:?}",
-        analysis.warnings
-    );
+    // dependency, and could hold it in code from a target no other file
+    // covers, so both dependency checks skip the package too.
+    for check in ["unused-dependency", "misplaced-dependency"] {
+        assert!(
+            analysis
+                .warnings
+                .iter()
+                .any(|w| w.contains(&format!("{check} check skipped"))),
+            "the {check} skip must be surfaced: {:?}",
+            analysis.warnings
+        );
+    }
 }
 
 /// A file included by several workspace members via `#[path]` is a module of
@@ -1032,4 +1035,117 @@ fn exit_codes_follow_severity() {
     let (code, stdout) = run(Some("broken.toml"));
     assert_eq!(code, Some(2), "a config error is an error, not a finding");
     assert!(stdout.is_empty(), "no report is produced: {stdout}");
+}
+
+/// The five cases that decide whether the misplaced-dependency check is worth
+/// shipping, each pinned by one entry of the `depkinds` fixture. Two of them
+/// are findings; the other three are the false positives a naive per-target
+/// split would produce.
+#[test]
+fn dependencies_declared_in_the_wrong_table_are_reported() {
+    let analysis = analyze_fixture("depkinds");
+
+    let mut names: Vec<&str> = reported(&analysis, FindingKind::MisplacedDependency)
+        .into_iter()
+        .map(|(_, name)| name)
+        .collect();
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        // A normal entry only `tests/it.rs` names, one only `examples/demo.rs`
+        // names — both link `[dev-dependencies]` — and a build-dependency the
+        // build script never touches.
+        vec!["example_only_crate", "stale_build_crate", "test_only_crate"],
+        "{:?}",
+        analysis.findings
+    );
+
+    for entry in [
+        // Used by the lib *and* the test: `[dependencies]` is where it belongs.
+        "shared_crate",
+        // A dev-dependency used by a `#[cfg(test)]` module inside the lib. The
+        // module is part of the lib target and links dev-dependencies anyway,
+        // and this is the largest false-positive source the check has.
+        "cfg_test_crate",
+        // A dev-dependency named only by a doc example. Doctests link
+        // dev-dependencies, and a word in a doc comment names no target at all.
+        "doc_only_crate",
+        // A build-dependency the build script names.
+        "build_crate",
+    ] {
+        assert!(
+            !analysis
+                .findings
+                .iter()
+                .any(|f| f.name.as_deref() == Some(entry)),
+            "`{entry}` is declared in the table its references can see: {:?}",
+            analysis.findings
+        );
+    }
+
+    // The other dependency check answers a different question, and this
+    // fixture gives it nothing to say: every entry is named by something.
+    assert!(
+        reported(&analysis, FindingKind::UnusedDependency).is_empty(),
+        "no entry here is unreferenced: {:?}",
+        analysis.findings
+    );
+}
+
+/// Both halves of the finding have to be actionable: the table the entry sits
+/// in and the table it belongs in, in text and in JSON, under a kind
+/// `[severity]` reaches by its own serde tag.
+#[test]
+fn a_misplaced_dependency_names_both_tables_and_is_configurable() {
+    let analysis = analyze_fixture("depkinds");
+
+    let moved_down = analysis
+        .findings
+        .iter()
+        .find(|f| f.name.as_deref() == Some("test_only_crate"))
+        .expect("the test-only entry is reported");
+    assert!(
+        moved_down
+            .message
+            .contains("belongs in `[dev-dependencies]`")
+            && moved_down.message.contains("rather than `[dependencies]`"),
+        "{}",
+        moved_down.message
+    );
+    assert_eq!(moved_down.file, PathBuf::from("Cargo.toml"));
+
+    let stale_build = analysis
+        .findings
+        .iter()
+        .find(|f| f.name.as_deref() == Some("stale_build_crate"))
+        .expect("the stale build entry is reported");
+    assert!(
+        stale_build.message.contains("belongs in `[dependencies]`")
+            && stale_build
+                .message
+                .contains("rather than `[build-dependencies]`"),
+        "{}",
+        stale_build.message
+    );
+
+    let text = deadwood::report::render_text(&analysis);
+    assert!(text.contains("Misplaced dependencies:\n"), "{text}");
+
+    let json: serde_json::Value =
+        serde_json::from_str(&deadwood::report::render_json(&analysis).unwrap()).unwrap();
+    assert!(
+        json["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["kind"] == "misplaced_dependency" && f["name"] == "test_only_crate"),
+        "{json}"
+    );
+
+    let silenced = analyze_configured("depkinds", "off.toml");
+    assert!(
+        reported(&silenced, FindingKind::MisplacedDependency).is_empty(),
+        "`misplaced_dependency = \"off\"` removes the finding entirely: {:?}",
+        silenced.findings
+    );
 }
