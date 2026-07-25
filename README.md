@@ -32,6 +32,7 @@ Dead files:
   src/orphan.rs: not reachable from any target of package `simple` via `mod` declarations
 
 Unused public items:
+  src/lib.rs:3: pub fn `entry` is never referenced by name anywhere in this workspace
   src/lib.rs:7: pub fn `dead_fn` is never referenced by name anywhere in this workspace
 
 3 finding(s) in workspace `/path/to/workspace`.

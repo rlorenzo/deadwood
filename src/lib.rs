@@ -122,20 +122,30 @@ pub fn analyze(path: &Path) -> Result<Analysis> {
         }
     }
 
-    findings.extend(
-        unused::find_unused_pub_items(&reachable, &mut warnings)
-            .into_iter()
-            .map(|item| Finding {
-                kind: FindingKind::UnusedPubItem,
-                file: relative_to(&item.file, &meta.workspace_root),
-                line: Some(item.line),
-                name: Some(item.name.clone()),
-                message: format!(
-                    "pub {} `{}` is never referenced by name anywhere in this workspace",
-                    item.kind, item.name
-                ),
-            }),
-    );
+    // The usage census must see every file in the workspace: if module
+    // resolution hit any problem, files (and the usages inside them) may be
+    // missing, and undercounted usages would turn into false positives.
+    if warnings.is_empty() {
+        findings.extend(
+            unused::find_unused_pub_items(&reachable, &mut warnings)
+                .into_iter()
+                .map(|item| Finding {
+                    kind: FindingKind::UnusedPubItem,
+                    file: relative_to(&item.file, &meta.workspace_root),
+                    line: Some(item.line),
+                    name: Some(item.name.clone()),
+                    message: format!(
+                        "pub {} `{}` is never referenced by name anywhere in this workspace",
+                        item.kind, item.name
+                    ),
+                }),
+        );
+    } else {
+        warnings.push(
+            "unused-pub check skipped: module resolution was incomplete (see warnings above)"
+                .to_string(),
+        );
+    }
 
     findings.sort_by(|a, b| {
         (a.file.as_path(), a.line.unwrap_or(0)).cmp(&(b.file.as_path(), b.line.unwrap_or(0)))
