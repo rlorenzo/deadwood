@@ -182,6 +182,37 @@ mod tests {
         assert_eq!(unused_names(&[unit]), vec!["Lonely"]);
     }
 
+    /// The self type of a qualified `impl` is still not a use, but its head
+    /// segment is a path qualifier, not a name: suppressing it inside the
+    /// body would hide every `crate::` path written there.
+    #[test]
+    fn a_qualified_impl_header_does_not_suppress_paths_in_its_body() {
+        let unit = crate_of(&[
+            (
+                "",
+                "mod thing;\nmod other;\n\
+                 impl crate::thing::Wrapper { fn go() { crate::other::called(); } }\n",
+            ),
+            ("thing", "pub struct Wrapper;\n"),
+            ("other", "pub fn called() {}\n"),
+        ]);
+        assert_eq!(unused_names(&[unit]), vec!["Wrapper"]);
+    }
+
+    #[test]
+    fn attribute_arguments_name_items_even_inside_strings() {
+        // `#[serde(with = "...")]` and friends name real items in a form only
+        // the deriving macro understands.
+        let unit = crate_of(&[
+            (
+                "",
+                "mod codec;\npub struct Wire {\n    #[serde(with = \"crate::codec\")]\n    field: u8,\n}\n",
+            ),
+            ("codec", "pub fn serialize() {}\n"),
+        ]);
+        assert_eq!(unused_names(&[unit]), vec!["Wire"]);
+    }
+
     #[test]
     fn impl_generic_arguments_and_traits_are_uses() {
         let unit = crate_of(&[(

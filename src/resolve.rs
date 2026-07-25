@@ -29,9 +29,16 @@
 //!
 //! - identifiers inside macro invocations and attribute arguments, since we
 //!   do not expand macros;
+//! - names spelled inside an attribute's *string* arguments, where derives
+//!   routinely hide real paths (`#[serde(with = "crate::codec")]`); if such a
+//!   name is a module, everything in it counts as used, because that is the
+//!   form those attributes take;
 //! - names that are not in scope in a module that has an unfollowable glob
 //!   import, since the glob may well be where they come from;
 //! - paths that run through an alias or module we cannot pin down.
+//!
+//! Doc comments are the one string we do not scan: they are prose, and
+//! mentioning an item in one should not keep it alive.
 //!
 //! A path that resolves cleanly to nothing in the workspace (a local
 //! binding, a generic parameter, `std`, an external crate) marks nothing.
@@ -734,6 +741,52 @@ impl SymbolTable {
         }
     }
 
+    /// Mark identifiers in an attribute's arguments, including ones spelled
+    /// inside string literals: `#[serde(with = "crate::codec")]` and friends
+    /// name real items in a form only the deriving macro understands.
+    fn mark_attr_tokens_used(&mut self, tokens: &TokenStream) {
+        for tree in tokens.clone() {
+            match tree {
+                TokenTree::Ident(ident) => self.mark_name_used(&ident.to_string()),
+                TokenTree::Group(group) => self.mark_attr_tokens_used(&group.stream()),
+                TokenTree::Literal(literal) => {
+                    for word in literal
+                        .to_string()
+                        .split(|c: char| !c.is_alphanumeric() && c != '_')
+                        .filter(|word| !word.is_empty())
+                    {
+                        self.mark_name_in_attr_string_used(word);
+                    }
+                }
+                TokenTree::Punct(_) => {}
+            }
+        }
+    }
+
+    /// Mark a name spelled inside an attribute's string argument.
+    ///
+    /// When the name is a module, everything in it is marked too: a string
+    /// like `#[serde(with = "crate::codec")]` names the module, and the
+    /// generated code then calls items inside it that appear nowhere else.
+    fn mark_name_in_attr_string_used(&mut self, name: &str) {
+        let Some(ids) = self.by_name.get(name) else {
+            return;
+        };
+        let modules: Vec<usize> = ids.iter().filter_map(|&id| self.defs[id].child).collect();
+        self.mark_name_used(name);
+        for module in modules {
+            let items: Vec<usize> = self.modules[module]
+                .items
+                .values()
+                .flatten()
+                .copied()
+                .collect();
+            for id in items {
+                self.mark_def_used(id);
+            }
+        }
+    }
+
     fn mark_path_names_used(&mut self, path: &syn::Path) {
         for segment in &path.segments {
             self.mark_name_used(&segment.ident.to_string());
@@ -819,7 +872,7 @@ impl<'ast> Visit<'ast> for RefWalker<'_> {
             syn::Meta::Path(path) => self.table.mark_path_names_used(path),
             syn::Meta::List(list) => {
                 self.table.mark_path_names_used(&list.path);
-                self.table.mark_tokens_used(&list.tokens);
+                self.table.mark_attr_tokens_used(&list.tokens);
             }
             syn::Meta::NameValue(nv) => {
                 self.table.mark_path_names_used(&nv.path);
@@ -843,11 +896,13 @@ impl<'ast> Visit<'ast> for RefWalker<'_> {
         let mut self_name = None;
         match &*node.self_ty {
             syn::Type::Path(ty) if ty.qself.is_none() => {
-                self_name = ty
-                    .path
-                    .segments
-                    .first()
-                    .map(|segment| segment.ident.to_string());
+                // Only a bare `impl Foo` gives the body a self-reference to
+                // recognize. For `impl crate::foo::Bar`, the head segment is
+                // a qualifier, and suppressing every `crate::` path in the
+                // body would hide real uses.
+                if ty.path.leading_colon.is_none() && ty.path.segments.len() == 1 {
+                    self_name = Some(ty.path.segments[0].ident.to_string());
+                }
                 for segment in &ty.path.segments {
                     self.visit_path_arguments(&segment.arguments);
                 }
@@ -978,4 +1033,102 @@ fn has_skip_attr(attrs: &[syn::Attribute]) -> bool {
         }
         false
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A crate whose files are `(module path, source)`; an empty module path
+    /// is the crate root.
+    fn unit(sources: &[(&str, &str)]) -> CrateUnit {
+        CrateUnit {
+            names: vec!["fixture".to_string()],
+            files: sources
+                .iter()
+                .map(|(module, source)| ParsedFile {
+                    path: PathBuf::from(format!("/ws/src/{module}.rs")),
+                    ast: Some(syn::parse_file(source).expect("fixture source must parse")),
+                    module: module
+                        .split('/')
+                        .filter(|segment| !segment.is_empty())
+                        .map(str::to_string)
+                        .collect(),
+                })
+                .collect(),
+        }
+    }
+
+    fn module_at(table: &SymbolTable, path: &[&str]) -> usize {
+        let path: Vec<String> = path.iter().map(|s| (*s).to_string()).collect();
+        *table
+            .by_path
+            .get(&(0, path.clone()))
+            .unwrap_or_else(|| panic!("no module at {path:?}"))
+    }
+
+    #[test]
+    fn a_glob_into_a_workspace_module_is_expanded() {
+        let table = SymbolTable::build(&[unit(&[
+            ("", "mod source;\nuse source::*;\n"),
+            ("source", "pub fn item() {}\n"),
+        ])]);
+
+        let root = module_at(&table, &[]);
+        assert!(
+            !table.modules[root].opaque,
+            "a glob we can follow leaves no hole in the scope"
+        );
+        assert_eq!(
+            table.modules[root].glob_sources,
+            vec![module_at(&table, &["source"])]
+        );
+        assert!(
+            matches!(table.lookup(root, "item"), Step::Defs(_)),
+            "the glob brings `item` into the root's scope"
+        );
+    }
+
+    /// `mod tests { use super::*; }` is the most common glob in Rust code:
+    /// it has to resolve, or every test module in the workspace goes opaque
+    /// and hides findings.
+    #[test]
+    fn a_super_glob_resolves_to_the_parent_module() {
+        let table = SymbolTable::build(&[unit(&[(
+            "",
+            "pub fn item() {}\nmod tests {\n    use super::*;\n}\n",
+        )])]);
+
+        let tests = module_at(&table, &["tests"]);
+        assert!(!table.modules[tests].opaque);
+        assert_eq!(
+            table.modules[tests].glob_sources,
+            vec![module_at(&table, &[])]
+        );
+    }
+
+    #[test]
+    fn a_glob_leading_outside_the_workspace_makes_the_module_opaque() {
+        let table = SymbolTable::build(&[unit(&[("", "use other_crate::prelude::*;\n")])]);
+
+        let root = module_at(&table, &[]);
+        assert!(table.modules[root].opaque);
+        assert!(
+            matches!(table.lookup(root, "anything"), Step::Unknown),
+            "an unknown name in an opaque scope must not read as absent"
+        );
+    }
+
+    #[test]
+    fn opacity_propagates_through_a_resolved_glob() {
+        // The root's glob is followed, but it leads into a module that is
+        // itself opaque, so the root cannot claim to know its own scope.
+        let table = SymbolTable::build(&[unit(&[
+            ("", "mod source;\nuse source::*;\n"),
+            ("source", "use other_crate::*;\n"),
+        ])]);
+
+        let root = module_at(&table, &[]);
+        assert!(matches!(table.lookup(root, "anything"), Step::Unknown));
+    }
 }
