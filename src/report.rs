@@ -15,6 +15,7 @@ pub fn render_text(analysis: &Analysis) -> String {
         (FindingKind::DeadFile, "Dead files"),
         (FindingKind::UnusedPubItem, "Unused public items"),
         (FindingKind::UnusedReexport, "Unused re-exports"),
+        (FindingKind::UnusedDependency, "Unused dependencies"),
     ] {
         let group: Vec<_> = analysis
             .findings
@@ -80,6 +81,15 @@ mod tests {
                               module"
                         .into(),
                 },
+                Finding {
+                    kind: FindingKind::UnusedDependency,
+                    file: PathBuf::from("Cargo.toml"),
+                    line: None,
+                    name: Some("regex".into()),
+                    message: "dependency `regex` is never referenced by any target of package \
+                              `demo`"
+                        .into(),
+                },
             ],
             warnings: vec![],
         }
@@ -89,7 +99,7 @@ mod tests {
     fn text_report_includes_location_and_summary() {
         let text = render_text(&sample());
         assert!(text.contains("src/lib.rs:3:"));
-        assert!(text.contains("2 finding(s)"));
+        assert!(text.contains("3 finding(s)"));
     }
 
     #[test]
@@ -97,7 +107,25 @@ mod tests {
         let text = render_text(&sample());
         let items = text.find("Unused public items:").expect("items group");
         let reexports = text.find("Unused re-exports:").expect("re-exports group");
+        let dependencies = text
+            .find("Unused dependencies:")
+            .expect("dependencies group");
         assert!(items < reexports, "groups render in kind order:\n{text}");
+        assert!(
+            reexports < dependencies,
+            "groups render in kind order:\n{text}"
+        );
+    }
+
+    /// A dependency finding points at the manifest, which has no line number
+    /// to give: the location line must still render.
+    #[test]
+    fn a_finding_without_a_line_renders_its_file_alone() {
+        let text = render_text(&sample());
+        assert!(
+            text.contains("  Cargo.toml: dependency `regex`"),
+            "manifest findings render without a line:\n{text}"
+        );
     }
 
     #[test]
@@ -118,5 +146,11 @@ mod tests {
         assert_eq!(value["findings"][0]["line"], 3);
         assert_eq!(value["findings"][1]["kind"], "unused_reexport");
         assert_eq!(value["findings"][1]["name"], "Stale");
+        assert_eq!(value["findings"][2]["kind"], "unused_dependency");
+        assert_eq!(value["findings"][2]["name"], "regex");
+        assert!(
+            value["findings"][2].get("line").is_none(),
+            "a manifest finding carries no line number"
+        );
     }
 }

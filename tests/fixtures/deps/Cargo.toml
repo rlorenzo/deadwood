@@ -1,0 +1,65 @@
+# Test fixture: unused dependency detection. Every entry here is named in
+# `src/lib.rs`, `build.rs` or `tests/it.rs` through a different channel —
+# plain paths, a rename, a re-export, `extern crate`, macro bodies, attribute
+# arguments and attribute strings, a doc example — except the three
+# `unused_*` entries, which are the only findings this fixture may produce.
+#
+# The dependencies do not exist on any registry, and do not need to:
+# `cargo metadata --no-deps` never resolves them, and Deadwood never builds.
+[package]
+name = "deps"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Named by a plain `use`.
+used_crate = "1"
+# Renamed: code spells `motor`, and the finding would have to say `motor` too.
+motor = { package = "engine-widget", version = "1" }
+# Named only by a `pub use` re-export of one of its items.
+reexport_crate = "1"
+# Named only by `extern crate`.
+extern_crate_only = "1"
+# Named only inside a macro invocation's token stream.
+macro_body_crate = "1"
+# Named only as the path of an attribute.
+attr_path_crate = "1"
+# Named only inside an attribute's string argument, where derive macros hide
+# real paths.
+attr_string_crate = "1"
+# Named only in a doc example, which is compiled as a doctest.
+doc_example_crate = "1"
+# Named only by a doc example in `README.md`, which `#![doc = include_str!]`
+# splices in as the crate documentation.
+readme_crate = "1"
+# Named only by the `[features]` table below, never by code.
+feature_only_crate = "1"
+# Named nowhere: the finding.
+unused_crate = "1"
+# Feature-gated: skipped with a warning until `cfg` evaluation lands.
+optional_crate = { version = "1", optional = true }
+
+[target.'cfg(unix)'.dependencies]
+# Platform-gated: skipped with a warning for the same reason.
+platform_crate = "1"
+
+[features]
+# Forwarding a feature to a dependency is a use of it with no code behind it.
+extra = ["feature_only_crate/all-features"]
+
+[dev-dependencies]
+# Used by an integration test only, which is still a use.
+test_only_crate = "1"
+# Expands to the `mod` declarations for `tests/regression/`, so the files
+# there are compiled without any `mod` declaration naming them.
+automod = "1"
+# Named only inside such a file, which module resolution never reaches.
+regression_only_crate = "1"
+unused_dev_crate = "1"
+
+[build-dependencies]
+# Used by the build script only, which is still a use.
+build_only_crate = "1"
+unused_build_crate = "1"
+
+[workspace]
