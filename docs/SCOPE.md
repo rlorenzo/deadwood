@@ -69,28 +69,65 @@ that were actually implemented, since several were judgement calls:
   evaluate — item 2 below), packages whose module tree did not resolve, and
   packages including code from a file that cannot be read.
 
-Known gap: a dependency declared only to enable a feature of a transitive
-dependency (`getrandom = { features = ["js"] }`) is named by nothing and is
-reported. The intended answer is an allowlist in the config file (item 1),
-tracked in [#9](https://github.com/rlorenzo/deadwood/issues/9).
+Known gap, closed by phase 3: a dependency declared only to enable a feature
+of a transitive dependency (`getrandom = { features = ["js"] }`) is named by
+nothing and was reported. It is now allowlistable in the config file.
+
+## Phase 3 — configuration file (shipped)
+
+A `deadwood.toml`, discovered by walking up from the analyzed path to the
+workspace root (or named with `--config`), carrying four settings
+(`src/config.rs`): `ignore` globs, a severity per finding kind, a `public-api`
+allowlist, and a dependency allowlist. The decisions that shaped it:
+
+- **The default value of every setting is today's behavior.** No config file
+  means the pre-config semantics byte for byte, which the `config` fixture
+  pins by asserting the unconfigured baseline that every other case is
+  measured against.
+- **`ignore` suppresses findings, not evidence.** An ignored file is still
+  read and its paths still count as uses; only findings *about* it are
+  dropped. The alternative — excluding it from analysis outright — would make
+  ignoring generated code invent unused-pub findings for everything that code
+  calls, which is the exact failure the conservatism tenet exists to prevent.
+  The single exception is in `src/modtree.rs`: a `mod` declaration pointing at
+  a *missing* ignored file is skipped silently, since warning about it would
+  skip every check for that package.
+- **Severity is keyed by `FindingKind`'s own serde tags**, so a new finding
+  kind is configurable the day it is added and the two spellings cannot drift.
+  Only `deny` findings set the exit code; `warn` prints and exits 0; `off`
+  never produces a finding at all.
+- **Unknown keys are hard errors** (`#[serde(deny_unknown_fields)]`, exit 2).
+  A setting that silently does nothing is worse than no setting, because the
+  user believes it worked.
+- **`public-api` is the noise lever the phase was for.** Running against
+  `anyhow`, `clap_builder`, and `memchr` each surfaces exactly one advisory
+  finding class — `pub` items with consumers outside the workspace — and a
+  one-line `crates` listing silences all of it.
+- Parsing needed a TOML crate (`toml`, parse-only features); nothing else was
+  added. The glob matcher is ~60 lines in `src/glob.rs` rather than a
+  dependency, because the four wildcards the settings need are the whole
+  requirement.
+
+Closes [#4](https://github.com/rlorenzo/deadwood/issues/4) and
+[#9](https://github.com/rlorenzo/deadwood/issues/9).
 
 ## Next (sequenced, one slice at a time)
 
-1. **Config file** (`deadwood.toml`): ignore globs, per-check severity,
-   public-API allowlist for library crates, and an allowlist for dependency
-   entries kept for their side effects.
-2. **`cfg` awareness** — evaluate simple `cfg(feature = ...)` / platform
+1. **`cfg` awareness** — evaluate simple `cfg(feature = ...)` / platform
    gates instead of always following them. Unblocks the optional and
    platform-gated dependency entries phase 2 skips.
-3. **Baseline/suppress file** for adopting Deadwood on brownfield codebases.
-4. **Reachability over reference counting** — an item referenced only by
+2. **Baseline/suppress file** for adopting Deadwood on brownfield codebases.
+   Its path is a config key waiting to be added; `src/config.rs` marks the
+   spot deliberately left empty, since a key parsed and ignored is the silent
+   misconfiguration phase 3 was built to prevent.
+3. **Reachability over reference counting** — an item referenced only by
    other dead items is still dead; today each item is judged on whether
    anything names it, not on whether that something is alive.
-5. **Lexical scope tracking** — a local, parameter, or generic parameter
+4. **Lexical scope tracking** — a local, parameter, or generic parameter
    sharing a name with a module item currently resolves to that item and
    keeps it alive. Costs findings only; the fix must be namespace-aware, as
    a value binding must not silence a type of the same name.
-6. **Misplaced dependency kinds** — a `[dependencies]` entry used only by
+5. **Misplaced dependency kinds** — a `[dependencies]` entry used only by
    tests belongs in `[dev-dependencies]`. Deliberately not folded into the
    unused-dependency check, whose question is whether an entry is named at
    all; this is a separate finding with its own noise profile, tracked in
@@ -117,7 +154,8 @@ tracked in [#9](https://github.com/rlorenzo/deadwood/issues/9).
 - Every limitation is documented where it lives (module docs) and in the
   README.
 - New dependencies only for confirmed problems; std + `syn` + `proc-macro2` +
-  `serde` + `serde_json` + `clap` + `anyhow` is the current ceiling. (Path
-  resolution needed no new crate, only `syn`'s `visit` feature; unused
+  `serde` + `serde_json` + `clap` + `anyhow` + `toml` is the current ceiling.
+  (Path resolution needed no new crate, only `syn`'s `visit` feature; unused
   dependency detection needed none at all — `cargo metadata` already reports
-  the manifest, so no TOML parser was pulled in.)
+  the manifest. `toml` arrived with the config file in phase 3, parse-only, and
+  was the only addition: glob matching stayed in-tree.)
