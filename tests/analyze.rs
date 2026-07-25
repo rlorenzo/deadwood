@@ -167,7 +167,25 @@ fn resolution_sees_through_names_impls_and_reexports() {
             // `alpha::collision` is the one every path resolves to; a census
             // of the name "collision" hid this one behind it.
             ("src/beta.rs".to_string(), "collision"),
+            // Only mentioned by `impl crate::qualified::Selfish`, whose body
+            // spells the same type bare.
+            ("src/qualified.rs".to_string(), "Selfish"),
+            // Same, one module down; the bare `Wrapper` at that impl is a
+            // different type, so it is not mistaken for a self-reference.
+            ("src/qualified.rs".to_string(), "Wrapper"),
         ]
+    );
+
+    // The bare `Wrapper` in that impl body is `inner::Other`, renamed by a
+    // `use`. Treating it as the impl's self-reference would drop the only
+    // path that reaches `Other` and report a live item as dead.
+    assert!(
+        !analysis
+            .findings
+            .iter()
+            .any(|f| f.name.as_deref() == Some("Other")),
+        "a namesake in scope is not the impl's own type: {:?}",
+        analysis.findings
     );
     assert_eq!(
         reported(&analysis, FindingKind::UnusedReexport),

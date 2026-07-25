@@ -1,5 +1,6 @@
 mod alpha;
 mod beta;
+mod qualified;
 mod surface;
 
 // Reachable from outside the crate, unlike `surface` below.

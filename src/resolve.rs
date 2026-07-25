@@ -786,6 +786,59 @@ impl SymbolTable {
         }
     }
 
+    /// Whether the bare `name`, written in `module`, means exactly the item
+    /// `path` names.
+    ///
+    /// Used to decide whether a qualified `impl crate::thing::Wrapper` can
+    /// treat a bare `Wrapper` in its body as the self-reference it looks
+    /// like. The bare name may equally be some *other* `Wrapper` brought in
+    /// by a `use`, and suppressing that would hide a real use and report a
+    /// live item as dead, so anything short of certainty answers `false`.
+    fn bare_name_means(&self, module: usize, path: &RefPath, name: &str) -> bool {
+        let Step::Defs(defs) = self.lookup(module, name) else {
+            return false;
+        };
+        // More than one definition behind the name: a path spelled with it
+        // reaches all of them, and only some are the impl's own type.
+        let [only] = defs[..] else {
+            return false;
+        };
+        match (
+            self.terminal_def(module, path, 0),
+            self.terminal_def_of(only, 0),
+        ) {
+            (Some(from_path), Some(from_name)) => from_path == from_name,
+            _ => false,
+        }
+    }
+
+    /// The definition a path ultimately names, following alias chains.
+    /// Read-only twin of the marking walk; `None` whenever the answer is not
+    /// certain.
+    fn terminal_def(&self, module: usize, path: &RefPath, depth: usize) -> Option<usize> {
+        if depth > MAX_ALIAS_DEPTH {
+            return None;
+        }
+        let mut reached = Vec::new();
+        match self.walk_path(module, path, false, 0, &mut reached) {
+            Outcome::Item | Outcome::Module(_) => {}
+            Outcome::Opaque(_) | Outcome::Foreign => return None,
+        }
+        self.terminal_def_of(*reached.last()?, depth)
+    }
+
+    /// The definition an alias ultimately names; the definition itself when
+    /// it is not an alias.
+    fn terminal_def_of(&self, id: usize, depth: usize) -> Option<usize> {
+        if depth > MAX_ALIAS_DEPTH {
+            return None;
+        }
+        match self.defs[id].target.clone() {
+            Some(target) => self.terminal_def(self.defs[id].module, &target, depth + 1),
+            None => Some(id),
+        }
+    }
+
     fn mark_def_used(&mut self, id: usize) {
         if !self.used.insert(id) {
             // Already marked; this also stops cycles of mutual re-exports.
@@ -976,12 +1029,25 @@ impl<'ast> Visit<'ast> for RefWalker<'_> {
         let mut self_name = None;
         match &*node.self_ty {
             syn::Type::Path(ty) if ty.qself.is_none() => {
-                // Only a bare `impl Foo` gives the body a self-reference to
-                // recognize. For `impl crate::foo::Bar`, the head segment is
-                // a qualifier, and suppressing every `crate::` path in the
-                // body would hide real uses.
+                // A bare `impl Foo` names the type in its head segment, so a
+                // body path starting with `Foo` is the self-reference.
+                //
+                // For a qualified `impl crate::foo::Bar` the head segment is
+                // only a qualifier — suppressing every `crate::` path in the
+                // body would hide real uses — but a body path can still spell
+                // the type by its bare last segment. That is the same
+                // self-reference, and only when the bare name provably means
+                // this very item: it may instead be another `Bar` that a
+                // `use` brought into scope, and suppressing that would report
+                // a live item as dead.
                 if ty.path.leading_colon.is_none() && ty.path.segments.len() == 1 {
                     self_name = Some(ty.path.segments[0].ident.to_string());
+                } else if let Some(last) = ty.path.segments.last() {
+                    let name = last.ident.to_string();
+                    let path = RefPath::from_syn(&ty.path);
+                    if self.table.bare_name_means(self.module, &path, &name) {
+                        self_name = Some(name);
+                    }
                 }
                 for segment in &ty.path.segments {
                     self.visit_path_arguments(&segment.arguments);
