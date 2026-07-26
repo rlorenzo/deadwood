@@ -232,22 +232,79 @@ The phase is entirely about noise, so the decisions are the deliverable.
 
 Closes [#10](https://github.com/rlorenzo/deadwood/issues/10).
 
+## Phase 6 — baseline file (shipped)
+
+`deadwood check --write-baseline` records today's findings to a committed JSON
+file; later runs subtract them and fail only on what is new
+(`src/baseline.rs`). The `baseline` key finally fills the slot phase 3 left
+deliberately empty in `RawConfig`.
+
+The phase is one decision — what makes two findings "the same finding" — and
+several corollaries.
+
+- **The key is kind, file and name.** Not the line: code moves, and a baseline
+  that expired whenever someone added an import above it would be worse than
+  none. Not the message: it is prose that gets reworded. And **not the
+  severity**, which is the one that needed arguing. Severity is a `deadwood.toml`
+  decision rather than a property of the finding, so putting it in the key would
+  mean that turning a check *down* from `deny` to `warn` un-baselines every
+  entry of that kind and reports them all as new. The kind, in contrast, is load
+  bearing: `unused_dependency` and `misplaced_dependency` name the same
+  `Cargo.toml`, the same entry, and neither carries a line, so the kind is the
+  only thing that separates two entirely different claims.
+- **The file is the report's finding shape.** A baseline is `{"findings": [...]}`
+  holding exactly the objects `--json` puts in its own array — no second format
+  and no second serializer, pinned by a test comparing the two serializations
+  field for field. `workspace_root` is left out because it is an absolute path
+  from whichever machine ran the analysis, and `warnings` because they are not
+  findings. Reading is looser than writing: only `kind` and `file` are required,
+  so a hand-edited entry is a two-line object.
+- **A suppressed finding leaves the report entirely** rather than appearing
+  marked. The report answers "what should I act on", and reprinting the accepted
+  list reproduces the day-one noise the baseline was adopted to remove — but the
+  compatibility argument is the stronger one: `findings` is the JSON contract
+  every consumer parses and `has_denied` is the exit code, so carrying
+  suppressed entries in it would break every count and the exit code itself
+  unless each consumer learned about a new field first. The suppressed count and
+  the file are printed on every run, and the file is in the repository.
+- **A key two findings share suppresses both.** Recording a multiplicity and
+  reporting the (n+1)th as new was rejected: with the line out of the key we
+  cannot say which occurrence is new, so the report would point at a line that
+  is very likely baselined — a wrong finding where this is a missed one
+  ([#16](https://github.com/rlorenzo/deadwood/issues/16)).
+- **Stale entries are reported and never fail the run.** The exit code follows
+  severity and nothing else, a fixed finding has no severity, and failing a
+  build because a developer deleted dead code is how a tool gets uninstalled.
+  `--prune-baseline` rewrites the file without them and records nothing new,
+  which is what keeps it from being a second `--write-baseline`.
+- **Missing and malformed are errors, and the split matches `--config`.** A
+  path written in `deadwood.toml` must exist; the default location may simply be
+  empty, which is a project that has not adopted a baseline and behaves exactly
+  like a Deadwood without the feature. Reading an unreadable file as "everything
+  is baselined" would turn a broken file into a permanently green run.
+- **What it found.** Byte-identical output across the fixtures and the 34 crates
+  in the local registry — the no-baseline path is unchanged, which is the whole
+  compatibility claim. The round trip was verified on `heck 0.5.0`, whose
+  genuine `unsatisfiable_cfg` was recorded, went quiet, survived being pushed 30
+  lines down the file, went stale when the gate was deleted, and pruned away.
+
+Closes [#6](https://github.com/rlorenzo/deadwood/issues/6), and files the two
+gaps it leaves: [#16](https://github.com/rlorenzo/deadwood/issues/16), a key two
+findings share, and [#17](https://github.com/rlorenzo/deadwood/issues/17), a
+moved file un-baselining everything in it.
+
 ## Next (sequenced, one slice at a time)
 
-1. **Baseline/suppress file** for adopting Deadwood on brownfield codebases.
-   Its path is a config key waiting to be added; `src/config.rs` marks the
-   spot deliberately left empty, since a key parsed and ignored is the silent
-   misconfiguration phase 3 was built to prevent.
-2. **Reachability over reference counting** — an item referenced only by
+1. **Reachability over reference counting** — an item referenced only by
    other dead items is still dead; today each item is judged on whether
    anything names it, not on whether that something is alive. Also what a
    "test-only item" finding kind would need before it could be honest; see
    the `cfg(test)` decision in phase 4.
-3. **Lexical scope tracking** — a local, parameter, or generic parameter
+2. **Lexical scope tracking** — a local, parameter, or generic parameter
    sharing a name with a module item currently resolves to that item and
    keeps it alive. Costs findings only; the fix must be namespace-aware, as
    a value binding must not silence a type of the same name.
-4. **Carry a `cfg` gate from a `mod` declaration into the file it names**
+3. **Carry a `cfg` gate from a `mod` declaration into the file it names**
    ([#14](https://github.com/rlorenzo/deadwood/issues/14)), so a
    `#[cfg(test)] mod tests;` in its own file is read as the test code it is.
    Costs placement findings today; the fix is in `src/modtree.rs` and has to

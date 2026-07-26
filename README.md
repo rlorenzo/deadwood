@@ -7,7 +7,8 @@ dependencies, and `cfg` gates that can never hold, in the spirit of
 Fallow/knip-style analyzers for other ecosystems.
 
 **Status:** v0.1 — early, narrow, and honest about it. Tunable through a
-`deadwood.toml`, and correct without one. See
+`deadwood.toml`, adoptable on an existing codebase through a baseline file, and
+correct without either. See
 [`docs/SCOPE.md`](docs/SCOPE.md) for what is in and out of scope, and
 [`docs/ENVIRONMENT.md`](docs/ENVIRONMENT.md) for the environment assessment
 this project was bootstrapped from.
@@ -138,11 +139,82 @@ Misplaced dependencies:
 - `--json` — machine-readable output (findings + warnings)
 - `--config PATH` — use this configuration file instead of searching for
   `deadwood.toml`
+- `--write-baseline` — record the current findings so later runs fail only on
+  new ones; see [Adopting on an existing codebase](#adopting-on-an-existing-codebase)
+- `--prune-baseline` — drop baseline entries that no longer occur
 - Exit codes: `0` clean, `1` findings that are configured `deny` (the default
   for every kind), `2` error — suitable for CI gates.
 
 Requires `cargo` on `PATH` (workspace discovery shells out to
 `cargo metadata --no-deps`, which works offline).
+
+## Adopting on an existing codebase
+
+A codebase that has never been analyzed has findings on day one, and a tool
+that fails the build for all of them on day one gets uninstalled. Record them
+once and only new ones fail:
+
+```console
+$ deadwood check --write-baseline
+No issues found.
+Wrote 34 finding(s) to baseline `deadwood-baseline.json`.
+
+$ deadwood check                     # commit the file; CI is green from here
+No issues found.
+34 finding(s) suppressed by baseline `deadwood-baseline.json`.
+```
+
+The file is `deadwood-baseline.json` in the workspace root unless a
+`deadwood.toml` says otherwise, and it holds exactly the objects `--json` puts
+in its `findings` array — no second format, and readable in a diff. It is meant
+to be committed: the debt stays visible, and it can only shrink.
+
+**A baselined finding is subtracted, not marked.** It is absent from the text
+report, from the JSON `findings` array, and from the count; only the summary
+line says how many there were. The report is for what you have to act on, and
+reprinting the accepted list would reproduce exactly the noise the baseline was
+adopted to remove.
+
+**Matching survives line drift.** An entry is matched on kind, file and item
+name — not the line, which moves with every edit above it, and not the
+severity, which is a `deadwood.toml` decision: putting it in the key would mean
+that turning a check down from `deny` to `warn` un-baselines every finding of
+that kind at once.
+
+**Fixed findings are reported, not forgotten.** An entry nothing matches any
+more is stale, and every run says so; `--prune-baseline` rewrites the file
+without them. Stale entries never fail the run — the exit code follows severity
+and nothing else, and a developer who deletes dead code should not be punished
+for it.
+
+```console
+$ deadwood check
+Unused public items:
+  src/api.rs:12: pub fn `fresh` is never referenced by any resolved path in this workspace
+
+1 finding(s) in workspace `/path/to/workspace`.
+
+Stale baseline entries in `deadwood-baseline.json` (no longer occur; rerun with --prune-baseline to drop them):
+  src/old.rs: unused_pub_item `finally_deleted`
+33 finding(s) suppressed by baseline `deadwood-baseline.json`.
+```
+
+Two rules keep the file from lying:
+
+- **Writing is explicit.** No run without `--write-baseline` or
+  `--prune-baseline` creates or modifies the file, so a CI job can never
+  quietly accept what it found.
+- **A missing or unparsable baseline is exit 2**, never "nothing is
+  baselined" and never "everything is". A typo'd path would otherwise disarm a
+  CI gate silently. The one non-error case is the default location with no file
+  in it — that is a project that has not adopted a baseline, and it behaves
+  exactly like a Deadwood without the feature.
+
+One entry covers every finding that shares its key, so a *second* item with the
+same name in the same file is suppressed along with the first
+([#16](https://github.com/rlorenzo/deadwood/issues/16)), and moving a file
+un-baselines the findings in it
+([#17](https://github.com/rlorenzo/deadwood/issues/17)).
 
 ## Configuration
 
@@ -223,9 +295,16 @@ target-os = ["linux", "macos"]
 # a test is a use, so an item only tests reach is not reported.
 # Default: true.
 test = true
+
+# Where the baseline file lives, relative to this config file. Omitting the key
+# does not mean "no baseline": it means the default location,
+# `deadwood-baseline.json` in the workspace root, which may or may not have a
+# file in it yet. A path written here and not on disk is an error.
+# Default: the default location.
+baseline = ".deadwood/baseline.json"
 ```
 
-Four things are worth knowing about how these behave.
+Five things are worth knowing about how these behave.
 
 **`ignore` suppresses findings, not evidence.** An ignored file is still read,
 and the paths in it still count as uses. Generated code that calls your
@@ -256,6 +335,14 @@ project. The `unsatisfiable_cfg` finding is the one thing the matrix does *not*
 affect — a gate is judged impossible against every build there could be, so
 narrowing the matrix never invents one and never silences one.
 
+**`baseline` names a file, it does not switch a feature on.** A run reads the
+baseline whether or not the key is present — with it, from where it points;
+without it, from the default location if a file is there. What the key changes
+is the error contract: a path you wrote down must exist, while the default
+location may simply be empty. Note also that `ignore` and `severity = "off"`
+outrank the baseline, since a finding they remove never exists to be
+suppressed — which makes any baseline entry for it stale, and prunable.
+
 Configuration mistakes are hard failures (exit 2), including unknown keys. A
 `deadwood.toml` that quietly does nothing because of a typo is worse than none
 at all, so a misspelled key names itself, its file, and the keys that do exist:
@@ -266,7 +353,7 @@ error: invalid config file `deadwood.toml`: TOML parse error at line 1, column 1
   |
 1 | ignor = ["vendor"]
   | ^^^^^
-unknown field `ignor`, expected one of `ignore`, `severity`, `public-api`, `dependencies`, `cfg`
+unknown field `ignor`, expected one of `ignore`, `severity`, `public-api`, `dependencies`, `cfg`, `baseline`
 ```
 
 ## Development
@@ -315,7 +402,10 @@ toolchain is pinned to `stable` with `clippy` and `rustfmt` via
    findings, so `ignore` and `[severity]` cover every detector identically
    (`src/config.rs`); `public-api`, the dependency allowlist, and the `cfg`
    matrix are consulted by the detectors they belong to.
-7. **Reporting** — grouped text or JSON (`src/report.rs`).
+7. **Baseline** — last of all, and after the configuration: recorded findings
+   are subtracted by kind, file and name, and recorded entries that matched
+   nothing are reported stale (`src/baseline.rs`).
+8. **Reporting** — grouped text or JSON (`src/report.rs`).
 
 ## Known limitations (tracked, not hidden)
 
@@ -385,6 +475,17 @@ toolchain is pinned to `stable` with `clippy` and `rustfmt` via
 - A `[target.'...'.dependencies]` table keyed by a bare target triple rather
   than a `cfg(...)` expression is not modelled, so narrowing `target-os` does
   not reach its entries; they are judged as if always built.
+- A baseline entry suppresses *every* finding that shares its key, so a second
+  item with the same name in the same file is covered by the first one's entry
+  ([#16](https://github.com/rlorenzo/deadwood/issues/16)). Since the key
+  deliberately ignores the line, there is no way to say which occurrence is the
+  new one, and pointing at a baselined line would be a wrong finding rather
+  than a missed one.
+- The baseline key includes the file path, so moving a file un-baselines every
+  finding in it and makes every entry that recorded them stale
+  ([#17](https://github.com/rlorenzo/deadwood/issues/17)). `--prune-baseline`
+  then `--write-baseline` is the workaround, at the cost of re-accepting
+  anything else that regressed in between.
 
 ## License
 
