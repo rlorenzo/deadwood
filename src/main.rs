@@ -28,14 +28,35 @@ enum Command {
         /// from PATH up to the workspace root
         #[arg(long, value_name = "PATH")]
         config: Option<PathBuf>,
+        /// Record the current findings as the baseline, replacing the file.
+        /// The only way a run creates it
+        #[arg(long, conflicts_with = "prune_baseline")]
+        write_baseline: bool,
+        /// Drop baseline entries that no longer occur and rewrite the file.
+        /// Never records a new finding
+        #[arg(long)]
+        prune_baseline: bool,
     },
 }
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
-        Command::Check { path, json, config } => {
-            match deadwood::analyze(&path, config.as_deref()) {
+        Command::Check {
+            path,
+            json,
+            config,
+            write_baseline,
+            prune_baseline,
+        } => {
+            // Writing is never implicit: without one of these flags no run
+            // creates or modifies the baseline file.
+            let mode = match (write_baseline, prune_baseline) {
+                (true, _) => deadwood::baseline::Mode::Write,
+                (_, true) => deadwood::baseline::Mode::Prune,
+                _ => deadwood::baseline::Mode::Apply,
+            };
+            match deadwood::analyze_with(&path, config.as_deref(), mode) {
                 Ok(analysis) => {
                     if json {
                         match deadwood::report::render_json(&analysis) {
