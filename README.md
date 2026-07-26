@@ -78,6 +78,11 @@ Everything else stays quiet, by design:
 - **`#[cfg(test)]` code counts as test code wherever it sits**, so the unit
   tests inside a library do not make every dev-dependency they use look
   misplaced. That is the single largest false positive the check could make.
+  The gate counts from wherever it is written, too: a `#[cfg(test)] mod tests;`
+  whose body is a file of its own is read as the test code it is, and a
+  `[dependencies]` entry only such a file names is reported as belonging in
+  `[dev-dependencies]`. A file that some *ungated* declaration also reaches is
+  runtime code, whichever declaration is read first.
 - **A mention in a doc comment places nothing.** Doc examples are compiled as
   doctests, which link the normal *and* the dev dependencies, so a crate named
   in one is correctly declared under either table.
@@ -379,7 +384,8 @@ toolchain is pinned to `stable` with `clippy` and `rustfmt` via
 2. **Module-tree resolution** — from each target root, `mod` declarations
    (including nested inline modules and `#[path]`) are followed to the files
    they name; everything reached is parsed with `syn`, and each file records
-   the module path its items live in (`src/modtree.rs`). A `mod` behind a
+   the module path its items live in, plus whether every declaration that
+   reached it confines it to a test build (`src/modtree.rs`). A `mod` behind a
    `cfg` the configured build matrix rules out is not followed, and neither it
    nor the files under it can be reported dead.
 3. **`cfg` evaluation** — each gate is answered against two matrices
@@ -466,12 +472,15 @@ toolchain is pinned to `stable` with `clippy` and `rustfmt` via
   make an entry unplaceable, so the misplaced-dependency check is much quieter
   than the unused one. Across the 34 crates in a local registry it reports
   nothing at all.
-- A `#[cfg(test)] mod tests;` whose body is a file of its own is read as
-  runtime code: the gate is written in the parent file and module resolution
-  does not carry it down. That costs placement findings and never invents
-  one — the never-reported dev-dependency direction is what keeps it from
-  doing worse
-  ([#14](https://github.com/rlorenzo/deadwood/issues/14)).
+- A `mod` declaration's `cfg` gate reaches the file it names, but a file *any*
+  ungated declaration reaches is runtime code even when every other
+  declaration reaching it is `#[cfg(test)]`-gated. A test helper some non-test
+  module also pulls in is therefore unplaceable — a lost finding, since the
+  other reading would move a crate the shipping build links.
+- Only `cfg(test)` and gates implying it move code into test code. A module
+  behind a feature that in practice is only ever on in tests, or behind a gate
+  Deadwood cannot evaluate at all, is runtime code as far as placement is
+  concerned.
 - A `[target.'...'.dependencies]` table keyed by a bare target triple rather
   than a `cfg(...)` expression is not modelled, so narrowing `target-os` does
   not reach its entries; they are judged as if always built.

@@ -221,8 +221,9 @@ The phase is entirely about noise, so the decisions are the deliverable.
   manifest does not compile, so a mis-attribution on our side is the likelier
   explanation, and the known one is
   [#14](https://github.com/rlorenzo/deadwood/issues/14) — a `#[cfg(test)] mod
-  tests;` whose gate lives in the parent file. Reporting only where the
-  evidence is positive is what keeps that gap from becoming a false positive.
+  tests;` whose gate lives in the parent file (closed by phase 7 below, which
+  did not make the claim reportable). Reporting only where the evidence is
+  positive is what keeps that gap from becoming a false positive.
 - **What it found.** Nothing, across the fixtures and the 34 crates in the
   local registry: not one finding of any kind changed, and not one new one
   appeared. Recall was checked the other way instead, by promoting four of
@@ -293,6 +294,51 @@ gaps it leaves: [#16](https://github.com/rlorenzo/deadwood/issues/16), a key two
 findings share, and [#17](https://github.com/rlorenzo/deadwood/issues/17), a
 moved file un-baselining everything in it.
 
+## Phase 7 — a `mod` declaration's gate reaches the file it names (shipped)
+
+`#[cfg(test)] mod tests;` with the body in `src/tests.rs` was read as runtime
+code: `src/modtree.rs` used the gate to decide whether to *follow* the
+declaration and then forgot what it was, so the file arrived at the detectors
+with no memory of how it was declared. Written inline the same module was always
+attributed correctly, because `src/deps.rs` walks the item tree itself.
+`ParsedFile::test_only` closes the gap, and the placement check starts such a
+file's walk in the dev context — so a `[dependencies]` entry only that file
+names is now reported as belonging in `[dev-dependencies]`.
+
+Two decisions were the whole risk of the slice.
+
+- **A file two declarations reach with different gates is decided after the
+  walk, not during it.** `#[path]` aliasing (and the same file pulled into two
+  targets) can name one file from a gated and an ungated declaration at once,
+  and resolution reads each file once from a LIFO queue — so a flag inherited
+  into the queue entry would have been whichever declaration popped first.
+  Every declaration is recorded instead, and a file is test-only unless the
+  crate root reaches it through a chain of declarations that are all ungated:
+  plain reachability, computed once the walk is over. The rejected alternative
+  was letting a repeat visit merge its flag into the already-loaded file, which
+  is order-independent for that file and *not* for the children it already
+  queued under the wrong flag.
+- **Any ungated declaration wins.** Getting this backwards is the one direction
+  that manufactures a false positive — a crate the shipping build genuinely
+  links, moved into `[dev-dependencies]` — while getting it wrong the other way
+  costs a finding, which is the trade every other check here makes.
+
+The `[dev-dependencies]` → `[dependencies]` direction is deliberately still not
+reported. This phase removes the largest known mis-attribution behind that
+refusal without removing the others (a feature only tests turn on, a `cfg_attr`
+indirection, an `include!` from another target), so it is a prerequisite for
+that claim becoming honest rather than a licence to make it.
+
+**What it found.** One new finding, in the fixture written for it: across the 14
+existing fixtures and the 34 crates in the local registry the `--json` output is
+byte-identical, since a test module in its own file names dev-dependencies that
+are already declared as such. Recall was checked the other way, as in phase 5:
+promoting `zmij`'s `num-bigint` — named only from the `src/tests.rs` behind
+`#[cfg(test)] mod tests;` — into `[dependencies]` is reported, and nothing else
+about that crate's findings moves.
+
+Closes [#14](https://github.com/rlorenzo/deadwood/issues/14).
+
 ## Next (sequenced, one slice at a time)
 
 1. **Reachability over reference counting** — an item referenced only by
@@ -304,11 +350,11 @@ moved file un-baselining everything in it.
    sharing a name with a module item currently resolves to that item and
    keeps it alive. Costs findings only; the fix must be namespace-aware, as
    a value binding must not silence a type of the same name.
-3. **Carry a `cfg` gate from a `mod` declaration into the file it names**
-   ([#14](https://github.com/rlorenzo/deadwood/issues/14)), so a
-   `#[cfg(test)] mod tests;` in its own file is read as the test code it is.
-   Costs placement findings today; the fix is in `src/modtree.rs` and has to
-   handle a file two `mod` declarations reach with different gates.
+3. **The `[dev-dependencies]` → `[dependencies]` direction of the placement
+   check** — an entry the library itself names is in a table that does not
+   compile, and phase 7 removed the largest reason to distrust such an
+   attribution. What is left are the gates Deadwood cannot read; the slice is
+   deciding which of them can be recognized and which have to stay a skip.
 
 ## Explicitly out of scope for now
 

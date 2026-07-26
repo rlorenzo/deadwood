@@ -1,0 +1,33 @@
+# Test fixture: the `cfg` gate on a `mod` declaration, carried into the file
+# the declaration names. Every entry here is named by some code, so nothing in
+# this fixture is an *unused* dependency — the only question it asks is which
+# table each entry belongs in, and each entry is named from exactly one kind of
+# code so that it pins one answer.
+#
+# The dependencies do not exist on any registry, and do not need to:
+# `cargo metadata --no-deps` never resolves them, and Deadwood never builds.
+[package]
+name = "modgate"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Named only by `src/tests.rs`, which `src/lib.rs` declares as
+# `#[cfg(test)] mod tests;`. The file compiles in test builds alone, so the
+# entry costs every consumer of the crate a build for nothing: the finding this
+# fixture exists for.
+file_test_crate = "1"
+# Named only by `src/both_ways.rs`, which two declarations reach — one
+# `#[cfg(test)]`-gated, one not. A file any ungated declaration reaches is
+# runtime code, so this entry is exactly where it belongs and reporting it
+# would be the false positive the check must never make.
+both_ways_crate = "1"
+
+[dev-dependencies]
+# Named only by the inline `#[cfg(test)] mod` in `src/lib.rs`. That module is
+# part of the lib target and links `[dev-dependencies]` anyway, and Deadwood
+# has always attributed it correctly by walking the item tree itself: the
+# regression guard on the path that already worked.
+inline_test_crate = "1"
+
+[workspace]

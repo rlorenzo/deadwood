@@ -1150,6 +1150,55 @@ fn a_misplaced_dependency_names_both_tables_and_is_configurable() {
     );
 }
 
+/// A `mod` declaration's gate reaching the file it names, end to end: the
+/// `modgate` fixture declares one test module per way a gate can arrive, and
+/// each entry of its manifest is named from exactly one of them.
+#[test]
+fn a_dependency_only_a_cfg_test_module_file_names_belongs_in_dev_dependencies() {
+    let analysis = analyze_fixture("modgate");
+
+    let names: Vec<&str> = reported(&analysis, FindingKind::MisplacedDependency)
+        .into_iter()
+        .map(|(_, name)| name)
+        .collect();
+    assert_eq!(
+        names,
+        // Named only by `src/tests.rs`, whose `#[cfg(test)] mod tests;` lives
+        // in `src/lib.rs`. Before the gate was carried down, the file read as
+        // runtime code and this finding was missed.
+        vec!["file_test_crate"],
+        "{:?}",
+        analysis.findings
+    );
+
+    for entry in [
+        // Reached by an ungated declaration as well as a gated one, so it is
+        // runtime code: reporting it would be a false positive.
+        "both_ways_crate",
+        // The inline `#[cfg(test)] mod` in the lib, which `src/deps.rs` has
+        // always attributed by walking the item tree itself.
+        "inline_test_crate",
+    ] {
+        assert!(
+            !analysis
+                .findings
+                .iter()
+                .any(|f| f.name.as_deref() == Some(entry)),
+            "`{entry}` is declared in the table its references can see: {:?}",
+            analysis.findings
+        );
+    }
+
+    // Every entry is named by something, and every file is reached: the other
+    // detectors have nothing to say about this fixture.
+    assert!(
+        reported(&analysis, FindingKind::UnusedDependency).is_empty()
+            && reported(&analysis, FindingKind::DeadFile).is_empty(),
+        "{:?}",
+        analysis.findings
+    );
+}
+
 // -- the baseline file -----------------------------------------------------
 //
 // The `baseline` fixture produces six findings with no configuration at all,

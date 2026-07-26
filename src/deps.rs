@@ -132,6 +132,18 @@
 //! item can be compiled is a property of the code, not of what the user asked
 //! to analyze.
 //!
+//! **The gate need not be in the file it moves.** A `#[cfg(test)] mod tests;`
+//! whose body is a file of its own is test code, and that file holds nothing
+//! that says so — the gate is written in the parent. Module resolution answers
+//! it instead: [`crate::modtree::ParsedFile::test_only`] is set when every
+//! `mod` declaration chain reaching a file confines it to a test build, and
+//! [`CrateReferences::add_target`] starts such a file's walk in the dev
+//! context. Written inline the same module needed nothing of the sort, because
+//! the item walk below sees the gate where it is. One file can be reached both
+//! ways — `#[path]` aliasing, or the same file pulled into two targets — and
+//! any ungated declaration makes it runtime code, since that is the direction
+//! that cannot invent a finding.
+//!
 //! **A doc comment attributes to nowhere.** Doc examples are compiled as
 //! doctests, and a doctest links the normal *and* the dev dependencies — so a
 //! dependency named only in a doc example is correctly declared under either
@@ -168,10 +180,15 @@
 //! [`find_unused`]'s answer, not this one's. An entry mentioned only opaquely
 //! is not placed, in any direction. And a `[dev-dependencies]` entry the
 //! library appears to name is left alone: such a manifest does not compile at
-//! all, so the likelier explanation is that we attributed the mention wrongly
-//! — through a `#[cfg(test)] mod tests;` in a file of its own, say, whose gate
-//! is written in the parent and which this module therefore reads as runtime
-//! code (<https://github.com/rlorenzo/deadwood/issues/14>).
+//! all, so a mis-attribution here is a likelier explanation than a manifest
+//! nobody can build. The largest known source of one is closed — the
+//! `#[cfg(test)] mod tests;` in a file of its own is read as the test code it
+//! is — and the ones that remain are the gates this crate cannot evaluate: a
+//! feature only the tests ever turn on, a `cfg_attr` indirection, a `cfg` a
+//! build script sets, or a file `include!`d from a site in another target.
+//! Reporting that direction is a slice of its own, with a false-positive risk
+//! of its own; closing the gate gap is what makes it worth attempting, not
+//! what makes it safe.
 //!
 //! # Entries that are load bearing without being named
 //!
@@ -203,12 +220,12 @@
 //!   unplaceable, which is most of the recall the check gives up — across the
 //!   34 crates in the local registry it is the reason every entry declared in
 //!   the wrong table would have to be found by hand.
-//! - A `mod` whose `#[cfg(test)]` gate is written in the parent file, with the
-//!   module's own body in a file of its own, is read as runtime code: the gate
-//!   is not carried down by module resolution
-//!   (<https://github.com/rlorenzo/deadwood/issues/14>). It costs findings
-//!   rather than inventing them, and the never-reported dev-dependency
-//!   direction is what keeps it from doing worse.
+//! - A file reached by *any* ungated `mod` declaration is runtime code, even
+//!   when every other declaration reaching it is `#[cfg(test)]`-gated. A test
+//!   helper some non-test module also pulls in is therefore unplaceable, which
+//!   is the direction that costs a finding rather than inventing one: the
+//!   opposite reading would move a crate the shipping build genuinely links
+//!   into `[dev-dependencies]`.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -306,11 +323,18 @@ impl CrateReferences {
     /// Add every crate name the files of one target refer to, attributed to
     /// the code that target is.
     pub fn add_target(&mut self, files: &[ParsedFile], target: &Target, gates: &Gates<'_>) {
-        let origin = Origin {
-            context: Contexts::of_target(target),
-            gates: Some(gates),
-        };
+        let context = Contexts::of_target(target);
         for file in files {
+            // A file only a `#[cfg(test)] mod` declaration reaches is test
+            // code, and the gate saying so is written in the parent file —
+            // nothing in this file could tell us
+            // ([`crate::modtree::ParsedFile::test_only`]). The same rule as an
+            // inline `#[cfg(test)]` module applies from here on: only runtime
+            // code moves, so a build script or an unclaimed file stays put.
+            let origin = Origin {
+                context: shifted_for_test(context, file.test_only),
+                gates: Some(gates),
+            };
             match &file.ast {
                 Some(ast) => self.add_file(ast, parent_of(&file.path), origin),
                 None => self.hidden_code = Some(UNPARSABLE_REASON),
@@ -421,17 +445,24 @@ impl CrateReferences {
 
 /// `origin`'s context, moved to [`Contexts::DEV`] when `attrs` confine the
 /// item they sit on to a test build.
+fn test_shifted(origin: Origin<'_>, attrs: &[syn::Attribute]) -> Contexts {
+    let test_only = origin.gates.is_some_and(|gates| gates.test_only(attrs));
+    shifted_for_test(origin.context, test_only)
+}
+
+/// `context`, moved to [`Contexts::DEV`] when the code it describes is confined
+/// to a test build — whether by a gate on the item itself or by the `mod`
+/// declaration that reached its file.
 ///
 /// Only runtime code moves. A test target is already dev code, an opaque
 /// mention must not become attributable, and a build script's `#[cfg(test)]`
 /// module is not compiled by `cargo test` at all — it is still build-script
 /// code, and treating it as dev code would be inventing a claim.
-fn test_shifted(origin: Origin<'_>, attrs: &[syn::Attribute]) -> Contexts {
-    let test_only = origin.gates.is_some_and(|gates| gates.test_only(attrs));
-    if origin.context == Contexts::RUNTIME && test_only {
+fn shifted_for_test(context: Contexts, test_only: bool) -> Contexts {
+    if context == Contexts::RUNTIME && test_only {
         Contexts::DEV
     } else {
-        origin.context
+        context
     }
 }
 
@@ -968,6 +999,16 @@ mod tests {
 
     /// One file, added as the sole file of a target of the given kind.
     fn add_one(refs: &mut CrateReferences, kind: &str, path: PathBuf, ast: Option<syn::File>) {
+        add_file(refs, kind, path, ast, false);
+    }
+
+    fn add_file(
+        refs: &mut CrateReferences,
+        kind: &str,
+        path: PathBuf,
+        ast: Option<syn::File>,
+        test_only: bool,
+    ) {
         let manifest = crate::cfg::tests_support::bare_package();
         let matrix = crate::cfg::Matrix::default();
         let gates = Gates::new(&matrix, &manifest);
@@ -976,6 +1017,7 @@ mod tests {
                 path,
                 ast,
                 module: Vec::new(),
+                test_only,
             }],
             &target(kind),
             &gates,
@@ -1579,6 +1621,55 @@ mod tests {
             found,
             vec![("proc-macro2".to_string(), DependencyKind::Development)],
             "the only code naming it is behind `#[cfg(test)]`"
+        );
+    }
+
+    /// The gap this closes: a `#[cfg(test)] mod tests;` with its body in a file
+    /// of its own. The gate is written in the parent, so the file itself holds
+    /// nothing to attribute it by — module resolution has to say so
+    /// ([`crate::modtree::ParsedFile::test_only`]).
+    #[test]
+    fn a_file_reached_only_by_a_cfg_test_declaration_is_dev_code() {
+        let mut refs = references_from(&[("lib", "pub fn go() {}\n")]);
+        add_file(
+            &mut refs,
+            "lib",
+            PathBuf::from("/ws/src/tests.rs"),
+            syn::parse_file("use dev_only::assert_ok;\n#[test]\nfn t() { assert_ok(); }\n").ok(),
+            true,
+        );
+        assert_eq!(
+            misplaced(&package(vec![dependency("dev_only")]), &refs).0,
+            vec![("dev_only".to_string(), DependencyKind::Development)],
+            "the only code naming it compiles in test builds alone"
+        );
+        // ...and the same file leaves a correctly-declared dev-dependency alone,
+        // which is what the flag existed to stop being reported as misplaced.
+        assert!(
+            misplaced(&package(vec![dev_dependency("dev_only")]), &refs)
+                .0
+                .is_empty()
+        );
+    }
+
+    /// Only runtime code moves. A build script's `#[cfg(test)]` module is not
+    /// compiled by `cargo test` at all, so a file reached that way is still
+    /// build-script code and its `[build-dependencies]` entry is where it
+    /// belongs.
+    #[test]
+    fn a_test_only_file_of_a_build_script_stays_build_script_code() {
+        let mut refs = references_from(&[("lib", "pub fn go() {}\n")]);
+        add_file(
+            &mut refs,
+            "custom-build",
+            PathBuf::from("/ws/build/tests.rs"),
+            syn::parse_file("fn t() { cc::Build::new(); }\n").ok(),
+            true,
+        );
+        assert!(
+            misplaced(&package(vec![build_dependency("cc")]), &refs)
+                .0
+                .is_empty()
         );
     }
 
