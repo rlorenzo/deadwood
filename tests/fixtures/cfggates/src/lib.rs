@@ -25,6 +25,12 @@ mod on_windows;
 mod inner_gated;
 mod inner_impossible;
 
+// The same file again. A matrix that rules its inner gate out has to leave it
+// out once, not once per declaration naming it: resolution reads a file once,
+// and that has to hold for the ones it decides not to keep.
+#[path = "inner_gated.rs"]
+mod inner_gated_again;
+
 // Not a `cfg` we model, at any depth: always followed.
 #[cfg(mystery_flag)]
 mod unevaluable;

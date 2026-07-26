@@ -1240,6 +1240,7 @@ mod tests {
                         .filter(|segment| !segment.is_empty())
                         .map(str::to_string)
                         .collect(),
+                    test_only: false,
                 })
                 .collect(),
         }

@@ -168,10 +168,11 @@
 //! [`find_unused`]'s answer, not this one's. An entry mentioned only opaquely
 //! is not placed, in any direction. And a `[dev-dependencies]` entry the
 //! library appears to name is left alone: such a manifest does not compile at
-//! all, so the likelier explanation is that we attributed the mention wrongly
-//! — through a `#[cfg(test)] mod tests;` in a file of its own, say, whose gate
-//! is written in the parent and which this module therefore reads as runtime
-//! code (<https://github.com/rlorenzo/deadwood/issues/14>).
+//! all, so the likelier explanation is that we attributed the mention wrongly.
+//! The largest source of that mis-attribution is closed — an out-of-line
+//! `#[cfg(test)] mod tests;` now arrives here as the test code it is
+//! ([`ParsedFile::test_only`]) — but the direction stays unreported until it
+//! has evidence of its own rather than the absence of a known gap.
 //!
 //! # Entries that are load bearing without being named
 //!
@@ -203,12 +204,11 @@
 //!   unplaceable, which is most of the recall the check gives up — across the
 //!   34 crates in the local registry it is the reason every entry declared in
 //!   the wrong table would have to be found by hand.
-//! - A `mod` whose `#[cfg(test)]` gate is written in the parent file, with the
-//!   module's own body in a file of its own, is read as runtime code: the gate
-//!   is not carried down by module resolution
-//!   (<https://github.com/rlorenzo/deadwood/issues/14>). It costs findings
-//!   rather than inventing them, and the never-reported dev-dependency
-//!   direction is what keeps it from doing worse.
+//! - A file two `mod` declarations reach, one confining it to a test build and
+//!   one not, is attributed to the ungated one — all of it, including the
+//!   parts only the test-confined declaration compiles. There is one file and
+//!   one answer, and this is the direction that misses findings instead of
+//!   inventing them ([`crate::modtree::resolve`]).
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -306,11 +306,21 @@ impl CrateReferences {
     /// Add every crate name the files of one target refer to, attributed to
     /// the code that target is.
     pub fn add_target(&mut self, files: &[ParsedFile], target: &Target, gates: &Gates<'_>) {
-        let origin = Origin {
-            context: Contexts::of_target(target),
-            gates: Some(gates),
-        };
+        let context = Contexts::of_target(target);
         for file in files {
+            // A file that only `#[cfg(test)] mod tests;` reaches is unit-test
+            // code exactly as the inline form is, but the gate saying so is
+            // written in the parent — nothing in this file could tell us, so
+            // module resolution carries the answer here.
+            let context = if context == Contexts::RUNTIME && file.test_only {
+                Contexts::DEV
+            } else {
+                context
+            };
+            let origin = Origin {
+                context,
+                gates: Some(gates),
+            };
             match &file.ast {
                 Some(ast) => self.add_file(ast, parent_of(&file.path), origin),
                 None => self.hidden_code = Some(UNPARSABLE_REASON),
@@ -968,6 +978,17 @@ mod tests {
 
     /// One file, added as the sole file of a target of the given kind.
     fn add_one(refs: &mut CrateReferences, kind: &str, path: PathBuf, ast: Option<syn::File>) {
+        add_one_reached(refs, kind, path, ast, false);
+    }
+
+    /// The same, for a file only test-confined `mod` declarations reach.
+    fn add_one_reached(
+        refs: &mut CrateReferences,
+        kind: &str,
+        path: PathBuf,
+        ast: Option<syn::File>,
+        test_only: bool,
+    ) {
         let manifest = crate::cfg::tests_support::bare_package();
         let matrix = crate::cfg::Matrix::default();
         let gates = Gates::new(&matrix, &manifest);
@@ -976,6 +997,7 @@ mod tests {
                 path,
                 ast,
                 module: Vec::new(),
+                test_only,
             }],
             &target(kind),
             &gates,
@@ -1403,6 +1425,55 @@ mod tests {
         assert_eq!(
             misplaced(&manifest, &refs).0,
             vec![("test_helper".to_string(), DependencyKind::Development)]
+        );
+    }
+
+    /// The out-of-line half of the `#[cfg(test)] mod` case. The file holds no
+    /// gate of its own — the one that confines it is written in its parent —
+    /// so the answer has to arrive with the file, from module resolution.
+    #[test]
+    fn a_file_only_a_test_confined_module_reaches_is_test_code() {
+        let mut refs = CrateReferences::default();
+        add_one_reached(
+            &mut refs,
+            "lib",
+            PathBuf::from("/ws/src/lib.rs"),
+            syn::parse_file("pub fn go() {}\n").ok(),
+            false,
+        );
+        add_one_reached(
+            &mut refs,
+            "lib",
+            PathBuf::from("/ws/src/tests.rs"),
+            syn::parse_file("fn t() { test_helper::assert_ok(); }\n").ok(),
+            true,
+        );
+        let manifest = package(vec![dependency("test_helper")]);
+        assert_eq!(
+            misplaced(&manifest, &refs).0,
+            vec![("test_helper".to_string(), DependencyKind::Development)],
+            "the lib target holds the file, but only its tests reach it"
+        );
+    }
+
+    /// The same file without the flag: a lib file naming a `[dependencies]`
+    /// entry is the entry doing its job, and reporting it would be the false
+    /// positive the flag has to be careful not to invent.
+    #[test]
+    fn the_same_file_reached_by_ordinary_code_is_not() {
+        let mut refs = CrateReferences::default();
+        add_one_reached(
+            &mut refs,
+            "lib",
+            PathBuf::from("/ws/src/view.rs"),
+            syn::parse_file("fn t() { test_helper::assert_ok(); }\n").ok(),
+            false,
+        );
+        let manifest = package(vec![dependency("test_helper")]);
+        assert!(
+            misplaced(&manifest, &refs).0.is_empty(),
+            "the library itself names it: {:?}",
+            misplaced(&manifest, &refs).0
         );
     }
 

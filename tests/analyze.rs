@@ -1053,9 +1053,15 @@ fn dependencies_declared_in_the_wrong_table_are_reported() {
     assert_eq!(
         names,
         // A normal entry only `tests/it.rs` names, one only `examples/demo.rs`
-        // names — both link `[dev-dependencies]` — and a build-dependency the
-        // build script never touches.
-        vec!["example_only_crate", "stale_build_crate", "test_only_crate"],
+        // names — both link `[dev-dependencies]` — one only the out-of-line
+        // body of a `#[cfg(test)] mod` names, and a build-dependency the build
+        // script never touches.
+        vec![
+            "example_only_crate",
+            "outline_test_crate",
+            "stale_build_crate",
+            "test_only_crate",
+        ],
         "{:?}",
         analysis.findings
     );
@@ -1072,6 +1078,12 @@ fn dependencies_declared_in_the_wrong_table_are_reported() {
         "doc_only_crate",
         // A build-dependency the build script names.
         "build_crate",
+        // Named by a file three declarations reach, one of them ungated: the
+        // library genuinely uses it, whichever declaration is read first.
+        "shared_view_crate",
+        // The same, one level further down, through a child declaration that
+        // carries no gate of its own.
+        "shared_view_child_crate",
     ] {
         assert!(
             !analysis
@@ -1147,6 +1159,47 @@ fn a_misplaced_dependency_names_both_tables_and_is_configurable() {
         reported(&silenced, FindingKind::MisplacedDependency).is_empty(),
         "`misplaced_dependency = \"off\"` removes the finding entirely: {:?}",
         silenced.findings
+    );
+}
+
+/// A `#[cfg(test)] mod tests;` whose body lives in its own file is unit-test
+/// code exactly as the inline form is, and the gate saying so is written in
+/// the parent — so nothing in the file itself can be read to find it out.
+///
+/// The other direction is the one that must not move: a file some *ungated*
+/// declaration also reaches is library code, however many gated declarations
+/// name it too. Getting that backwards would report a `[dependencies]` entry
+/// the library genuinely uses as belonging in `[dev-dependencies]` — a false
+/// positive, where the version before this was a missed finding.
+#[test]
+fn a_test_only_module_in_its_own_file_is_still_test_code() {
+    let analysis = analyze_fixture("depkinds");
+    let reported_names: Vec<&str> = reported(&analysis, FindingKind::MisplacedDependency)
+        .into_iter()
+        .map(|(_, name)| name)
+        .collect();
+
+    assert!(
+        reported_names.contains(&"outline_test_crate"),
+        "`src/outline_tests.rs` is reached only by `#[cfg(test)] mod outline_tests;`, \
+         so what it names is a dev-dependency: {:?}",
+        analysis.findings
+    );
+    for entry in ["shared_view_crate", "shared_view_child_crate"] {
+        assert!(
+            !reported_names.contains(&entry),
+            "`{entry}` is named by a file an ungated declaration reaches: {:?}",
+            analysis.findings
+        );
+    }
+
+    // The files themselves are ordinary reachable files either way: a gate on
+    // the declaration decides which code a file *is*, never whether it is
+    // dead.
+    assert!(
+        reported(&analysis, FindingKind::DeadFile).is_empty(),
+        "every file here is declared by something: {:?}",
+        analysis.findings
     );
 }
 
