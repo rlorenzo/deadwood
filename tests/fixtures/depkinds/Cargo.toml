@@ -22,6 +22,18 @@ example_only_crate = "1"
 # The library names it, so the entry is right where it is — the stale
 # `[build-dependencies]` copy below is the finding.
 stale_build_crate = "1"
+# Named only by `src/outline_tests.rs`, which is the body of a `#[cfg(test)]
+# mod` whose gate is written in `src/lib.rs`. Test code that happens to live in
+# its own file is still test code: the same finding as `test_only_crate`, in
+# the form the file itself gives no sign of.
+outline_test_crate = "1"
+# Named by `src/shared_view.rs`, which three declarations reach — one of them
+# ungated. The library genuinely uses it, so reporting this entry would be a
+# false positive rather than a missed finding.
+shared_view_crate = "1"
+# Named a level further down, by `src/shared_view/deeper.rs`. Its own
+# declaration is ungated and says nothing; what it inherits decides.
+shared_view_child_crate = "1"
 
 [dev-dependencies]
 # Named only by a `#[cfg(test)]` module inside the library. That module is part
