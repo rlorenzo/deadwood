@@ -466,12 +466,10 @@ toolchain is pinned to `stable` with `clippy` and `rustfmt` via
   make an entry unplaceable, so the misplaced-dependency check is much quieter
   than the unused one. Across the 34 crates in a local registry it reports
   nothing at all.
-- A `#[cfg(test)] mod tests;` whose body is a file of its own is read as
-  runtime code: the gate is written in the parent file and module resolution
-  does not carry it down. That costs placement findings and never invents
-  one — the never-reported dev-dependency direction is what keeps it from
-  doing worse
-  ([#14](https://github.com/rlorenzo/deadwood/issues/14)).
+- A file that both a `#[cfg(test)]` `mod` declaration and an ungated one
+  reach is attributed to the ungated one, so what it names is judged as
+  library code. One file gets one answer, and this is the direction that
+  misses findings rather than inventing them.
 - A `[target.'...'.dependencies]` table keyed by a bare target triple rather
   than a `cfg(...)` expression is not modelled, so narrowing `target-os` does
   not reach its entries; they are judged as if always built.
