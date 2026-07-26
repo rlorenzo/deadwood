@@ -1,0 +1,6 @@
+# Every finding the fixture produces, recorded. A run under this baseline is
+# silent and exits 0 — the brownfield-adoption case, in one file.
+#
+# This one is written by `--write-baseline` rather than by hand, so it also
+# pins the shape the tool emits.
+baseline = "all-baseline.json"

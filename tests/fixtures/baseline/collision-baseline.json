@@ -1,0 +1,5 @@
+{
+  "findings": [
+    { "kind": "unused_pub_item", "file": "src/lib.rs", "line": 11, "name": "twin" }
+  ]
+}

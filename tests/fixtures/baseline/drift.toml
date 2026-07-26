@@ -1,0 +1,3 @@
+# Every line number here is wrong, and every entry still matches: an import
+# added at the top of a file must not un-baseline everything below it.
+baseline = "drift-baseline.json"

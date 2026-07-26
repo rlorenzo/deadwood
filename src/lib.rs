@@ -29,7 +29,13 @@
 //! targets, tests — to analyze. With no config file every setting takes the
 //! value that reproduces the behavior described above, and for the `cfg`
 //! matrix that value is the union of every possibility.
+//!
+//! A project that cannot fix everything at once records what it has today in a
+//! baseline file (`src/baseline.rs`), which is subtracted last of all — after
+//! the configuration, so a finding `ignore` or `severity = "off"` removed never
+//! reaches it. With no baseline file, that step does nothing at all.
 
+pub mod baseline;
 pub mod cfg;
 pub mod config;
 pub mod metadata;
@@ -73,6 +79,35 @@ pub enum FindingKind {
     UnsatisfiableCfg,
 }
 
+impl FindingKind {
+    /// How the kind is spelled in `--json`, in the config file's `[severity]`
+    /// table, and in a baseline entry — one spelling for all three.
+    ///
+    /// `the_label_of_every_kind_is_its_serde_tag` pins this against the derive,
+    /// so a new kind cannot end up with two names.
+    pub fn label(self) -> &'static str {
+        match self {
+            FindingKind::DeadFile => "dead_file",
+            FindingKind::UnusedPubItem => "unused_pub_item",
+            FindingKind::UnusedReexport => "unused_reexport",
+            FindingKind::UnusedDependency => "unused_dependency",
+            FindingKind::MisplacedDependency => "misplaced_dependency",
+            FindingKind::UnsatisfiableCfg => "unsatisfiable_cfg",
+        }
+    }
+
+    /// Every kind there is, so a caller that must handle all of them cannot
+    /// quietly miss the next one.
+    pub const ALL: [FindingKind; 6] = [
+        FindingKind::DeadFile,
+        FindingKind::UnusedPubItem,
+        FindingKind::UnusedReexport,
+        FindingKind::UnusedDependency,
+        FindingKind::MisplacedDependency,
+        FindingKind::UnsatisfiableCfg,
+    ];
+}
+
 /// A single issue reported by the analyzer.
 #[derive(Debug, Clone, Serialize)]
 pub struct Finding {
@@ -105,6 +140,14 @@ pub struct Analysis {
     /// findings stay trustworthy but the analysis is incomplete until the
     /// warnings are resolved.
     pub warnings: Vec<String>,
+    /// What the baseline file did to this run, when there was one.
+    ///
+    /// `None` — no `baseline` key and no file at the default location — is
+    /// what keeps a project that has never adopted a baseline byte-identical
+    /// to a Deadwood that has never heard of one, in the text report and in
+    /// the JSON alike.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub baseline: Option<baseline::Report>,
 }
 
 impl Analysis {
@@ -125,7 +168,23 @@ impl Analysis {
 /// by walking up from `path` to the workspace root, and falls back to
 /// [`Config::default`] — which is exactly the behavior of a Deadwood with no
 /// configuration support at all.
+///
+/// A baseline file, if the configuration names one or one sits at the default
+/// location, is subtracted from the findings; see [`analyze_with`] for the
+/// modes that write it instead.
 pub fn analyze(path: &Path, config_path: Option<&Path>) -> Result<Analysis> {
+    analyze_with(path, config_path, baseline::Mode::default())
+}
+
+/// [`analyze`], choosing what the run does with the baseline file.
+///
+/// [`baseline::Mode::Write`] and [`baseline::Mode::Prune`] are the only ways a
+/// run creates or modifies that file; every other path here reads at most.
+pub fn analyze_with(
+    path: &Path,
+    config_path: Option<&Path>,
+    baseline_mode: baseline::Mode,
+) -> Result<Analysis> {
     let meta = metadata::load(path)?;
     let config = match config_path {
         Some(explicit) => Config::load(explicit)?,
@@ -344,10 +403,22 @@ pub fn analyze(path: &Path, config_path: Option<&Path>) -> Result<Analysis> {
         (a.file.as_path(), a.line.unwrap_or(0)).cmp(&(b.file.as_path(), b.line.unwrap_or(0)))
     });
 
+    // Last of all, and after the configuration: a finding an `ignore` pattern
+    // or a `severity = "off"` removed does not exist, so it is neither
+    // suppressed nor recorded — and a baseline entry for one goes stale, which
+    // is the honest answer and is fixable with `--prune-baseline`.
+    let location = match config.baseline() {
+        Some(configured) => baseline::Location::Configured(configured.to_path_buf()),
+        None => baseline::Location::Default(meta.workspace_root.join(baseline::FILE_NAME)),
+    };
+    let (findings, baseline) =
+        baseline::run(baseline_mode, &location, findings, &meta.workspace_root)?;
+
     Ok(Analysis {
         workspace_root: meta.workspace_root,
         findings,
         warnings,
+        baseline,
     })
 }
 
@@ -547,4 +618,45 @@ fn crate_names(package: &metadata::Package, target: &metadata::Target) -> Vec<St
         names.push(from_package);
     }
     names
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Three places spell a finding kind — `--json`, `[severity]`, and a
+    /// baseline entry — and all three must be the one spelling. The label is a
+    /// hand-written match, so this is what stops it drifting from the derive.
+    #[test]
+    fn the_label_of_every_kind_is_its_serde_tag() {
+        for kind in FindingKind::ALL {
+            assert_eq!(
+                serde_json::to_value(kind).unwrap(),
+                serde_json::Value::from(kind.label()),
+            );
+        }
+    }
+
+    /// [`FindingKind::ALL`] is what the report and the tests iterate to prove
+    /// they cover every kind, so a kind missing from it would let them all
+    /// pass while covering nothing. The match below is exhaustive, so a new
+    /// variant does not compile until it is given a position — and the
+    /// assertions then fail until it has that position in `ALL`.
+    #[test]
+    fn all_holds_every_finding_kind_exactly_once() {
+        let mut seen = HashSet::new();
+        for kind in FindingKind::ALL {
+            let position = match kind {
+                FindingKind::DeadFile => 0,
+                FindingKind::UnusedPubItem => 1,
+                FindingKind::UnusedReexport => 2,
+                FindingKind::UnusedDependency => 3,
+                FindingKind::MisplacedDependency => 4,
+                FindingKind::UnsatisfiableCfg => 5,
+            };
+            assert_eq!(FindingKind::ALL[position], kind);
+            assert!(seen.insert(kind), "{} is listed twice", kind.label());
+        }
+        assert_eq!(seen.len(), FindingKind::ALL.len());
+    }
 }

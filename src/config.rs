@@ -48,6 +48,12 @@
 //!   a *transitive* dependency, and `openssl = { features = ["vendored"] }` to
 //!   select a native library. There is no syntactic signal that separates
 //!   those from a stale entry, so the answer is user intent.
+//! - **`baseline`** — where the file of already-accepted findings lives,
+//!   relative to this config file. Omitting it does not mean "no baseline": it
+//!   means the default location, `deadwood-baseline.json` in the workspace
+//!   root, which may or may not have a file in it. Naming one that is not
+//!   there is an error, for the same reason `--config` requires its file; see
+//!   [`crate::baseline`].
 //! - **`cfg`** — which builds to analyze: the features to treat as enabled,
 //!   the targets to consider, and whether `#[cfg(test)]` code is part of the
 //!   build. Every axis defaults to the *union of every possibility*, because
@@ -112,6 +118,7 @@ pub struct Config {
     public_api: PublicApi,
     dependencies: DependencyAllowList,
     cfg: Matrix,
+    baseline: Option<PathBuf>,
 }
 
 impl Config {
@@ -125,13 +132,18 @@ impl Config {
             .with_context(|| format!("could not read config file `{}`", path.display()))?;
         let raw: RawConfig = toml::from_str(&text)
             .with_context(|| format!("invalid config file `{}`", path.display()))?;
+        let base = base_of(path);
         Ok(Config {
-            base: base_of(path),
             ignore: raw.ignore.iter().map(|p| Glob::path(p)).collect(),
             severity: raw.severity,
             public_api: PublicApi::compile(raw.public_api),
             dependencies: DependencyAllowList::compile(raw.dependencies),
             cfg: Matrix::new(raw.cfg.features, raw.cfg.target_os, raw.cfg.test),
+            // Relative to the file that names it, like every other path here,
+            // so a config moves with the tree it describes. `Path::join`
+            // already leaves an absolute path alone.
+            baseline: raw.baseline.map(|relative| base.join(relative)),
+            base,
         })
     }
 
@@ -199,6 +211,15 @@ impl Config {
     /// the behavior of a Deadwood that does not evaluate `cfg` at all.
     pub fn cfg(&self) -> &Matrix {
         &self.cfg
+    }
+
+    /// The baseline file this configuration names, if it names one.
+    ///
+    /// `None` means "look in the default place", not "no baseline": the
+    /// difference decides whether a missing file is an error, and
+    /// [`crate::baseline`] is where that is spelled out.
+    pub fn baseline(&self) -> Option<&Path> {
+        self.baseline.as_deref()
     }
 }
 
@@ -373,11 +394,10 @@ struct RawConfig {
     dependencies: RawDependencies,
     #[serde(default)]
     cfg: RawCfg,
-    //
-    // The baseline file from <https://github.com/rlorenzo/deadwood/issues/6>
-    // belongs here, as `baseline: Option<PathBuf>` resolved against `base`.
-    // It is deliberately not accepted yet: a key Deadwood parses and ignores
-    // is the silent misconfiguration this module exists to prevent.
+    /// Where the baseline file lives, resolved against the config file's
+    /// directory. `None` is not "no baseline": it means the default location,
+    /// which may or may not have a file in it yet.
+    baseline: Option<PathBuf>,
 }
 
 #[derive(Debug, Default, Deserialize)]

@@ -1149,3 +1149,523 @@ fn a_misplaced_dependency_names_both_tables_and_is_configurable() {
         silenced.findings
     );
 }
+
+// -- the baseline file -----------------------------------------------------
+//
+// The `baseline` fixture produces six findings with no configuration at all,
+// and every `*.toml` beside it names a `*-baseline.json` that disagrees with
+// those six in exactly one controlled way.
+
+/// Baselined findings as `(kind, file, name)`, which is the match key itself.
+fn stale_keys(analysis: &Analysis) -> Vec<String> {
+    analysis
+        .baseline
+        .as_ref()
+        .map(|baseline| baseline.stale.iter().map(|key| key.describe()).collect())
+        .unwrap_or_default()
+}
+
+fn suppressed(analysis: &Analysis) -> usize {
+    analysis
+        .baseline
+        .as_ref()
+        .map(|baseline| baseline.suppressed)
+        .unwrap_or(0)
+}
+
+/// A copy of the `baseline` fixture in a scratch directory, so a test may
+/// write to it. The fixture itself is never modified by any test.
+fn scratch_fixture(test: &str) -> PathBuf {
+    fn copy_into(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for entry in std::fs::read_dir(from).unwrap() {
+            let entry = entry.unwrap();
+            let target = to.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                copy_into(&entry.path(), &target);
+            } else {
+                std::fs::copy(entry.path(), &target).unwrap();
+            }
+        }
+    }
+
+    let dir = std::env::temp_dir().join(format!("deadwood-baseline-{}-{test}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    copy_into(&fixtures().join("baseline"), &dir);
+    // The `*.toml` config files beside the fixture each name a baseline of
+    // their own. These tests run without `--config` and against the default
+    // location, so the copies come along only to confuse a future reader.
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let path = entry.unwrap().path();
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        if name != "Cargo.toml" && (name.ends_with(".toml") || name.ends_with("-baseline.json")) {
+            std::fs::remove_file(&path).unwrap();
+        }
+    }
+    dir
+}
+
+fn run_binary(dir: &Path, args: &[&str]) -> (Option<i32>, String) {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_deadwood"))
+        .arg("check")
+        .arg(dir)
+        .args(args)
+        .output()
+        .expect("the binary should run");
+    (
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+    )
+}
+
+/// The whole point of the feature: a project with day-one findings records
+/// them once and its runs go quiet, without a single finding being fixed.
+#[test]
+fn a_baseline_suppresses_exactly_the_findings_it_records() {
+    let unconfigured = analyze_fixture("baseline");
+    assert_eq!(
+        unconfigured.findings.len(),
+        6,
+        "{:?}",
+        unconfigured.findings
+    );
+    assert!(
+        unconfigured.baseline.is_none(),
+        "no `baseline` key and no file at the default location is no baseline"
+    );
+
+    let analysis = analyze_configured("baseline", "all.toml");
+    assert!(analysis.findings.is_empty(), "{:?}", analysis.findings);
+    assert!(!analysis.has_denied(), "so the run exits 0");
+    assert_eq!(suppressed(&analysis), 6);
+    assert!(
+        stale_keys(&analysis).is_empty(),
+        "{:?}",
+        stale_keys(&analysis)
+    );
+}
+
+/// The other half: a finding the baseline does not cover still fails the run,
+/// and is the only thing in the report.
+#[test]
+fn a_new_finding_fails_a_run_the_accepted_ones_do_not() {
+    let analysis = analyze_configured("baseline", "partial.toml");
+
+    assert_eq!(
+        reported(&analysis, FindingKind::UnusedPubItem),
+        vec![("src/lib.rs".to_string(), "accepted")],
+        "only the unrecorded finding is reported: {:?}",
+        analysis.findings
+    );
+    assert_eq!(analysis.findings.len(), 1, "{:?}", analysis.findings);
+    assert!(analysis.has_denied(), "and it fails the run");
+    assert_eq!(suppressed(&analysis), 5);
+}
+
+/// A baseline that only ever grows is an excuse rather than a ledger, so an
+/// entry nothing matches is named — and does not fail the run, because the
+/// exit code follows severity and a fixed finding has none.
+#[test]
+fn entries_that_no_longer_occur_are_reported_as_stale() {
+    let analysis = analyze_configured("baseline", "stale.toml");
+
+    assert_eq!(
+        stale_keys(&analysis),
+        vec![
+            "src/deleted.rs: dead_file".to_string(),
+            "src/lib.rs: unused_pub_item `removed`".to_string(),
+        ]
+    );
+    assert!(analysis.findings.is_empty(), "{:?}", analysis.findings);
+    assert!(!analysis.has_denied(), "fixing code must not fail a run");
+
+    let text = deadwood::report::render_text(&analysis);
+    assert!(text.contains("--prune-baseline"), "{text}");
+}
+
+/// Line numbers drift with every edit above them. A baseline that expired
+/// whenever someone added an import would be worse than no baseline at all.
+#[test]
+fn a_finding_that_moved_is_still_baselined() {
+    let analysis = analyze_configured("baseline", "drift.toml");
+
+    assert!(analysis.findings.is_empty(), "{:?}", analysis.findings);
+    assert_eq!(suppressed(&analysis), 6);
+    assert!(
+        stale_keys(&analysis).is_empty(),
+        "and nothing reads as stale: {:?}",
+        stale_keys(&analysis)
+    );
+}
+
+/// `unused_dependency` and `misplaced_dependency` point at the same manifest,
+/// name the same entry, and carry no line: the kind is the only thing keeping
+/// them apart. This baseline records each of the fixture's two entries under
+/// the *other* kind, so a key without the kind in it would silence both real
+/// findings and report nothing stale.
+#[test]
+fn the_two_dependency_kinds_are_never_confused() {
+    let analysis = analyze_configured("baseline", "kinds.toml");
+
+    assert_eq!(
+        reported(&analysis, FindingKind::UnusedDependency),
+        vec![("Cargo.toml".to_string(), "unused_crate")]
+    );
+    assert_eq!(
+        reported(&analysis, FindingKind::MisplacedDependency),
+        vec![("Cargo.toml".to_string(), "test_only_crate")]
+    );
+    assert_eq!(
+        stale_keys(&analysis),
+        vec![
+            "Cargo.toml: misplaced_dependency `unused_crate`".to_string(),
+            "Cargo.toml: unused_dependency `test_only_crate`".to_string(),
+        ],
+        "and neither recorded claim matched anything"
+    );
+}
+
+/// Two `pub fn twin` in one file share a kind, a file and a name, and differ
+/// only in the line the key ignores. One entry covers both: we cannot say
+/// which occurrence is new, so reporting one would point at a line that is
+/// very likely baselined — a wrong finding rather than a missed one.
+#[test]
+fn one_entry_covers_every_finding_that_shares_its_key() {
+    let analysis = analyze_configured("baseline", "collision.toml");
+
+    assert!(
+        reported(&analysis, FindingKind::UnusedPubItem)
+            .iter()
+            .all(|(_, name)| *name != "twin"),
+        "both twins are suppressed by the one entry: {:?}",
+        analysis.findings
+    );
+    assert_eq!(suppressed(&analysis), 2);
+}
+
+/// A baseline path that is written down and not there must never read as
+/// "nothing is baselined": the run would be green for the wrong reason, and a
+/// typo would silently disarm a CI gate.
+#[test]
+fn a_missing_baseline_file_is_an_error_rather_than_an_empty_one() {
+    let fixture = fixtures().join("baseline");
+    let err = format!(
+        "{:#}",
+        analyze(&fixture, Some(&fixture.join("missing.toml")))
+            .expect_err("a named baseline must exist")
+    );
+    assert!(err.contains("could not read baseline file"), "{err}");
+    assert!(err.contains("no-such-baseline.json"), "{err}");
+    assert!(err.contains("--write-baseline"), "the fix is named: {err}");
+
+    let (code, stdout) = run_binary(&fixture, &["--config", "missing.toml"]);
+    assert_eq!(code, Some(2), "an error, not a finding and not a pass");
+    assert!(stdout.is_empty(), "and no report is produced: {stdout}");
+}
+
+/// The reverse failure is worse still: an unreadable file read as "everything
+/// is baselined" is a permanently green run.
+#[test]
+fn a_malformed_baseline_is_an_error_never_a_warning() {
+    let fixture = fixtures().join("baseline");
+    let err = format!(
+        "{:#}",
+        analyze(&fixture, Some(&fixture.join("malformed.toml")))
+            .expect_err("a baseline that does not parse is not survivable")
+    );
+    assert!(err.contains("invalid baseline file"), "{err}");
+    assert!(err.contains("malformed-baseline.json"), "{err}");
+    assert!(err.contains("unknown field `lines`"), "{err}");
+    assert!(err.contains("`line`"), "the near miss is named: {err}");
+}
+
+/// The default location's exemption is "nothing is there", not "no *file* is
+/// there". A directory sitting where the baseline belongs is a
+/// misconfiguration, and reading it as "this project has no baseline" is the
+/// same silently-green run the named-path cases refuse.
+#[test]
+fn a_directory_at_the_default_baseline_path_is_an_error() {
+    let dir = scratch_fixture("not-a-file");
+    std::fs::create_dir(dir.join("deadwood-baseline.json")).unwrap();
+
+    let (code, stdout) = run_binary(&dir, &[]);
+    assert_eq!(code, Some(2), "not a pass and not a finding: {stdout}");
+
+    let err = format!(
+        "{:#}",
+        analyze(&dir, None).expect_err("a directory is not a baseline")
+    );
+    assert!(err.contains("is not a file"), "{err}");
+    assert!(err.contains("deadwood-baseline.json"), "{err}");
+}
+
+/// And the exemption still holds for the case it exists for: no baseline at
+/// the default location is a project that has not adopted one, reported
+/// exactly as a Deadwood without the feature would.
+#[test]
+fn no_baseline_at_the_default_location_stays_silent() {
+    let dir = scratch_fixture("absent");
+    assert!(!dir.join("deadwood-baseline.json").exists());
+
+    let (code, stdout) = run_binary(&dir, &[]);
+    assert_eq!(
+        code,
+        Some(1),
+        "the fixture's own findings still fail: {stdout}"
+    );
+    // Not a bare "baseline" search: this fixture's package is *named*
+    // `baseline`, so the word occurs in ordinary finding text. What must be
+    // absent is the block itself.
+    for marker in ["suppressed by baseline", "Stale baseline entries", "Wrote "] {
+        assert!(
+            !stdout.contains(marker),
+            "no baseline block, but found `{marker}`: {stdout}"
+        );
+    }
+}
+
+/// The adoption round trip, end to end and through the binary: record, go
+/// quiet, then break something and watch only that fail. The new item is
+/// inserted *above* the recorded ones, so every baselined line moves too.
+#[test]
+fn writing_a_baseline_silences_the_next_run_but_not_the_next_finding() {
+    let dir = scratch_fixture("round-trip");
+    let baseline = dir.join("deadwood-baseline.json");
+
+    let (code, stdout) = run_binary(&dir, &[]);
+    assert_eq!(code, Some(1), "the fixture has findings to begin with");
+    assert!(stdout.contains("6 finding(s)"), "{stdout}");
+    assert!(
+        !baseline.exists(),
+        "and no run without the flag creates the file"
+    );
+
+    let (code, stdout) = run_binary(&dir, &["--write-baseline"]);
+    assert_eq!(code, Some(0), "recording them clears the run");
+    assert!(
+        stdout.contains("Wrote 6 finding(s) to baseline"),
+        "{stdout}"
+    );
+    assert!(baseline.is_file(), "at the default location");
+
+    // No `--config` here: the file at the default location is found on its own.
+    let (code, stdout) = run_binary(&dir, &[]);
+    assert_eq!(code, Some(0), "{stdout}");
+    assert_eq!(
+        stdout,
+        "No issues found.\n6 finding(s) suppressed by baseline `deadwood-baseline.json`.\n"
+    );
+
+    let source = dir.join("src/lib.rs");
+    let shifted = std::fs::read_to_string(&source).unwrap().replace(
+        "pub fn accepted",
+        "pub fn brand_new() {}\n\npub fn accepted",
+    );
+    std::fs::write(&source, shifted).unwrap();
+
+    let (code, stdout) = run_binary(&dir, &[]);
+    assert_eq!(code, Some(1), "the new finding fails the run");
+    assert!(stdout.contains("1 finding(s) in workspace"), "{stdout}");
+    assert!(stdout.contains("pub fn `brand_new`"), "{stdout}");
+    assert!(
+        stdout.contains("6 finding(s) suppressed"),
+        "and the moved ones are still covered:\n{stdout}"
+    );
+}
+
+/// Pruning is how the file shrinks: the entries that no longer occur go, and
+/// nothing new arrives — an entry pruning added would make the flag a second
+/// `--write-baseline` that silently accepts today's regressions.
+#[test]
+fn pruning_drops_the_stale_entries_and_records_nothing_new() {
+    let dir = scratch_fixture("prune");
+    let baseline = dir.join("deadwood-baseline.json");
+
+    run_binary(&dir, &["--write-baseline"]);
+    let source = dir.join("src/lib.rs");
+    let edited = std::fs::read_to_string(&source)
+        .unwrap()
+        // `accepted` is fixed (its entry goes stale) and a new one appears.
+        .replace("pub fn accepted() {}", "pub fn brand_new() {}");
+    std::fs::write(&source, edited).unwrap();
+
+    let (code, stdout) = run_binary(&dir, &["--prune-baseline"]);
+    assert_eq!(code, Some(1), "the new finding still fails: {stdout}");
+    assert!(stdout.contains("Pruned from baseline"), "{stdout}");
+    assert!(stdout.contains("unused_pub_item `accepted`"), "{stdout}");
+    assert!(stdout.contains("pub fn `brand_new`"), "{stdout}");
+
+    let written = std::fs::read_to_string(&baseline).unwrap();
+    assert!(
+        !written.contains("accepted"),
+        "the stale entry is gone:\n{written}"
+    );
+    assert!(
+        !written.contains("brand_new"),
+        "and the new finding was not quietly accepted:\n{written}"
+    );
+    assert!(
+        written.contains("orphan.rs"),
+        "the rest is untouched:\n{written}"
+    );
+
+    let (code, _) = run_binary(&dir, &[]);
+    assert_eq!(code, Some(1), "which is why the next run still fails");
+}
+
+/// Writing is explicit. A run without a flag may read the file and must never
+/// create or change it, or a CI job would quietly accept whatever it found.
+#[test]
+fn no_run_without_a_flag_modifies_the_baseline() {
+    let dir = scratch_fixture("read-only");
+    let baseline = dir.join("deadwood-baseline.json");
+
+    run_binary(&dir, &["--write-baseline"]);
+    let recorded = std::fs::read_to_string(&baseline).unwrap();
+
+    let source = dir.join("src/lib.rs");
+    let edited = std::fs::read_to_string(&source)
+        .unwrap()
+        .replace("pub fn accepted() {}", "pub fn brand_new() {}");
+    std::fs::write(&source, edited).unwrap();
+
+    let (code, _) = run_binary(&dir, &[]);
+    assert_eq!(code, Some(1));
+    assert_eq!(
+        std::fs::read_to_string(&baseline).unwrap(),
+        recorded,
+        "a plain run neither records the new finding nor drops the stale one"
+    );
+}
+
+/// The compatibility promise: with no `baseline` key and no file at the
+/// default location, nothing about a run changes — not the findings, not the
+/// text, and not one key of the JSON.
+#[test]
+fn a_run_without_a_baseline_is_unchanged_in_every_output() {
+    for fixture in ["simple", "deps", "depkinds", "cfggates"] {
+        let analysis = analyze(&fixtures().join(fixture), None).expect("analysis should succeed");
+        assert!(
+            analysis.baseline.is_none(),
+            "`{fixture}` has no baseline: {:?}",
+            analysis.baseline
+        );
+
+        let rendered = deadwood::report::render_json(&analysis).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+        assert_eq!(
+            json.as_object().unwrap().keys().collect::<Vec<_>>(),
+            // `serde_json::Value` sorts its keys; the rendered document keeps
+            // the declaration order, and the assertion below covers that.
+            vec!["findings", "warnings", "workspace_root"],
+            "`{fixture}` grew a JSON key"
+        );
+        assert!(
+            !rendered.contains("baseline"),
+            "`{fixture}` renders a baseline it does not have:\n{rendered}"
+        );
+        assert!(
+            !deadwood::report::render_text(&analysis).contains("baseline"),
+            "`{fixture}` mentions a baseline it does not have"
+        );
+    }
+}
+
+/// The `baseline` key names a path, and a path has directories in it. Failing
+/// `--write-baseline` until the user runs `mkdir` protects nobody: the path
+/// came from their config file and the write came from an explicit flag.
+#[test]
+fn writing_a_baseline_creates_the_directory_its_path_names() {
+    let dir = scratch_fixture("nested");
+    // Discovered by walking up, and resolved against the file that names it —
+    // exactly the arrangement the README documents.
+    std::fs::write(
+        dir.join("deadwood.toml"),
+        "baseline = \".deadwood/baseline.json\"\n",
+    )
+    .unwrap();
+    let nested = dir.join(".deadwood/baseline.json");
+
+    let (code, stdout) = run_binary(&dir, &["--write-baseline"]);
+    assert_eq!(code, Some(0), "{stdout}");
+    assert!(nested.is_file(), "the directory is created with the file");
+
+    let (code, stdout) = run_binary(&dir, &[]);
+    assert_eq!(code, Some(0), "{stdout}");
+    assert!(
+        stdout.contains("6 finding(s) suppressed by baseline `.deadwood/baseline.json`"),
+        "and the next run reads it back:\n{stdout}"
+    );
+}
+
+/// The baseline is written through a temporary and renamed into place, so an
+/// interrupted write cannot leave a truncated file behind — this module treats
+/// a malformed baseline as a hard error, which would turn a cancelled CI job
+/// into a committed artifact only a hand edit recovers. Interruption itself is
+/// not reproducible here; what is checkable is that the mechanism runs and
+/// tidies up after itself, on both writing paths.
+#[test]
+fn writing_a_baseline_leaves_no_temporary_behind() {
+    let dir = scratch_fixture("atomic");
+    let baseline = dir.join("deadwood-baseline.json");
+    let temporary = dir.join("deadwood-baseline.json.tmp");
+
+    for flag in ["--write-baseline", "--prune-baseline"] {
+        let (code, stdout) = run_binary(&dir, &[flag]);
+        assert_eq!(code, Some(0), "{flag}:\n{stdout}");
+        assert!(baseline.is_file(), "{flag} leaves the baseline in place");
+        assert!(
+            !temporary.exists(),
+            "{flag} leaves no `{}` beside it",
+            temporary.display()
+        );
+        // Whole and readable: the point of the rename is that a reader never
+        // sees half a file.
+        let text = std::fs::read_to_string(&baseline).unwrap();
+        serde_json::from_str::<serde_json::Value>(&text)
+            .unwrap_or_else(|err| panic!("{flag} wrote valid JSON: {err}\n{text}"));
+    }
+}
+
+/// Pruning re-serializes, so it cannot promise the file's bytes. What it must
+/// promise is the entries: every surviving one keeps all of its fields, and a
+/// hand-abbreviated entry is not quietly expanded into something else.
+#[test]
+fn pruning_preserves_every_field_of_the_entries_it_keeps() {
+    let dir = scratch_fixture("prune-fields");
+    let baseline = dir.join("deadwood-baseline.json");
+    // Hand-written: one full entry, one carrying only the key, and one stale.
+    std::fs::write(
+        &baseline,
+        r#"{
+  "findings": [
+    { "kind": "dead_file", "severity": "warn", "file": "src/orphan.rs", "line": 1,
+      "message": "hand written" },
+    { "kind": "unused_pub_item", "file": "src/lib.rs", "name": "accepted" },
+    { "kind": "dead_file", "file": "src/deleted.rs" }
+  ]
+}
+"#,
+    )
+    .unwrap();
+
+    let (_, stdout) = run_binary(&dir, &["--prune-baseline"]);
+    assert!(stdout.contains("src/deleted.rs: dead_file"), "{stdout}");
+
+    let written: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&baseline).unwrap()).unwrap();
+    let kept = written["findings"].as_array().unwrap();
+    assert_eq!(kept.len(), 2, "only the stale entry goes: {written}");
+    // Order is the file's, and every field written by hand survives — down to
+    // a severity that disagrees with the configured one, which the matcher
+    // ignores and the rewrite must not "correct".
+    assert_eq!(kept[0]["file"], "src/orphan.rs");
+    assert_eq!(kept[0]["severity"], "warn");
+    assert_eq!(kept[0]["message"], "hand written");
+    // And an entry that carried only the key still carries only the key.
+    assert_eq!(
+        kept[1].as_object().unwrap().keys().collect::<Vec<_>>(),
+        vec!["file", "kind", "name"],
+        "{written}"
+    );
+}

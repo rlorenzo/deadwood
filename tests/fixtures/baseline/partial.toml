@@ -1,0 +1,3 @@
+# Everything except the `accepted` item. The point of the whole feature: a new
+# finding fails the run while the accepted debt beside it stays quiet.
+baseline = "partial-baseline.json"

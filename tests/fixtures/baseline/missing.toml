@@ -1,0 +1,4 @@
+# A path written down and not there. Reading it as "nothing is baselined" would
+# let a typo pass a CI gate that checks nothing, so it is exit 2 — the same
+# rule `--config` follows for the same reason.
+baseline = "no-such-baseline.json"
