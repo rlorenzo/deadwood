@@ -1,0 +1,3 @@
+# An unreadable baseline is an error, never a warning: the alternative reading,
+# "everything is baselined", turns a broken file into a permanently green run.
+baseline = "malformed-baseline.json"

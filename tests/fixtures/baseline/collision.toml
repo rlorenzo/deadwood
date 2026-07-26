@@ -1,0 +1,5 @@
+# One entry for a key two findings share. It covers both: the key ignores the
+# line, so there is no way to say which occurrence is the new one, and pointing
+# at a line that is very likely baselined would be a wrong finding rather than
+# a missed one.
+baseline = "collision-baseline.json"

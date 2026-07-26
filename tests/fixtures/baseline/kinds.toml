@@ -1,0 +1,5 @@
+# The two dependency kinds, swapped. Both entries name the right manifest and
+# the right entry and differ from the real findings only in their kind, so an
+# implementation that left the kind out of the key would suppress both findings
+# and report nothing stale. Both findings must survive; both entries are stale.
+baseline = "kinds-baseline.json"

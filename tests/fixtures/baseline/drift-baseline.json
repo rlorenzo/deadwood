@@ -1,0 +1,9 @@
+{
+  "findings": [
+    { "kind": "unused_pub_item", "file": "src/lib.rs", "line": 900, "name": "accepted" },
+    { "kind": "unused_pub_item", "file": "src/lib.rs", "line": 901, "name": "twin" },
+    { "kind": "dead_file", "file": "src/orphan.rs", "line": 902 },
+    { "kind": "unused_dependency", "file": "Cargo.toml", "name": "unused_crate" },
+    { "kind": "misplaced_dependency", "file": "Cargo.toml", "name": "test_only_crate" }
+  ]
+}

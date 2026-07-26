@@ -1,0 +1,48 @@
+{
+  "findings": [
+    {
+      "kind": "unused_dependency",
+      "severity": "deny",
+      "file": "Cargo.toml",
+      "name": "unused_crate",
+      "message": "dependency `unused_crate` is never referenced by any target of package `baseline`"
+    },
+    {
+      "kind": "misplaced_dependency",
+      "severity": "deny",
+      "file": "Cargo.toml",
+      "name": "test_only_crate",
+      "message": "dependency `test_only_crate` is referenced only by the test, example and bench code of package `baseline`, so it belongs in `[dev-dependencies]` rather than `[dependencies]`"
+    },
+    {
+      "kind": "unused_pub_item",
+      "severity": "deny",
+      "file": "src/lib.rs",
+      "line": 5,
+      "name": "accepted",
+      "message": "pub fn `accepted` is never referenced by any resolved path in this workspace"
+    },
+    {
+      "kind": "unused_pub_item",
+      "severity": "deny",
+      "file": "src/lib.rs",
+      "line": 11,
+      "name": "twin",
+      "message": "pub fn `twin` is never referenced by any resolved path in this workspace"
+    },
+    {
+      "kind": "unused_pub_item",
+      "severity": "deny",
+      "file": "src/lib.rs",
+      "line": 15,
+      "name": "twin",
+      "message": "pub fn `twin` is never referenced by any resolved path in this workspace"
+    },
+    {
+      "kind": "dead_file",
+      "severity": "deny",
+      "file": "src/orphan.rs",
+      "message": "not reachable from any target of package `baseline` via `mod` declarations"
+    }
+  ]
+}

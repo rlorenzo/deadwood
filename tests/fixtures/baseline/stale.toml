@@ -1,0 +1,4 @@
+# Two entries nothing matches any more: the code they described was fixed. They
+# are reported so the file shrinks instead of rotting, and they do not fail the
+# run — a developer who deletes dead code should not be punished for it.
+baseline = "stale-baseline.json"

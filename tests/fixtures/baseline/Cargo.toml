@@ -1,0 +1,31 @@
+# Test fixture: the baseline file.
+#
+# The tree produces a small, stable set of findings with no configuration at
+# all, chosen so that every question the baseline has to answer is asked by
+# something here: a finding with a line (which may drift), a finding with none
+# (a manifest entry), two findings sharing a kind, a file *and* a name, and the
+# two dependency kinds that differ by nothing but their kind.
+#
+# Each `*.toml` beside this file names a `*-baseline.json` and is applied with
+# `--config`, so the baselines can disagree with reality in one controlled way
+# each. There is deliberately no `deadwood.toml` and no `deadwood-baseline.json`
+# here: the unconfigured run is what every other case is measured against, and
+# a discoverable baseline would quietly change it.
+#
+# The registry dependencies below do not exist and do not need to:
+# `cargo metadata --no-deps` never resolves them, and Deadwood never builds.
+[package]
+name = "baseline"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Named by nothing at all: an `unused_dependency` finding.
+unused_crate = "1"
+# Named only by `tests/it.rs`, which links `[dev-dependencies]`: a
+# `misplaced_dependency` finding. It points at the same `Cargo.toml` as the
+# entry above and carries no line either, so the kind is the only thing keeping
+# the two apart in a baseline.
+test_only_crate = "1"
+
+[workspace]
