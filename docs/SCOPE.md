@@ -392,17 +392,35 @@ Closes [#8](https://github.com/rlorenzo/deadwood/issues/8).
 
 ## Next (sequenced, one slice at a time)
 
-1. **Reachability over reference counting** — an item referenced only by
-   other dead items is still dead; today each item is judged on whether
-   anything names it, not on whether that something is alive. Also what a
-   "test-only item" finding kind would need before it could be honest; see
-   the `cfg(test)` decision in phase 4.
-2. **Report a `[dev-dependencies]` entry the library itself names.** The
+1. **Reachability over reference counting**
+   ([#21](https://github.com/rlorenzo/deadwood/issues/21)) — an item
+   referenced only by other dead items is still dead; today each item is
+   judged on whether anything names it, not on whether that something is
+   alive. The largest remaining recall gap, and the first check whose failure
+   mode is a false positive by construction: what counts as a *root* is the
+   whole decision. Also what a "test-only item" finding kind would need
+   before it could be honest; see the `cfg(test)` decision in phase 4.
+2. **Give a baseline entry an identity a same-named neighbour cannot share**
+   ([#16](https://github.com/rlorenzo/deadwood/issues/16)) — one entry
+   suppresses every finding with its key, so a second `twin` in the same file
+   is accepted before it exists. The item's module path is the candidate, and
+   it is a format change: older baselines carry no such field and must keep
+   matching.
+3. **Survive a moved file**
+   ([#17](https://github.com/rlorenzo/deadwood/issues/17)) — the path is in
+   the key, so `git mv` un-baselines everything in the file. Rename detection
+   needs a similarity signal we do not compute, and the honest answer may be
+   to document the `--prune-baseline` + `--write-baseline` workaround instead
+   of guessing; weigh that before building anything.
+4. **Report a `[dev-dependencies]` entry the library itself names.** The
    check has never made that claim, because the likeliest explanation used to
    be a mis-attribution of ours rather than a manifest that cannot compile.
    The largest of those, an out-of-line `#[cfg(test)] mod tests;`, is closed
    ([#14](https://github.com/rlorenzo/deadwood/issues/14)), so the direction
    is now blocked on evidence of its own rather than on that gap.
+
+Everything above except the last is filed; the roadmap and the issue list say
+the same thing, so neither can quietly rot.
 
 ## Explicitly out of scope for now
 
