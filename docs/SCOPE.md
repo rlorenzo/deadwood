@@ -219,10 +219,11 @@ The phase is entirely about noise, so the decisions are the deliverable.
 - **Only two claims are made.** An entry nothing names is the unused check's
   answer. A dev-dependency the library appears to name is never reported: that
   manifest does not compile, so a mis-attribution on our side is the likelier
-  explanation, and the known one is
+  explanation. The known one was
   [#14](https://github.com/rlorenzo/deadwood/issues/14) — a `#[cfg(test)] mod
-  tests;` whose gate lives in the parent file. Reporting only where the
-  evidence is positive is what keeps that gap from becoming a false positive.
+  tests;` whose gate lives in the parent file — closed in phase 7 below.
+  Reporting only where the evidence is positive is what kept that gap from
+  becoming a false positive while it was open.
 - **What it found.** Nothing, across the fixtures and the 34 crates in the
   local registry: not one finding of any kind changed, and not one new one
   appeared. Recall was checked the other way instead, by promoting four of
@@ -293,6 +294,39 @@ gaps it leaves: [#16](https://github.com/rlorenzo/deadwood/issues/16), a key two
 findings share, and [#17](https://github.com/rlorenzo/deadwood/issues/17), a
 moved file un-baselining everything in it.
 
+## Phase 7 — a `mod` declaration's gate reaches the file it names (shipped)
+
+`#[cfg(test)] mod tests { ... }` and `#[cfg(test)] mod tests;` are the same
+code written two ways, and phase 5 could only see the first. The gate is
+written in the parent file, so the out-of-line body arrived at the detectors
+looking like ordinary library code, and a `[dependencies]` entry only the tests
+named went unreported. Module resolution now carries the answer with the file
+(`ParsedFile::test_only`).
+
+- **Confinement accumulates downward and never lifts.** A module inside
+  `#[cfg(test)] mod tests` is test code whatever its own gate says, so a
+  declaration only ever adds to what it inherited.
+- **Any ungated declaration clears it, however late it arrives.** A file two
+  declarations of one crate root disagree about — `#[path]` naming one file
+  from two modules — is loaded once, by whichever the queue reaches first, so
+  without a rule the answer would be decided by queue order. (Two *targets*
+  never collide this way: each is walked from its own root, so a file both
+  compile is resolved once per target and answers per target, which is what
+  attribution wants anyway.) A file wrongly marked
+  test-only would move the crates it names into the dev context and could have
+  a `[dependencies]` entry the library genuinely uses reported as belonging in
+  `[dev-dependencies]`: a false positive, where the other direction is a missed
+  finding. Clearing it late means redoing that file's `mod` walk so its
+  children are cleared too, which each file can need at most once.
+- **The flag says which code a file *is*, never whether it is live.** Nothing
+  about reachability or dead files changed; the gate on a declaration was
+  already what decided whether the file was followed at all.
+- **What it found.** One new finding, in the fixture written for it. Output is
+  byte-identical to phase 6 across every other fixture and the 34 crates in the
+  local registry, and on Deadwood itself.
+
+Closes [#14](https://github.com/rlorenzo/deadwood/issues/14).
+
 ## Next (sequenced, one slice at a time)
 
 1. **Reachability over reference counting** — an item referenced only by
@@ -304,11 +338,12 @@ moved file un-baselining everything in it.
    sharing a name with a module item currently resolves to that item and
    keeps it alive. Costs findings only; the fix must be namespace-aware, as
    a value binding must not silence a type of the same name.
-3. **Carry a `cfg` gate from a `mod` declaration into the file it names**
-   ([#14](https://github.com/rlorenzo/deadwood/issues/14)), so a
-   `#[cfg(test)] mod tests;` in its own file is read as the test code it is.
-   Costs placement findings today; the fix is in `src/modtree.rs` and has to
-   handle a file two `mod` declarations reach with different gates.
+3. **Report a `[dev-dependencies]` entry the library itself names.** The
+   check has never made that claim, because the likeliest explanation used to
+   be a mis-attribution of ours rather than a manifest that cannot compile.
+   The largest of those, an out-of-line `#[cfg(test)] mod tests;`, is closed
+   ([#14](https://github.com/rlorenzo/deadwood/issues/14)), so the direction
+   is now blocked on evidence of its own rather than on that gap.
 
 ## Explicitly out of scope for now
 

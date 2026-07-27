@@ -106,6 +106,7 @@ mod tests {
                         .filter(|segment| !segment.is_empty())
                         .map(str::to_string)
                         .collect(),
+                    test_only: false,
                 })
                 .collect(),
         }
@@ -331,6 +332,7 @@ mod tests {
                 path: PathBuf::from("/ws/src/main.rs"),
                 ast: syn::parse_file("fn main() { fixture::exported(); }\n").ok(),
                 module: Vec::new(),
+                test_only: false,
             }],
         };
         assert_eq!(unused_names(&[library, consumer]), vec!["unexported"]);

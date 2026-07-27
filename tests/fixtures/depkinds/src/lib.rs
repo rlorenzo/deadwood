@@ -20,6 +20,25 @@ pub fn build() -> Thing {
     Thing
 }
 
+/// The same unit tests written out of line: the gate is here, the code is in
+/// `src/outline_tests.rs`, and nothing in that file says what it is.
+#[cfg(test)]
+mod outline_tests;
+
+// One file under three declarations. The gated ones sit either side of the
+// ungated one so that neither pop order can decide the answer: whichever
+// declaration is read first, the ungated one is what this file is.
+#[cfg(test)]
+#[path = "shared_view.rs"]
+mod view_before_the_ungated_one;
+
+#[path = "shared_view.rs"]
+mod shared_view;
+
+#[cfg(test)]
+#[path = "shared_view.rs"]
+mod view_after_the_ungated_one;
+
 /// Unit tests live inside the library target and still link the
 /// dev-dependencies, which is what makes this the check's hardest case.
 #[cfg(test)]

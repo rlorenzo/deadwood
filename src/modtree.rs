@@ -16,6 +16,11 @@
 //! nothing". Each file's AST is then pruned of the items the matrix leaves
 //! out, so every detector downstream sees only the build being analyzed.
 //!
+//! A gate also says something about the file it leads to that the file itself
+//! cannot: `#[cfg(test)] mod tests;` makes `tests.rs` test code, and nothing
+//! inside `tests.rs` records that. Each reached file therefore carries
+//! [`ParsedFile::test_only`] down to the detectors that need it.
+//!
 //! Known simplifications, tracked for later:
 //! - `#[path]` is resolved relative to the declaring file's directory, which
 //!   matches rustc for the common cases but not every inline-module corner.
@@ -30,7 +35,7 @@
 //! are read as usual whether ignored or not: their contents are still evidence
 //! about the code that is *not* ignored (see [`crate::config`]).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -58,6 +63,19 @@ pub struct ParsedFile {
     /// Names come from the declarations, not the file names, so `#[path]`
     /// aliases land under the name paths actually use.
     pub module: Vec<String>,
+    /// Whether every `mod` declaration that leads here confines the file to a
+    /// test build ([`Gates::test_only`]).
+    ///
+    /// The gate is written in the *parent* file, so nothing inside this one
+    /// says it: `#[cfg(test)] mod tests;` in `lib.rs` makes `tests.rs` test
+    /// code, and `tests.rs` looks like any other file. [`crate::deps`] needs
+    /// this to attribute what it names to `[dev-dependencies]`, the same way
+    /// it already attributes an inline `#[cfg(test)] mod tests { ... }`.
+    ///
+    /// False for the crate root, and false for any file *some* ungated
+    /// declaration also reaches — see [`resolve`] for why that direction is
+    /// the safe one.
+    pub test_only: bool,
 }
 
 /// A file waiting to be loaded, with the context needed to place its items.
@@ -67,19 +85,55 @@ struct Pending {
     /// (`lib.rs`/`mod.rs`) or nests them in a stem-named directory.
     is_mod_root: bool,
     module: Vec<String>,
+    /// Whether the declaration that queued this file — and every declaration
+    /// above it — confines it to a test build.
+    test_only: bool,
+}
+
+/// A file already loaded, and what a second declaration of it needs to know.
+#[derive(Clone, Copy)]
+struct Seen {
+    /// Where it sits in [`Resolved::files`].
+    index: usize,
+    /// The rule its own children were resolved by, needed to redo that walk.
+    is_mod_root: bool,
 }
 
 /// Follow `mod` declarations from `root` and return every file reached.
 ///
 /// Unresolvable modules and unparsable files are reported through `warnings`
 /// rather than failing the whole analysis.
+///
+/// A file two declarations in this walk reach is loaded once, by whichever
+/// popped first. That is a real choice for [`ParsedFile::test_only`], because
+/// the two declarations can disagree: `#[path]` naming one file from two
+/// modules is the way it happens. The rule is that any ungated declaration
+/// clears the flag, however
+/// late it arrives: a file wrongly marked test-only would move the crates it
+/// names into the dev context and could have a `[dependencies]` entry reported
+/// as belonging in `[dev-dependencies]` when the library genuinely uses it.
+/// That is a false positive, where the other direction is a missed finding.
+/// Clearing it late means redoing that file's `mod` walk so its children are
+/// cleared too, which each file can need at most once.
+///
+/// This is one walk from one crate root, so it says nothing across targets. A
+/// file that two targets both compile is resolved once per target and can come
+/// out test-only in one and not the other, which is the right answer: what a
+/// file is depends on what reached it, and each target reached it its own way.
 pub fn resolve(
     root: &Path,
     ignore: Ignore<'_>,
     gates: &Gates<'_>,
     warnings: &mut Vec<String>,
 ) -> Resolved {
+    // Every path popped, whatever became of it, so that a file reached twice
+    // is read once — including one that could not be read at all, or that its
+    // own inner `#![cfg(...)]` keeps out of this build. Those two never reach
+    // `seen`, and without this they would be re-read and re-reported once per
+    // declaration naming them.
     let mut visited: HashSet<PathBuf> = HashSet::new();
+    // The subset that became a file, and where it landed.
+    let mut seen: HashMap<PathBuf, Seen> = HashMap::new();
     let mut resolved = Resolved {
         files: Vec::new(),
         excluded: Vec::new(),
@@ -88,16 +142,54 @@ pub fn resolve(
         path: root.to_path_buf(),
         is_mod_root: true,
         module: Vec::new(),
+        test_only: false,
     }];
 
     while let Some(Pending {
         path,
         is_mod_root,
         module,
+        test_only,
     }) = queue.pop()
     {
         let path = normalize(&path);
         if !visited.insert(path.clone()) {
+            // Reached again. Nothing about the file changes — it is the same
+            // file — except that an ungated declaration overrides a test-only
+            // one recorded earlier, and its children with it. A path that
+            // never became a file has nothing to override.
+            let Some(&Seen { index, is_mod_root }) = seen.get(&path) else {
+                continue;
+            };
+            if test_only || !resolved.files[index].test_only {
+                continue;
+            }
+            resolved.files[index].test_only = false;
+            let file = &resolved.files[index];
+            if let Some(ast) = &file.ast {
+                let declaring = Declaring {
+                    dir: parent_of(&path),
+                    file: &path,
+                    ignore,
+                    gates,
+                };
+                // The subtree below was already excluded and warned about on
+                // the first walk; repeating either would double it up.
+                collect_mod_decls(
+                    &ast.items,
+                    &declaring,
+                    Under {
+                        base: &child_base(&path, is_mod_root),
+                        module: &file.module,
+                        test_only: false,
+                    },
+                    &mut Walk {
+                        queue: &mut queue,
+                        excluded: &mut Vec::new(),
+                        warnings: &mut Vec::new(),
+                    },
+                );
+            }
             continue;
         }
         let source = match fs::read_to_string(&path) {
@@ -117,11 +209,7 @@ pub fn resolve(
 
         if let Some(ast) = &mut ast {
             let file_dir = path.parent().unwrap_or(Path::new(""));
-            let child_base = if is_mod_root {
-                file_dir.to_path_buf()
-            } else {
-                file_dir.join(path.file_stem().unwrap_or_default())
-            };
+            let child_base = child_base(&path, is_mod_root);
             // An inner `#![cfg(...)]` gates the file it is written in, not one
             // item in it, so a matrix that rules it out takes the whole file
             // and every module below it. Checked before the `mod` walk, or the
@@ -140,21 +228,53 @@ pub fn resolve(
             collect_mod_decls(
                 &ast.items,
                 &declaring,
-                &child_base,
-                &module,
-                &mut queue,
-                &mut resolved.excluded,
-                warnings,
+                Under {
+                    base: &child_base,
+                    module: &module,
+                    test_only,
+                },
+                &mut Walk {
+                    queue: &mut queue,
+                    excluded: &mut resolved.excluded,
+                    warnings,
+                },
             );
             // After the walk: the declarations above are read from the file as
             // written, and pruning would hide the excluded ones from it.
             crate::cfg::prune(gates, ast);
         }
 
-        resolved.files.push(ParsedFile { path, ast, module });
+        seen.insert(
+            path.clone(),
+            Seen {
+                index: resolved.files.len(),
+                is_mod_root,
+            },
+        );
+        resolved.files.push(ParsedFile {
+            path,
+            ast,
+            module,
+            test_only,
+        });
     }
 
     resolved
+}
+
+/// Where a file's file-backed child modules live: beside it when it owns its
+/// directory (`lib.rs`, `mod.rs`), in a stem-named directory otherwise.
+fn child_base(path: &Path, is_mod_root: bool) -> PathBuf {
+    let dir = parent_of(path);
+    if is_mod_root {
+        dir.to_path_buf()
+    } else {
+        dir.join(path.file_stem().unwrap_or_default())
+    }
+}
+
+fn parent_of(path: &Path) -> &Path {
+    path.parent().unwrap_or(Path::new(""))
 }
 
 /// What stays fixed while one file's `mod` declarations are walked: where its
@@ -167,40 +287,60 @@ struct Declaring<'a> {
     gates: &'a Gates<'a>,
 }
 
+/// What the declarations of one file inherit from the ones above them: where
+/// their files are looked for, what module path their items land under, and
+/// whether they are already confined to a test build.
+#[derive(Clone, Copy)]
+struct Under<'a> {
+    base: &'a Path,
+    module: &'a [String],
+    test_only: bool,
+}
+
+/// What a walk produces: files still to load, files this build leaves out, and
+/// declarations that resolved to nothing.
+struct Walk<'a> {
+    queue: &'a mut Vec<Pending>,
+    excluded: &'a mut Vec<PathBuf>,
+    warnings: &'a mut Vec<String>,
+}
+
 fn collect_mod_decls(
     items: &[syn::Item],
     declaring: &Declaring<'_>,
-    child_base: &Path,
-    module: &[String],
-    queue: &mut Vec<Pending>,
-    excluded: &mut Vec<PathBuf>,
-    warnings: &mut Vec<String>,
+    under: Under<'_>,
+    walk: &mut Walk<'_>,
 ) {
     for item in items {
         let syn::Item::Mod(m) = item else { continue };
         let name = m.ident.to_string();
+        // Test-confinement accumulates downward and never lifts: a module
+        // inside `#[cfg(test)] mod tests` is test code whatever its own gate
+        // says, so the declaration only ever adds to what it inherited.
+        let test_only = under.test_only || declaring.gates.test_only(&m.attrs);
         // A `mod` the configured matrix rules out is not part of this build:
         // neither it nor the files under it are read, and neither is dead.
         if !declaring.gates.compiled(&m.attrs) {
             let named = path_attr(&m.attrs).map(|explicit| declaring.dir.join(explicit));
-            exclude_subtree(named.as_deref(), child_base, &name, excluded);
+            exclude_subtree(named.as_deref(), under.base, &name, walk.excluded);
             continue;
         }
-        let mut child_module = module.to_vec();
+        let mut child_module = under.module.to_vec();
         child_module.push(name.clone());
         match &m.content {
             // Inline module: its own file-backed children live one directory
             // level deeper (`mod a { mod b; }` in lib.rs -> src/a/b.rs).
             Some((_, inner)) => {
-                let nested_base = child_base.join(&name);
+                let nested_base = under.base.join(&name);
                 collect_mod_decls(
                     inner,
                     declaring,
-                    &nested_base,
-                    &child_module,
-                    queue,
-                    excluded,
-                    warnings,
+                    Under {
+                        base: &nested_base,
+                        module: &child_module,
+                        test_only,
+                    },
+                    walk,
                 );
             }
             // External module: find the file it refers to.
@@ -212,13 +352,14 @@ fn collect_mod_decls(
                         // directory; any other `#[path]` target keeps the
                         // stem-based rule for its own children.
                         let owns_dir = target.file_name().is_some_and(|n| n == "mod.rs");
-                        queue.push(Pending {
+                        walk.queue.push(Pending {
                             path: target,
                             is_mod_root: owns_dir,
                             module: child_module,
+                            test_only,
                         });
                     } else if !declaring.ignore.matches(&target) {
-                        warnings.push(format!(
+                        walk.warnings.push(format!(
                             "`mod {}` in `{}` points at missing file `{}`",
                             m.ident,
                             declaring.file.display(),
@@ -227,23 +368,25 @@ fn collect_mod_decls(
                     }
                     continue;
                 }
-                let as_file = child_base.join(format!("{name}.rs"));
-                let as_dir = child_base.join(&name).join("mod.rs");
+                let as_file = under.base.join(format!("{name}.rs"));
+                let as_dir = under.base.join(&name).join("mod.rs");
                 if as_file.is_file() {
-                    queue.push(Pending {
+                    walk.queue.push(Pending {
                         path: as_file,
                         is_mod_root: false,
                         module: child_module,
+                        test_only,
                     });
                 } else if as_dir.is_file() {
-                    queue.push(Pending {
+                    walk.queue.push(Pending {
                         path: as_dir,
                         is_mod_root: true,
                         module: child_module,
+                        test_only,
                     });
                 } else if !declaring.ignore.matches(&as_file) && !declaring.ignore.matches(&as_dir)
                 {
-                    warnings.push(format!(
+                    walk.warnings.push(format!(
                         "`mod {name}` in `{}` has no file at `{}` or `{}`",
                         declaring.file.display(),
                         as_file.display(),
@@ -389,6 +532,81 @@ mod tests {
                 vec!["alias".to_string()],
                 vec!["alias".to_string(), "child".to_string()],
             ]
+        );
+    }
+
+    /// Which files a build reaches only through test-confined declarations,
+    /// against a fixture that puts every case in one crate: a `#[cfg(test)]
+    /// mod` with its body in its own file, and a file three declarations reach
+    /// — a gated one either side of an ungated one, so no pop order can be the
+    /// thing that answers it.
+    #[test]
+    fn test_confinement_follows_declarations_and_any_ungated_one_clears_it() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/depkinds/src/lib.rs");
+        let config = crate::config::Config::default();
+        let package = crate::cfg::tests_support::bare_package();
+        let gates = crate::cfg::Gates::new(config.cfg(), &package);
+        let mut warnings = Vec::new();
+        let resolved = resolve(&root, config.ignore(), &gates, &mut warnings);
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+
+        let mut reached: Vec<(String, bool)> = resolved
+            .files
+            .iter()
+            .map(|file| {
+                let name = file
+                    .path
+                    .strip_prefix(root.parent().unwrap())
+                    .unwrap_or(&file.path)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                (name, file.test_only)
+            })
+            .collect();
+        reached.sort();
+        assert_eq!(
+            reached,
+            vec![
+                ("lib.rs".to_string(), false),
+                // Its only declaration is `#[cfg(test)] mod outline_tests;`.
+                ("outline_tests.rs".to_string(), true),
+                // Reached by an ungated declaration among the gated ones.
+                ("shared_view.rs".to_string(), false),
+                // And so is its child, which carries no gate of its own.
+                ("shared_view/deeper.rs".to_string(), false),
+            ]
+        );
+    }
+
+    /// A path is popped once whatever becomes of it, which the two paths that
+    /// never reach `seen` — a file that cannot be read, and one its own inner
+    /// `#![cfg(...)]` keeps out of this build — depend on. Without that, every
+    /// declaration naming such a file re-reads it and re-reports it: two
+    /// identical warnings, or the same file listed twice as excluded.
+    #[test]
+    fn a_file_left_out_of_the_build_is_left_out_once_per_file_not_per_declaration() {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cfggates");
+        // `inner_gated.rs` is `#![cfg(windows)]` and named by two declarations;
+        // this matrix is the one that rules it out.
+        let config = crate::config::Config::load(&fixture.join("linux-only.toml"))
+            .expect("the fixture config parses");
+        let package = crate::cfg::tests_support::bare_package();
+        let gates = crate::cfg::Gates::new(config.cfg(), &package);
+        let mut warnings = Vec::new();
+        let resolved = resolve(
+            &fixture.join("src/lib.rs"),
+            config.ignore(),
+            &gates,
+            &mut warnings,
+        );
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+
+        let gated = normalize(&fixture.join("src/inner_gated.rs"));
+        assert_eq!(
+            resolved.excluded.iter().filter(|p| **p == gated).count(),
+            1,
+            "one file, one exclusion: {:?}",
+            resolved.excluded
         );
     }
 
