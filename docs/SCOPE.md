@@ -516,13 +516,15 @@ fifty lines — so the numbers are first.
   glob are now excluded from the claim — and the `pub` modules under them,
   since a glob re-exports modules as well as functions, so `facade::nested` is
   as nameable as `facade::from_glob` and stopping at the glob's own module
-  would leave the same false positive one level down. That exclusion is
+  would leave the same false positive one level down. That exclusion was
   deliberately *not*
-  folded into the root set: rooting those items would change what
+  folded into the root set here: rooting those items changes what
   `unused_pub_item` says about the code naming them, which is a behavior change
-  to a shipped kind and wants its own measurement. It is filed as
+  to a shipped kind and wanted its own measurement. It was filed as
   [#25](https://github.com/rlorenzo/deadwood/issues/25), with the
-  false-positive it already causes.
+  false-positive it already caused, and phase 11 below is where it moved — so
+  the exclusion described here is gone, and this kind now reads the answer off
+  the root set like every other.
 - **The overlap with rustc is the honest limit of the kind's value, and it is
   large.** For an item in a package's own `src/`, `dead_code` reports the same
   thing — as "never used" — in any build that leaves the tests out, which
@@ -619,36 +621,140 @@ re-export the public-surface rule does not follow, and
 [#27](https://github.com/rlorenzo/deadwood/issues/27), the inline `#[cfg(test)]
 mod` above.
 
+## Phase 11 — a `pub use` glob is public surface (shipped)
+
+Phase 10 built the closure that follows a `pub use` glob onto a library's
+surface and consulted it from one place, where it could only *remove* a
+`test_only_item` finding. This phase makes it the surface rule itself. That
+inverts the risk of every phase before it: 4, 8, 9 and 10 could report *more*
+and their failure mode was a false positive, while this one reports *less* and
+silences findings `unused_pub_item` makes today. So the thing to prove is not
+that the new findings are right — there are none — but that **every finding
+that disappears was wrong**.
+
+- **What it found, and it is the whole safety argument.** Across the 34 crates
+  in the local registry, the other 17 fixtures and Deadwood itself: **not one
+  finding changed**, and no exit code changed. The registry stays at 129
+  findings — the same 58 "never referenced", the same 6 "referenced only from
+  items that nothing reaches" (`check_raw_str`, `check_raw_byte_str`,
+  `check_raw_c_str` and `Mode` in `proc-macro2 1.0.107`; `_mm_set_epi32` and
+  `_mm_set_epi16` in `zmij 1.0.23`), the same 36 dead files, 28
+  dev-dependencies and 1 unsatisfiable gate. Zero `unused_reexport` findings
+  exist in the registry corpus at all, before or after. The four findings that
+  moved are all in the new `globs` fixture, which exists to produce them:
+  three `unused_pub_item` and one `unused_reexport`, and each is an item a
+  consumer writes as `facade::thing`, `facade::nested::deeper` or
+  `facade::Carried`. Run with `test_only_item = "warn"` the sweep is identical
+  too, which is what says the second copy of the rule was removed and not
+  weakened.
+- **The rule does fire on real code; it just changes no answer there.** Seven
+  registry crates carry a `pub use ...::*` in `src/`. In five of them the glob
+  leads outside the crate — `clap` re-exports `clap_builder`, `clap_builder`
+  re-exports `anstyle`, `serde` and `serde_core` re-export `core`/`std`,
+  `zmij` re-exports `core::arch::x86_64` — so it is unfollowable, which makes
+  its module *opaque*, which was already a root: a no-op by construction.
+  In the other two it resolves inside the crate and the surface grows:
+  `anstyle 1.0.14` gains 4 modules (`color`, `effect`, `reset`, `style`) and
+  `winnow 0.7.15` gains 7 (`parser` and six under `combinator`). Winnow is the
+  crate the issue was written about, and the measurement there is the clearest
+  statement of what this phase does and does not do: `combinator::iterator`
+  stays quiet, and `backtrack_err`, `separated_foldl1`, `separated_foldr1` and
+  `fill` — in the very modules just rooted — are still reported, because
+  nothing names them and rooting has never exempted an item from that.
+
+The four decisions the issue left open.
+
+- **One rule, not two, and the wart phase 10 left is gone.** The alternative was
+  a separate predicate for the glob closure, leaving `is_externally_reachable`
+  answering the narrow question for `is_root` and `is_worth_reporting` while a
+  second rule answered the wide one — which is exactly the drift #25's
+  acceptance criteria ask to remove, so adding a third copy was never a real
+  option. `SymbolTable::externally_reachable_modules` is computed once per
+  report and consulted by `is_root` and by `is_worth_reporting`; what is left
+  of the old per-module walk is `is_pub_to_the_crate_root`, one of the
+  closure's two edges and its only caller. `test_only_definitions` consults it
+  by *not* consulting it: its `!visible.contains(..)` filter is deleted, because
+  a surface item is now a root in both walks and so cannot reach the
+  test-only conditions. That deletion is the point — phase 10 reported two
+  mutations it could not catch because a rule was covered twice, and this phase
+  is about collapsing two mechanisms into one. Phase 10's
+  `a_pub_module_under_a_glob_re_export_is_never_test_only` and
+  `a_private_glob_import_does_not_make_its_source_externally_visible` both pass
+  unchanged, and now assert the root set's rule rather than a copy of it.
+- **`unused_reexport` moves with it, and it is measured on its own.** A `pub
+  use` sitting in a module only a glob exports is reachable from outside for
+  exactly the reason an item beside it is, so `is_worth_reporting` was
+  answering the same question the same wrong way. One re-export finding changes
+  anywhere in the corpus — the fixture's `Carried`, which a consumer names as
+  `facade::Carried` — and the registry has none of this kind to change. The
+  risk was taken seriously because a stale `pub use` is the cheapest thing in
+  this tool to delete: the other half is pinned by name
+  (`a_pub_use_no_glob_exports_is_still_reported_with_the_definition_under_it`),
+  and the fixture reports `Stale` twice over, as the re-export and as the
+  definition under it.
+- **The half that does not move is condition 1, and it is most of the
+  behaviour.** An item behind a glob that *nothing names* is still reported.
+  That is what makes a library's whole surface reportable-but-rooted, and it is
+  the difference between silencing four findings and silencing sixty-four:
+  rooting changes what an item's referrers prove, never whether the item itself
+  is reported. Pinned by
+  `an_item_behind_a_pub_use_glob_that_nothing_names_is_still_reported`, and by
+  `never_named` in the fixture — which rustc does *not* warn about, since to a
+  compiler it is public API.
+- **A cross-crate glob roots nothing new, so the reading costs nothing.**
+  `pub use other_member::*;` is arguably right to follow — a consumer really
+  can name those items through this crate — but it is a claim about a crate the
+  glob's author does not own, so it was worth settling rather than assuming.
+  It settles itself: the only modules of another workspace member a path can
+  name are `pub` from that member's own crate root, which this rule already
+  covered, so following the edge changes no answer. The fixture's `hub` member
+  carries the shape and `facade`'s private modules keep their findings; the
+  unit test runs the same workspace with and without the glob and asserts the
+  two reports are equal.
+
+Conservatism is unchanged, and that was a constraint rather than an outcome. A
+glob Deadwood cannot follow still makes its module opaque, and opaque is still
+a root in every walk — the phase only stops a *readable* mention from being
+ignored, and never turns an unreadable one into evidence.
+
+Recall was checked the other way, by mutation: nine inversions — the root set
+and the re-export filter each reverted to the pub-chain rule, each of the
+closure's two edges dropped, each edge's `pub` half dropped (`use` for `pub
+use`, `mod` for `pub mod`), the library check, the seed set, and the `is_pub`
+half of the surface root — and all nine were caught by a named test.
+
+Closes [#25](https://github.com/rlorenzo/deadwood/issues/25).
+
 ## Next (sequenced, one slice at a time)
 
-1. **Follow a `pub use` glob into the public surface**
-   ([#25](https://github.com/rlorenzo/deadwood/issues/25)) — `mod inner; pub
-   use inner::*;` makes `inner`'s items public API, and the reachability root
-   set does not follow it, so an item whose only referrer is dead is reported
-   though a consumer can name it. Phase 10 built the rule that does follow
-   those globs and consults it only where it can remove a finding; moving it
-   into the root set changes what `unused_pub_item` reports, so it needs a
-   measurement of its own. First because it is a live false positive rather
-   than a missed finding.
-2. **Give a baseline entry an identity a same-named neighbour cannot share**
+1. **Give a baseline entry an identity a same-named neighbour cannot share**
    ([#16](https://github.com/rlorenzo/deadwood/issues/16)) — one entry
    suppresses every finding with its key, so a second `twin` in the same file
    is accepted before it exists. The item's module path is the candidate, and
    it is a format change: older baselines carry no such field and must keep
    matching.
-3. **Survive a moved file**
+2. **Survive a moved file**
    ([#17](https://github.com/rlorenzo/deadwood/issues/17)) — the path is in
    the key, so `git mv` un-baselines everything in the file. Rename detection
    needs a similarity signal we do not compute, and the honest answer may be
    to document the `--prune-baseline` + `--write-baseline` workaround instead
    of guessing; weigh that before building anything.
-4. **Make an inline `#[cfg(test)] mod` test code for the entry-point split**
+3. **Make an inline `#[cfg(test)] mod` test code for the entry-point split**
    ([#27](https://github.com/rlorenzo/deadwood/issues/27)) — the out-of-line
    spelling is handled and the inline one is not, so the two disagree about an
-   entry point that is neither `#[test]` nor `#[bench]`. Last of the filed
+   entry point that is neither `#[test]` nor `#[bench]`. Below the baseline
    entries because it was measured before it was filed: simulating the fix
    changed no finding anywhere. It wants `cfg::Gates` reachable from
    `src/resolve.rs`, which phase 4 deliberately kept out of it.
+4. **Follow a named `pub use` of a module onto the public surface**
+   ([#28](https://github.com/rlorenzo/deadwood/issues/28)) — phase 11 follows
+   a `pub use inner::*;` glob and the `pub` modules under it, and `pub use
+   inner::sub;` reaches the same place by a third route the closure does not
+   take, so an item under it whose only referrer is dead is reported though a
+   consumer can name it. Same shape and same risk as phase 11, and last of the
+   filed entries for the same reason as the one above it: simulating the fix
+   changed no finding on any fixture, on the registry crates, or on Deadwood
+   itself.
 5. **Report a `[dev-dependencies]` entry the library itself names.** The
    check has never made that claim, because the likeliest explanation used to
    be a mis-attribution of ours rather than a manifest that cannot compile.
