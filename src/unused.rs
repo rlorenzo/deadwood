@@ -256,6 +256,19 @@ mod tests {
             "the body path resolved to `called`; had the header suppressed it the finding \
              would be the stronger `nothing names it` one"
         );
+
+        // The other value of the flag, in the same run: `Wrapper` is named by
+        // nothing at all, which is the older and stronger claim. Without this
+        // the flag could regress to `true` for every finding and the
+        // assertion above would still pass.
+        let wrapper = found
+            .iter()
+            .find(|item| item.name == "Wrapper")
+            .expect("`Wrapper` is reported");
+        assert!(
+            !wrapper.only_from_unreached,
+            "an `impl` header is not a use, so nothing names `Wrapper` at all"
+        );
     }
 
     #[test]

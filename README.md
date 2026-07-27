@@ -47,9 +47,14 @@ and an item survives only when something names it *and* that something is
 itself reached:
 
 ```rust
+// in `main.rs`, or anywhere a consumer outside the crate cannot reach:
 pub fn orphan() { helper(); }   // reported: nothing names it
 pub fn helper() {}              // reported too: only `orphan` names it
 ```
+
+The crate kind matters, and it is the root rule below at work: in a *library*
+both of these sit on the public surface, so `helper` is reached and only
+`orphan` is reported.
 
 So a dead subsystem comes out in one run rather than one layer per run, and a
 pair of mutually recursive functions nothing reaches — permanently referenced,

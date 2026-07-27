@@ -2085,11 +2085,36 @@ const ENTRY_POINT_ATTRS: &[&str] = &[
 
 /// Whether an item's attributes make it a root.
 ///
-/// The `dead_code` opt-outs count: `#[allow(dead_code)]` is the author saying
-/// the item is kept on purpose, and an item kept on purpose keeps what it
-/// names.
+/// The `dead_code` opt-outs count, because `#[allow(dead_code)]` is the author
+/// saying the item is kept on purpose and an item kept on purpose keeps what
+/// it names. Only those, though: [`has_skip_attr`] answers yes to any
+/// `allow`/`expect` whose tokens merely *contain* `unused`, which is right for
+/// suppressing a report — the author has said they do not want to hear about
+/// this item — and much too broad for rooting. `#[allow(unused_variables)]`
+/// says nothing about whether the function is reached, and rooting on it would
+/// silence a whole cascade under one of the most common attributes in Rust.
 fn entry_point_attr(attrs: &[syn::Attribute]) -> bool {
-    attrs.iter().any(|attr| attr_is(attr, ENTRY_POINT_ATTRS)) || has_skip_attr(attrs)
+    attrs
+        .iter()
+        .any(|attr| attr_is(attr, ENTRY_POINT_ATTRS) || allows_lint(attr, &["dead_code", "unused"]))
+}
+
+/// Whether `attr` is an `allow` or `expect` listing one of `lints`.
+///
+/// Matched on the whole lint name rather than on a substring, which is the
+/// difference between `unused` — the group that contains `dead_code` — and
+/// `unused_variables`, which is about a parameter and not about the item.
+fn allows_lint(attr: &syn::Attribute, lints: &[&str]) -> bool {
+    if !attr_is(attr, &["allow", "expect"]) {
+        return false;
+    }
+    let syn::Meta::List(list) = &attr.meta else {
+        return false;
+    };
+    list.tokens
+        .to_string()
+        .split(',')
+        .any(|lint| lints.contains(&lint.trim()))
 }
 
 #[cfg(test)]
@@ -2758,6 +2783,45 @@ mod tests {
                 ))
                 .is_empty(),
                 "`{attribute}` is an entry point"
+            );
+        }
+    }
+
+    /// `#[allow(dead_code)]` is the author keeping an item on purpose, so it
+    /// is a root and what it names stays alive. `#[allow(unused_variables)]`
+    /// is about a parameter and says nothing about whether the item is
+    /// reached — rooting on it would silence a whole cascade under one of the
+    /// most common attributes in Rust, so the lint name has to match whole
+    /// rather than as a substring.
+    #[test]
+    fn only_the_dead_code_opt_outs_root_an_item() {
+        for attribute in [
+            "#[allow(dead_code)]",
+            "#[expect(dead_code)]",
+            "#[allow(unused)]",
+        ] {
+            assert!(
+                unused_in_binary_root(&format!(
+                    "pub fn helper() -> u32 {{ 1 }}\n{attribute}\npub fn kept() -> u32 {{ helper() }}\n"
+                ))
+                .is_empty(),
+                "`{attribute}` keeps the item, and so what it names"
+            );
+        }
+        for attribute in [
+            "#[allow(unused_variables)]",
+            "#[allow(unused_mut)]",
+            "#[expect(unused_imports)]",
+        ] {
+            // The item itself is still suppressed — that is `has_skip_attr`,
+            // unchanged, and the author has said they do not want to hear
+            // about it — but it is not reached, so what it names falls.
+            assert_eq!(
+                unused_in_binary_root(&format!(
+                    "pub fn helper() -> u32 {{ 1 }}\n{attribute}\npub fn caller(spare: u32) -> u32 {{ helper() }}\n"
+                )),
+                vec!["helper"],
+                "`{attribute}` silences its own item without rooting the cascade"
             );
         }
     }
