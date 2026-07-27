@@ -498,7 +498,7 @@ fifty lines — so the numbers are first.
   `for_each_rust_file`/`rayon_init` in `tests/repo/mod.rs` in each of
   `syn 2.0.119` and `syn 3.0.3`. Every one was opened and confirmed by hand,
   and every one is the same shape: `pub` on an item in a target nothing outside
-  a test binary can name. Deadwood on itself reports none. Default output is
+  a test binary can name. Run on itself, Deadwood reports none. Default output is
   byte-identical everywhere — the kind ships `off`, so there is no finding to
   print — across every fixture, the registry crates and Deadwood itself, exit
   codes included.
@@ -591,9 +591,24 @@ filter and by the root set, so neither inversion was visible. The redundant
 filter is gone and the tests now pin what a surface item *reaches*, which is
 the part only the root set can answer.
 
-Closes [#23](https://github.com/rlorenzo/deadwood/issues/23), and files the gap
-it found: [#25](https://github.com/rlorenzo/deadwood/issues/25), a glob
-re-export the public-surface rule does not follow.
+One asymmetry is left open and measured. `#[cfg(test)] mod tests;` in a file
+makes that file test code (phase 7), and an inline `#[cfg(test)] mod tests {
+... }` does not — so an entry point that is neither `#[test]` nor `#[bench]`
+inside an inline one (`#[allow(dead_code)]`, `#[no_mangle]`) reads as a
+non-test root, and what it reaches is not test-only. The honest predicate is
+`cfg::Gates::test_only`, which is per-package and lives in a module
+`src/resolve.rs` has never been given, and the cheap alternative is a second
+copy of a rule `src/cfg.rs` already owns. Simulating the fix with a
+deliberately over-broad predicate changed **not one finding** across the
+fixtures, the registry crates and Deadwood itself, so it is filed with that
+number in it rather than built on a hunch
+([#27](https://github.com/rlorenzo/deadwood/issues/27)).
+
+Closes [#23](https://github.com/rlorenzo/deadwood/issues/23), and files the two
+gaps it leaves: [#25](https://github.com/rlorenzo/deadwood/issues/25), a glob
+re-export the public-surface rule does not follow, and
+[#27](https://github.com/rlorenzo/deadwood/issues/27), the inline `#[cfg(test)]
+mod` above.
 
 ## Next (sequenced, one slice at a time)
 
@@ -618,7 +633,14 @@ re-export the public-surface rule does not follow.
    needs a similarity signal we do not compute, and the honest answer may be
    to document the `--prune-baseline` + `--write-baseline` workaround instead
    of guessing; weigh that before building anything.
-4. **Report a `[dev-dependencies]` entry the library itself names.** The
+4. **Make an inline `#[cfg(test)] mod` test code for the entry-point split**
+   ([#27](https://github.com/rlorenzo/deadwood/issues/27)) — the out-of-line
+   spelling is handled and the inline one is not, so the two disagree about an
+   entry point that is neither `#[test]` nor `#[bench]`. Last of the filed
+   entries because it was measured before it was filed: simulating the fix
+   changed no finding anywhere. It wants `cfg::Gates` reachable from
+   `src/resolve.rs`, which phase 4 deliberately kept out of it.
+5. **Report a `[dev-dependencies]` entry the library itself names.** The
    check has never made that claim, because the likeliest explanation used to
    be a mis-attribution of ours rather than a manifest that cannot compile.
    The largest of those, an out-of-line `#[cfg(test)] mod tests;`, is closed

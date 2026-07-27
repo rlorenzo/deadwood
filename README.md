@@ -309,7 +309,9 @@ that file is missing. Relative patterns are resolved against the directory
 holding the file.
 
 ```toml
-# deadwood.toml — every setting, with its default behavior noted.
+# deadwood.toml — every setting, with its default behavior noted. The values
+# shown are an illustrative policy, not the defaults: each block states its own
+# default in the comment above it, and an omitted block leaves it in force.
 
 # Files no finding may be reported about. Patterns are `/`-separated globs
 # where `*` stays inside one segment, `**` spans any number of them, and `?` is
@@ -333,6 +335,8 @@ unused_dependency = "deny"
 misplaced_dependency = "deny"
 unsatisfiable_cfg = "deny"
 test_only_item = "warn"     # `off` unless you ask; nothing else defaults to `off`
+# (`unused_pub_item` and `unused_reexport` above are `deny` unless a line like
+# these turns them down — the two spellings are what the setting is for.)
 
 # Crates and items whose `pub` surface is API rather than leftovers. Deadwood
 # only sees consumers inside the workspace, so for a published library this is
@@ -551,7 +555,9 @@ toolchain is pinned to `stable` with `clippy` and `rustfmt` via
   mod`** that is not itself `#[test]`/`#[bench]` — a `#[no_mangle]`, an
   `#[allow(dead_code)]` — reads as a non-test root, so what it reaches is not
   test-only either. Out-of-line `#[cfg(test)] mod tests;` files do not have
-  that gap.
+  that gap ([#27](https://github.com/rlorenzo/deadwood/issues/27); simulating
+  the fix changed no finding on any fixture, on the 34 crates in a local
+  registry, or on Deadwood itself).
 - Much of what `test_only_item` reports about a package's own `src/` is also
   reported by rustc, as `dead_code`, in any build that leaves the tests out —
   `cargo build`, and `cargo clippy --all-targets`, which compiles the crate
