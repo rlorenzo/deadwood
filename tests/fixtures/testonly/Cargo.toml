@@ -1,0 +1,16 @@
+# Test fixture: the `test_only_item` kind — a `pub` item the workspace reaches
+# only through its test code.
+#
+# Two members, because the claim has two halves that must not be confused.
+# `app` is a binary, where nothing is externally reachable and "only the tests
+# reach this" is a statement about the whole crate; `probe` is a library, where
+# the public surface is reached by consumers Deadwood cannot see and the same
+# statement is one we are not entitled to make.
+#
+# There is deliberately no `deadwood.toml` here. The kind defaults to `off`, so
+# the unconfigured run of this fixture reports nothing at all — that is the
+# assertion the shipped default is worth — and `warn.toml` and `declared.toml`
+# beside this file are applied with `--config` for the cases that need it.
+[workspace]
+resolver = "2"
+members = ["app", "probe"]

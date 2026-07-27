@@ -1,0 +1,5 @@
+# The kind ships `off`, so asking for it at all is a `[severity]` entry. `warn`
+# rather than `deny`: "only tests reach this" is not "this is dead", and it
+# should not fail a build on its own.
+[severity]
+test_only_item = "warn"

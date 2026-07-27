@@ -1,0 +1,9 @@
+# The same, plus a `[public-api]` listing. A project saying outright that
+# something outside the workspace uses an item is making the claim the surface
+# rule makes by inference, so it keeps that item out of this kind for the same
+# reason: we cannot see the consumer, so we cannot say only tests reach it.
+[severity]
+test_only_item = "warn"
+
+[public-api]
+items = ["probe::hidden::declared"]
