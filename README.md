@@ -281,12 +281,16 @@ written by an older Deadwood matching exactly what it always matched, with no
 edit: the crate root is spelled `crate`, never omitted, so the two cases can
 never be confused.
 
-The compatibility runs one way. A baseline this version writes makes an older
-Deadwood exit 2 with ``unknown field `module` ``, on a file it read yesterday —
-the same strictness that turns a typo'd key into an error rather than a silently
-ignored one, and the reason a field that decides matching may not be quietly
-dropped. Downgrading after rewriting the baseline means deleting the field by
-hand, or regenerating the file with the older binary.
+The compatibility runs one way, and only as far as the field reaches. `module`
+is written only for the kinds that have one — `unused_pub_item`,
+`unused_reexport`, `test_only_item` — so a baseline recording none of those
+carries no `module` anywhere and an older Deadwood still reads it. Record one
+item finding and it does not: that file makes an older Deadwood exit 2 with
+``unknown field `module` ``, on a file it read yesterday. That is the same
+strictness that turns a typo'd key into an error rather than a silently ignored
+one, and the reason a field that decides matching may not be quietly dropped.
+Downgrading after rewriting such a baseline means deleting the field by hand, or
+regenerating the file with the older binary.
 
 **Fixed findings are reported, not forgotten.** An entry nothing matches any
 more is stale, and every run says so; `--prune-baseline` rewrites the file

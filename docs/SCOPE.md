@@ -795,11 +795,18 @@ migration is most of what the phase is.
   no `module` before asserting they suppress what they always did; a round trip
   through one version proves nothing about the version that wrote the file last
   week.
-- **The reverse direction is a one-way door, deliberately.** `Entry` rejects
-  unknown fields, so a baseline written by this Deadwood makes an *older* one
-  exit 2 on a file it read yesterday — ``unknown field `module`, expected one of
-  `kind`, `severity`, `file`, `line`, `name`, `message` `` — verified against a
-  binary built from `main`. Relaxing the strictness cannot fix that —
+- **The reverse direction is a one-way door, deliberately — for the baselines
+  the field reaches.** `Entry` rejects unknown fields, so a baseline written by
+  this Deadwood makes an *older* one exit 2 on a file it read yesterday —
+  ``unknown field `module`, expected one of `kind`, `severity`, `file`, `line`,
+  `name`, `message` `` — verified against a binary built from `main`. It is not
+  every baseline: `module` is `skip_serializing_if`, and only three kinds have
+  one, so a file recording nothing but dead files, dependency entries or
+  unsatisfiable gates is byte-compatible in both directions. Both halves were
+  measured against that same binary rather than read off the serde attribute —
+  a one-finding `dead_file` baseline round-trips through the old reader and
+  suppresses, and adding a single `unused_pub_item` entry to it is what closes
+  the door. Relaxing the strictness cannot fix that —
   the strict reader is the one already released — and it would cost the
   protection outright. "A setting that silently does nothing is worse than no
   setting" is a rule about config, and the objection to applying it to a *data*
