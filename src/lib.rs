@@ -403,8 +403,12 @@ pub fn analyze_with(
             name: Some(item.name),
         }));
     } else {
+        // Both kinds, because both come out of the one resolution pass: a
+        // reader who turned `test_only_item` on and sees nothing has to be
+        // told that nothing is what a skipped check reports.
         warnings.push(
-            "unused-pub check skipped: module resolution was incomplete (see warnings above)"
+            "unused-pub and test-only checks skipped: module resolution was incomplete (see \
+             warnings above)"
                 .to_string(),
         );
     }

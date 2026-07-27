@@ -106,7 +106,8 @@ pub fn find_items(
         .any(|unit| unit.files.iter().any(|file| file.ast.is_none()))
     {
         warnings.push(
-            "unused-pub check skipped: usage resolution would be unreliable with unparsable files"
+            "unused-pub and test-only checks skipped: usage resolution would be unreliable with \
+             unparsable files"
                 .to_string(),
         );
         return Items::default();
@@ -228,8 +229,8 @@ mod tests {
         assert!(
             warnings
                 .iter()
-                .any(|w| w.contains("unused-pub check skipped")),
-            "the skip must be surfaced as a warning: {warnings:?}"
+                .any(|w| w.contains("unused-pub and test-only checks skipped")),
+            "the skip must name both kinds the one pass produces: {warnings:?}"
         );
     }
 

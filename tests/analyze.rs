@@ -162,8 +162,9 @@ fn detectors_skip_when_module_resolution_is_incomplete() {
         analysis
             .warnings
             .iter()
-            .any(|w| w.contains("unused-pub check skipped")),
-        "the unused-pub skip must be surfaced: {:?}",
+            .any(|w| w.contains("unused-pub and test-only checks skipped")),
+        "the skip must be surfaced, and must name both kinds the one resolution \
+         pass produces: {:?}",
         analysis.warnings
     );
     // A file that failed to parse could hold the only reference to a

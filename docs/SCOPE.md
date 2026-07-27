@@ -501,7 +501,12 @@ fifty lines — so the numbers are first.
   a test binary can name. Run on itself, Deadwood reports none. Default output is
   byte-identical everywhere — the kind ships `off`, so there is no finding to
   print — across every fixture, the registry crates and Deadwood itself, exit
-  codes included.
+  codes included. One line moved, and it is not a finding: the warning that
+  names the checks an incomplete parse skips now names this kind too, because
+  the same resolution pass produces both and a reader who turned the kind on
+  and saw nothing would otherwise not know the check had been skipped. It
+  appears in exactly one place in the corpus, the `broken` fixture, which
+  exists to produce it.
 - **The first run found a false positive, and that shaped the kind.**
   `winnow 0.7.15`'s `combinator::iterator` came out test-only: documented,
   doc-tested public API, reached from `pub use self::core::*;` in a `pub mod`
