@@ -353,7 +353,7 @@ struct Module {
     glob_sources: Vec<usize>,
     /// The subset of those a `pub use` glob pulls in, so their items can be
     /// named from here by anyone who can name this module. See
-    /// [`SymbolTable::externally_visible_modules`].
+    /// [`SymbolTable::externally_reachable_modules`].
     pub_glob_sources: Vec<usize>,
     /// A glob import that could not be followed into the workspace, so a name
     /// missing from `items` might still refer to a workspace item.
@@ -680,17 +680,18 @@ impl SymbolTable {
     /// 3. **Nothing reaches it once the test entry points are gone**
     ///    ([`RootSet::WithoutTests`]).
     ///
-    /// What this cannot say is as important as what it can. Anything a
-    /// consumer could name is out: a library's public surface is a root in
-    /// *both* walks, so a `pub fn` on it is never test-only however plainly
-    /// only the tests call it here — we cannot see the consumers, and claiming
-    /// otherwise is the false positive this whole check is shaped to avoid. So
-    /// is anything a `pub use` glob re-exports, which the root set does not
-    /// cover ([`SymbolTable::externally_visible_modules`]). And everything
-    /// opaque is a root in both walks too ([`Referrer::Root`]): one mention in
-    /// macro input — an `assert_eq!` naming the item is the common one — keeps
-    /// an item out of this kind entirely. Every one of those costs findings,
-    /// and none of them invents one.
+    /// What this cannot say is as important as what it can, and one rule
+    /// answers for most of it: a library's public surface is a root in *both*
+    /// walks — every `pub` item under `pub` modules from the crate root, and
+    /// everything a `pub use` glob re-exports from the crate root or one of
+    /// those modules ([`SymbolTable::externally_reachable_modules`]) — so a
+    /// `pub fn` a consumer could name is never test-only however plainly only
+    /// the tests call it here. We cannot see the consumers, and claiming
+    /// otherwise is the false positive this whole check is shaped to avoid.
+    /// And everything opaque is a root in both walks too ([`Referrer::Root`]):
+    /// one mention in macro input — an `assert_eq!` naming the item is the
+    /// common one — keeps an item out of this kind entirely. Every one of
+    /// those costs findings, and none of them invents one.
     pub(crate) fn test_only_definitions(&self, public_api: &PublicApi) -> Vec<TestOnlyDef> {
         let site = |def: &Def| (def.file.clone(), def.line, def.name.clone());
         let surface = self.externally_reachable_modules();

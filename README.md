@@ -77,8 +77,9 @@ exports (`#[no_mangle]`, `#[export_name]`, `#[proc_macro*]`, `#[panic_handler]`
 and the rest, including the `#[unsafe(...)]` spelling), the `dead_code`
 opt-outs, everything `[public-api]` declares, **a library's public surface** —
 every `pub` item under `pub` modules from the crate root, and everything a
-`pub use inner::*;` glob re-exports from one of those, since consumers Deadwood
-cannot see call it — and **everything opaque**. A root is still
+`pub use inner::*;` glob re-exports from the crate root or from one of those
+modules — `inner` itself need not be `pub`, which is the whole point — since
+consumers Deadwood cannot see call it — and **everything opaque**. A root is still
 reported when nothing in the workspace names it, which is why rooting the
 public surface costs no finding: what it changes is that an item the surface
 *calls* is not dragged down with it.
