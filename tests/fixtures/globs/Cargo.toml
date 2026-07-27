@@ -1,0 +1,15 @@
+# Test fixture: `pub use inner::*;` and the public surface.
+#
+# `mod inner; pub use inner::*;` makes `inner`'s items nameable as
+# `facade::*` to any consumer, and a glob binds no name — so it creates no
+# definition and records no edge the way a named `pub use` does. The root set
+# follows the glob anyway, and every claim that rule makes is here in code that
+# compiles.
+#
+# Three members, because the rule has three answers. `facade` is a library,
+# where a `pub use` glob is public API; `tool` is a binary, which has no public
+# surface for a glob to put anything on; and `hub` re-exports `facade` across
+# the workspace, which roots nothing the surface rule did not already cover.
+[workspace]
+resolver = "2"
+members = ["facade", "hub", "tool"]
