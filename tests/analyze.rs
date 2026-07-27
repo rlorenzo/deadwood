@@ -1722,3 +1722,60 @@ fn pruning_preserves_every_field_of_the_entries_it_keeps() {
         "{written}"
     );
 }
+
+/// The `scopes` fixture is written so that every `pub` item is either
+/// shadowed by a binding — and so genuinely unreferenced — or named exactly
+/// once, from inside the scope where a binding of that name is live. So the
+/// list below is the whole claim: these four are shadowed, and the other nine
+/// survive a binding that must not silence them.
+///
+/// The `assert_eq!` carries most of that weight, because it pins the *whole*
+/// finding vector: an item wrongly reported fails it whether or not the loop
+/// below names that item. The loop is there to say which survivor proves
+/// which rule. Eight of the nine are in it; the ninth is `pub mod deep`,
+/// which a `mod` declaration's `reportable: false` keeps out of
+/// `unused_pub_item` entirely, so asserting it here would assert nothing.
+/// What that module is for is the qualified path through it, and `thing` at
+/// the end of that path is checked.
+#[test]
+fn a_binding_hides_the_item_it_shadows_and_only_the_item_it_shadows() {
+    let analysis = analyze_fixture("scopes");
+
+    assert_eq!(
+        reported(&analysis, FindingKind::UnusedPubItem),
+        vec![
+            // `let helper = 11;` — the motivating case of #8.
+            ("src/lib.rs".to_string(), "helper"),
+            // A function parameter binds for the whole body.
+            ("src/lib.rs".to_string(), "width"),
+            // The leaf of `let Pair(value) = ..` binds even though `Pair`
+            // beside it is a use.
+            ("src/lib.rs".to_string(), "value"),
+            // A generic parameter binds in the type namespace, for its item.
+            ("src/lib.rs".to_string(), "Marker"),
+        ]
+    );
+
+    // Each of these is named exactly once, from a scope where a binding of the
+    // same name is live. Any of them appearing above would be a live item
+    // reported dead — the one outcome the analyzer must never produce.
+    for name in [
+        "Cfg",      // a type annotation beside `let mut Cfg = 12;`
+        "seeded",   // `let seeded = seeded();` — the initializer comes first
+        "fallback", // a `let ... else` block, where the binding does not exist
+        "armed",    // the arm that does not bind the name
+        "scoped",   // after the block that bound the name ended
+        "Pair",     // the path of a tuple-struct pattern
+        "LIMIT",    // a bare `const` pattern, which is a use and not a binding
+        "thing",    // reached through `deep::thing()`, a qualified path
+    ] {
+        assert!(
+            !analysis
+                .findings
+                .iter()
+                .any(|f| f.name.as_deref() == Some(name)),
+            "`{name}` is referenced and must not be reported: {:?}",
+            analysis.findings
+        );
+    }
+}

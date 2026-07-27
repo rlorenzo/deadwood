@@ -34,6 +34,13 @@ resolved against a per-crate symbol table. So two items sharing a name no
 longer hide each other, and a type mentioned only inside its own `impl` block
 is still reported.
 
+Lexical scopes are part of that resolution: a local, a parameter, or a generic
+parameter that shares a name with a module item shadows it exactly as it does
+in Rust, so `let helper = 5;` no longer keeps a dead `pub fn helper` alive.
+Shadowing is per namespace — a `let` binding hides only expressions and a
+generic parameter only types, so `let Foo = 1;` cannot silence a `: Foo` beside
+it — and it stops at the end of the block, arm, or body that opened it.
+
 The bias is still toward staying quiet rather than raising noise. Anything
 that cannot be resolved counts as a use of *every* item with that name:
 identifiers inside macro invocations and attribute arguments, and names in a
@@ -418,6 +425,12 @@ toolchain is pinned to `stable` with `clippy` and `rustfmt` via
   (`#[serde(with = "crate::codec")]` keeps everything in `codec` alive).
   Macro-*generated* `mod` declarations and items are invisible to the parser
   entirely.
+- Lexical scopes are tracked syntactically, so a binding a macro expands to
+  shadows nothing — though an identifier in macro input already counts as a
+  use of every item with that name, so the two errors point the same way. A
+  bare name in pattern position is read as a *use* whenever it could name a
+  unit struct, a variant or a `const`, which costs a finding for the braced
+  struct and type alias it could equally be binding over.
 - A glob import that leads outside the workspace makes its module opaque:
   names not otherwise in scope there count as uses of every item with that
   name. Globs within the workspace are expanded and hide nothing.

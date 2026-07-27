@@ -20,6 +20,9 @@
 //!    the module it is written in, following `crate::`, `self::`, `super::`,
 //!    workspace crate names, `use` aliases, and re-export chains. Each
 //!    definition a path names is marked used.
+//! 4. **Lexical scopes** — a single-segment path that a local binding,
+//!    parameter, or generic parameter covers names that binding and not an
+//!    item, so it resolves to nothing. See [Lexical scopes](#lexical-scopes).
 //!
 //! # Conservatism
 //!
@@ -43,17 +46,49 @@
 //! A path that resolves cleanly to nothing in the workspace (`std`, an
 //! external crate, or a local name matching no item) marks nothing.
 //!
+//! # Lexical scopes
+//!
+//! `let helper = 5; helper` names the local, not the module's `pub fn
+//! helper`, so the walk tracks bindings and resolves nothing for a path one
+//! of them covers. Suppressing a path is the one thing in this module that
+//! can *invent* a finding rather than lose one, so every rule below is the
+//! narrow side of a choice:
+//!
+//! - **Namespaces are separate.** Rust resolves values and types apart, so a
+//!   `let` binding shadows only *expression* paths and a generic parameter
+//!   shadows only *type* paths. A binding set applied by name alone would let
+//!   `let Foo = 1;` silence the `: Foo` on the next line and report a live
+//!   type as dead.
+//! - **Only a bare name is ever shadowed.** `helper::thing` names a module
+//!   even where `helper` is bound, and so does `::helper`.
+//! - **Order is respected.** A `let` initializer is resolved before its
+//!   pattern binds (`let x = x();` still names the item `x`), and a `let ...
+//!   else` block is resolved where the binding does not exist yet.
+//! - **Scopes pop.** Blocks, `match` arms, `if let`/`while let` branches,
+//!   `for` patterns and closure bodies each end their bindings, and an item
+//!   nested in a function body starts from an empty scope, because it cannot
+//!   see that function's locals or generics.
+//! - **A pattern is not automatically a binding.** `let Foo(x) = y;` and
+//!   `Foo { field: x }` name a struct or variant; a *bare* name in pattern
+//!   position is a unit-struct, unit-variant or `const` pattern whenever one
+//!   is in scope and a fresh binding otherwise. Telling those apart is the
+//!   sharpest edge here, so the symbol table decides: a name that could name
+//!   such an item is marked used and binds nothing.
+//!
+//! Where the position of a path cannot be established the path is resolved
+//! as before, which is how a construct this module does not model — a pattern
+//! in macro input, say — keeps costing findings rather than precision.
+//!
 //! # Known limitations
 //!
 //! - Purely syntactic: method calls (`x.foo()`), trait dispatch, and
 //!   associated items are not resolved. Only free-standing item definitions
 //!   are reported, so this costs findings, never precision.
-//! - Lexical scopes are not tracked, so a local binding, function parameter,
-//!   or generic parameter sharing a name with a module item resolves to that
-//!   item and keeps it alive (`let helper = 5;` hides a dead `pub fn
-//!   helper`). Findings are lost, never invented — fixing it means tracking
-//!   bindings per namespace, since a value binding must not silence a *type*
-//!   of the same name, and a wrong suppression would invent false positives.
+//! - Lexical scopes are tracked syntactically, so what a *macro* binds is
+//!   invisible: an identifier in macro input already counts as a use of every
+//!   item with that name, and a local a macro expands to shadows nothing.
+//!   Loop labels, lifetimes and `self` need no tracking — none of them can
+//!   name an item.
 //! - Only the code in the analyzed build reaches here: items a `cfg` the
 //!   configured matrix rules out are removed before the symbol table is built
 //!   ([`crate::cfg`]), so they neither define nor use anything. With the
@@ -147,6 +182,14 @@ struct RefPath {
 }
 
 impl RefPath {
+    /// A bare one-segment path, as a pattern or an identifier spells it.
+    fn single(name: &str) -> Self {
+        RefPath {
+            absolute: false,
+            segments: vec![name.to_string()],
+        }
+    }
+
     fn from_syn(path: &syn::Path) -> Self {
         RefPath {
             absolute: path.leading_colon.is_some(),
@@ -351,6 +394,9 @@ impl SymbolTable {
                     module,
                     module_path: file.module.clone(),
                     impl_self: None,
+                    pos: PathPos::Other,
+                    value_scopes: Vec::new(),
+                    type_scopes: Vec::new(),
                 };
                 for item in &ast.items {
                     walker.visit_item(item);
@@ -666,6 +712,40 @@ impl SymbolTable {
         if unknown { Step::Unknown } else { Step::Absent }
     }
 
+    /// Whether a bare name written in pattern position could be naming an
+    /// item rather than binding a fresh one.
+    ///
+    /// `let Foo = x;` is a *use* when `Foo` is a unit struct, a unit variant
+    /// or a `const`, and a binding otherwise — syntax alone cannot tell them
+    /// apart, so the symbol table answers. Only those three kinds can appear
+    /// as a bare path pattern; a `fn`, `mod`, `trait`, `enum` or `static` of
+    /// that name cannot, which is what makes `let helper = 5;` a binding even
+    /// though `helper` names something.
+    ///
+    /// Uncertainty answers yes, and yes costs only a missed finding: reading
+    /// a `const` pattern as a binding would suppress the genuine uses that
+    /// follow it in the same scope and report a live item dead.
+    fn pattern_may_name_item(&self, module: usize, name: &str) -> bool {
+        match self.lookup(module, name) {
+            // Nothing of that name in the workspace: whatever the pattern
+            // means, suppressing it can hide no finding.
+            Step::Absent => false,
+            Step::Unknown => true,
+            Step::Defs(defs) => defs.iter().any(|&id| {
+                matches!(
+                    self.defs[id].kind,
+                    // A `use` alias can lead to any of the three, and a type
+                    // alias can name a unit struct.
+                    DefKind::Struct
+                        | DefKind::Const
+                        | DefKind::TypeAlias
+                        | DefKind::Import
+                        | DefKind::Reexport
+                )
+            }),
+        }
+    }
+
     /// Where a path segment's definitions lead: into a module, or to an item.
     fn step_into(&self, defs: &[usize], depth: usize) -> Target {
         let mut module = None;
@@ -967,6 +1047,27 @@ impl SymbolTable {
     }
 }
 
+/// Which namespace a path is written in, and so which bindings can shadow it.
+///
+/// [`Visit::visit_path`] sees a bare [`syn::Path`], so the namespace has to
+/// arrive from the parent node. It is recorded here rather than resolved in
+/// the parents because `visit_path` must stay the single place a path is
+/// resolved: a dozen node kinds own a `syn::Path`, and each would otherwise
+/// need its own copy of the `impl_self` check and the descent into generic
+/// arguments. Only the parents that *establish* a namespace set it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PathPos {
+    /// An expression path, shadowed by `let` bindings, parameters, and const
+    /// generic parameters.
+    Expr,
+    /// A type path or trait bound, shadowed by generic type parameters.
+    Type,
+    /// Everywhere else — a pattern, a struct literal, a macro name, a `pub(in
+    /// ...)` qualifier. Never shadowed, which is the resolution this module
+    /// had before scopes existed.
+    Other,
+}
+
 /// Walks a file's AST and resolves every path it contains.
 struct RefWalker<'a> {
     table: &'a mut SymbolTable,
@@ -977,9 +1078,326 @@ struct RefWalker<'a> {
     /// is a plain path. Inside its own `impl`, a type naming itself is just
     /// `Self` spelled out, not evidence that anything else uses it.
     impl_self: Option<String>,
+    /// Namespace of the path currently being resolved.
+    pos: PathPos,
+    /// Value-namespace bindings in scope, innermost frame last.
+    value_scopes: Vec<HashSet<String>>,
+    /// Type-namespace bindings — generic parameters — innermost frame last.
+    type_scopes: Vec<HashSet<String>>,
+}
+
+impl RefWalker<'_> {
+    /// Run `body` with one more binding frame in each namespace.
+    fn in_scope(&mut self, body: impl FnOnce(&mut Self)) {
+        self.value_scopes.push(HashSet::new());
+        self.type_scopes.push(HashSet::new());
+        body(self);
+        self.value_scopes.pop();
+        self.type_scopes.pop();
+    }
+
+    /// Run `body` resolving paths as `pos`, restoring the outer position
+    /// after — a type inside an expression is still a type.
+    fn with_pos(&mut self, pos: PathPos, body: impl FnOnce(&mut Self)) {
+        let outer = std::mem::replace(&mut self.pos, pos);
+        body(self);
+        self.pos = outer;
+    }
+
+    /// Bind `name` in the innermost scope. With no scope open there is
+    /// nothing to shadow — a binding outside every body would be a construct
+    /// we do not model — so the binding is dropped rather than widened.
+    fn bind_value(&mut self, name: String) {
+        if let Some(frame) = self.value_scopes.last_mut() {
+            frame.insert(name);
+        }
+    }
+
+    fn bind_type(&mut self, name: String) {
+        if let Some(frame) = self.type_scopes.last_mut() {
+            frame.insert(name);
+        }
+    }
+
+    /// Whether a binding covers this path, so that it names no item.
+    fn shadowed(&self, path: &RefPath) -> bool {
+        // Only a bare name can be a binding: `helper::thing` and `::helper`
+        // both name a module however `helper` is bound here.
+        if path.absolute || path.segments.len() != 1 {
+            return false;
+        }
+        let frames = match self.pos {
+            PathPos::Expr => &self.value_scopes,
+            PathPos::Type => &self.type_scopes,
+            PathPos::Other => return false,
+        };
+        frames.iter().any(|frame| frame.contains(&path.segments[0]))
+    }
+
+    /// Resolve the paths a pattern names and bind the names it introduces,
+    /// into the innermost scope.
+    fn bind_pat(&mut self, pat: &syn::Pat) {
+        self.with_pos(PathPos::Other, |walker| walker.bind_pat_inner(pat));
+    }
+
+    fn bind_pat_inner(&mut self, pat: &syn::Pat) {
+        match pat {
+            syn::Pat::Ident(node) => {
+                for attr in &node.attrs {
+                    self.visit_attribute(attr);
+                }
+                let name = node.ident.to_string();
+                // `ref x`, `mut x` and `x @ sub` are binding syntax outright;
+                // a plain name has to be asked about.
+                let is_binding = node.by_ref.is_some()
+                    || node.mutability.is_some()
+                    || node.subpat.is_some()
+                    || !self.table.pattern_may_name_item(self.module, &name);
+                if is_binding {
+                    self.bind_value(name);
+                } else {
+                    self.table
+                        .mark_path_used(self.module, &RefPath::single(&name), false);
+                }
+                if let Some((_, subpat)) = &node.subpat {
+                    self.bind_pat_inner(subpat);
+                }
+            }
+            // A path in a pattern names a struct, a variant or a `const`; it
+            // is a use, and only the leaves under it can bind.
+            syn::Pat::TupleStruct(node) => {
+                for attr in &node.attrs {
+                    self.visit_attribute(attr);
+                }
+                if let Some(qself) = &node.qself {
+                    self.visit_qself(qself);
+                }
+                self.visit_path(&node.path);
+                for elem in &node.elems {
+                    self.bind_pat_inner(elem);
+                }
+            }
+            syn::Pat::Struct(node) => {
+                for attr in &node.attrs {
+                    self.visit_attribute(attr);
+                }
+                if let Some(qself) = &node.qself {
+                    self.visit_qself(qself);
+                }
+                self.visit_path(&node.path);
+                for field in &node.fields {
+                    self.bind_pat_inner(&field.pat);
+                }
+            }
+            syn::Pat::Type(node) => {
+                for attr in &node.attrs {
+                    self.visit_attribute(attr);
+                }
+                self.visit_type(&node.ty);
+                self.bind_pat_inner(&node.pat);
+            }
+            syn::Pat::Tuple(node) => node.elems.iter().for_each(|e| self.bind_pat_inner(e)),
+            syn::Pat::Slice(node) => node.elems.iter().for_each(|e| self.bind_pat_inner(e)),
+            // Every alternative of an or-pattern binds the same names, so
+            // walking them all is the same set with the uses in each kept.
+            syn::Pat::Or(node) => node.cases.iter().for_each(|c| self.bind_pat_inner(c)),
+            syn::Pat::Reference(node) => self.bind_pat_inner(&node.pat),
+            syn::Pat::Paren(node) => self.bind_pat_inner(&node.pat),
+            // `_`, `..`, literals, ranges, `const` blocks and macro patterns
+            // bind nothing; the ordinary walk resolves what they name.
+            other => syn::visit::visit_pat(self, other),
+        }
+    }
 }
 
 impl<'ast> Visit<'ast> for RefWalker<'_> {
+    /// An item is a scope boundary in both directions: it opens one for its
+    /// own generics and parameters, and it cannot see the bindings around it.
+    /// `fn outer() { let helper = 5; fn inner() { helper() } }` calls the
+    /// module's `helper`, so the enclosing scopes are set aside rather than
+    /// merely shadowed.
+    fn visit_item(&mut self, node: &'ast syn::Item) {
+        let values = std::mem::take(&mut self.value_scopes);
+        let types = std::mem::take(&mut self.type_scopes);
+        let pos = std::mem::replace(&mut self.pos, PathPos::Other);
+        self.in_scope(|walker| syn::visit::visit_item(walker, node));
+        self.pos = pos;
+        self.value_scopes = values;
+        self.type_scopes = types;
+    }
+
+    /// A member of an `impl` or `trait` opens a scope for its own generics
+    /// and parameters, on top of the block's — `impl<T> Foo<T>` is in scope
+    /// throughout every method.
+    fn visit_impl_item(&mut self, node: &'ast syn::ImplItem) {
+        self.in_scope(|walker| syn::visit::visit_impl_item(walker, node));
+    }
+
+    fn visit_trait_item(&mut self, node: &'ast syn::TraitItem) {
+        self.in_scope(|walker| syn::visit::visit_trait_item(walker, node));
+    }
+
+    fn visit_foreign_item(&mut self, node: &'ast syn::ForeignItem) {
+        self.in_scope(|walker| syn::visit::visit_foreign_item(walker, node));
+    }
+
+    /// Generic parameters bind for the whole item they are declared on —
+    /// signature, `where` clause and body alike — so they are recorded into
+    /// the scope that item opened, before the bounds and defaults that can
+    /// already mention them. Type parameters are types; const parameters are
+    /// values (`[u8; N]`); lifetimes name no item and are ignored.
+    fn visit_generics(&mut self, node: &'ast syn::Generics) {
+        for param in &node.params {
+            match param {
+                syn::GenericParam::Type(param) => self.bind_type(param.ident.to_string()),
+                syn::GenericParam::Const(param) => self.bind_value(param.ident.to_string()),
+                syn::GenericParam::Lifetime(_) => {}
+            }
+        }
+        syn::visit::visit_generics(self, node);
+    }
+
+    /// Parameters bind into the scope the item opened, so they cover the body
+    /// as well as the rest of the signature.
+    fn visit_signature(&mut self, node: &'ast syn::Signature) {
+        self.visit_generics(&node.generics);
+        for input in &node.inputs {
+            match input {
+                syn::FnArg::Receiver(receiver) => self.visit_receiver(receiver),
+                syn::FnArg::Typed(arg) => {
+                    for attr in &arg.attrs {
+                        self.visit_attribute(attr);
+                    }
+                    self.visit_type(&arg.ty);
+                    self.bind_pat(&arg.pat);
+                }
+            }
+        }
+        if let Some(variadic) = &node.variadic {
+            self.visit_variadic(variadic);
+        }
+        self.visit_return_type(&node.output);
+    }
+
+    fn visit_block(&mut self, node: &'ast syn::Block) {
+        self.in_scope(|walker| syn::visit::visit_block(walker, node));
+    }
+
+    /// The initializer is resolved before the pattern binds, so `let x =
+    /// x();` still names the item `x`; so is the `else` block, which runs
+    /// where the binding does not exist.
+    fn visit_local(&mut self, node: &'ast syn::Local) {
+        for attr in &node.attrs {
+            self.visit_attribute(attr);
+        }
+        if let Some(init) = &node.init {
+            self.visit_expr(&init.expr);
+            if let Some((_, diverge)) = &init.diverge {
+                self.visit_expr(diverge);
+            }
+        }
+        self.bind_pat(&node.pat);
+    }
+
+    /// An arm's pattern binds in its guard and its body, and nowhere else.
+    fn visit_arm(&mut self, node: &'ast syn::Arm) {
+        for attr in &node.attrs {
+            self.visit_attribute(attr);
+        }
+        self.in_scope(|walker| {
+            walker.bind_pat(&node.pat);
+            if let Some((_, guard)) = &node.guard {
+                walker.visit_expr(guard);
+            }
+            walker.visit_expr(&node.body);
+        });
+    }
+
+    fn visit_expr_closure(&mut self, node: &'ast syn::ExprClosure) {
+        for attr in &node.attrs {
+            self.visit_attribute(attr);
+        }
+        // A closure sees the bindings around it, so this scope is stacked on
+        // them rather than replacing them.
+        self.in_scope(|walker| {
+            for input in &node.inputs {
+                walker.bind_pat(input);
+            }
+            walker.visit_return_type(&node.output);
+            walker.visit_expr(&node.body);
+        });
+    }
+
+    /// The iterator expression is outside the binding: `for x in x()` calls
+    /// the item.
+    fn visit_expr_for_loop(&mut self, node: &'ast syn::ExprForLoop) {
+        for attr in &node.attrs {
+            self.visit_attribute(attr);
+        }
+        self.visit_expr(&node.expr);
+        self.in_scope(|walker| {
+            walker.bind_pat(&node.pat);
+            walker.visit_block(&node.body);
+        });
+    }
+
+    /// `if let` binds in the `then` branch only — never in the `else`, and
+    /// never after the `if` — so the scope wraps exactly those two.
+    fn visit_expr_if(&mut self, node: &'ast syn::ExprIf) {
+        for attr in &node.attrs {
+            self.visit_attribute(attr);
+        }
+        self.in_scope(|walker| {
+            walker.visit_expr(&node.cond);
+            walker.visit_block(&node.then_branch);
+        });
+        if let Some((_, alternative)) = &node.else_branch {
+            self.visit_expr(alternative);
+        }
+    }
+
+    fn visit_expr_while(&mut self, node: &'ast syn::ExprWhile) {
+        for attr in &node.attrs {
+            self.visit_attribute(attr);
+        }
+        self.in_scope(|walker| {
+            walker.visit_expr(&node.cond);
+            walker.visit_block(&node.body);
+        });
+    }
+
+    /// The scrutinee of `if let`/`while let` is resolved before the pattern
+    /// binds, exactly as a `let` statement's initializer is. The binding lands
+    /// in the scope the enclosing `if` or `while` opened; a `let` chain's
+    /// later links see the earlier ones, which is what Rust does.
+    fn visit_expr_let(&mut self, node: &'ast syn::ExprLet) {
+        for attr in &node.attrs {
+            self.visit_attribute(attr);
+        }
+        self.visit_expr(&node.expr);
+        self.bind_pat(&node.pat);
+    }
+
+    fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
+        self.with_pos(PathPos::Expr, |walker| {
+            syn::visit::visit_expr_path(walker, node);
+        });
+    }
+
+    fn visit_type_path(&mut self, node: &'ast syn::TypePath) {
+        self.with_pos(PathPos::Type, |walker| {
+            syn::visit::visit_type_path(walker, node);
+        });
+    }
+
+    /// `T: Bound` holds a bare `syn::Path` rather than a `TypePath`, so the
+    /// namespace has to be set here too.
+    fn visit_trait_bound(&mut self, node: &'ast syn::TraitBound) {
+        self.with_pos(PathPos::Type, |walker| {
+            syn::visit::visit_trait_bound(walker, node);
+        });
+    }
+
     fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
         for attr in &node.attrs {
             self.visit_attribute(attr);
@@ -1026,7 +1444,7 @@ impl<'ast> Visit<'ast> for RefWalker<'_> {
         // the `impl` header itself.
         let names_self = node.leading_colon.is_none()
             && self.impl_self.as_deref() == path.segments.first().map(String::as_str);
-        if !names_self {
+        if !names_self && !self.shadowed(&path) {
             self.table.mark_path_used(self.module, &path, false);
         }
         // Generic arguments inside the segments are paths of their own.
@@ -1034,7 +1452,14 @@ impl<'ast> Visit<'ast> for RefWalker<'_> {
     }
 
     fn visit_macro(&mut self, node: &'ast syn::Macro) {
-        syn::visit::visit_macro(self, node);
+        // A macro name is in the macro namespace, which no binding tracked
+        // here reaches. It matters because a macro can sit inside a path's
+        // generic arguments (`Vec<thing!()>`, `take::<{ thing!() }>()`) and
+        // would otherwise inherit that path's namespace, letting a generic
+        // parameter or a local of the same name suppress it.
+        self.with_pos(PathPos::Other, |walker| {
+            syn::visit::visit_macro(walker, node);
+        });
         self.table.mark_tokens_used(&node.tokens);
     }
 
@@ -1246,6 +1671,24 @@ mod tests {
         }
     }
 
+    /// The reportable definitions in `sources` that no resolved path reaches,
+    /// by name, in report order.
+    fn unused_in(sources: &[(&str, &str)]) -> Vec<String> {
+        let crates = [unit(sources)];
+        let mut table = SymbolTable::build(&crates);
+        table.record_references(&crates);
+        table
+            .unused_definitions(&PublicApi::default())
+            .into_iter()
+            .map(|def| def.name)
+            .collect()
+    }
+
+    /// The same for a single crate-root file, which most scope cases are.
+    fn unused_in_root(source: &str) -> Vec<String> {
+        unused_in(&[("", source)])
+    }
+
     fn module_at(table: &SymbolTable, path: &[&str]) -> usize {
         let path: Vec<String> = path.iter().map(|s| (*s).to_string()).collect();
         *table
@@ -1350,5 +1793,258 @@ mod tests {
 
         let root = module_at(&table, &[]);
         assert!(matches!(table.lookup(root, "anything"), Step::Unknown));
+    }
+
+    // -- lexical scopes ----------------------------------------------------
+
+    #[test]
+    fn a_local_binding_shadows_a_module_item_of_the_same_name() {
+        assert_eq!(
+            unused_in_root(
+                "pub fn helper() -> u32 { 1 }\npub fn entry() -> u32 { let helper = 5; helper }\n"
+            ),
+            vec!["helper", "entry"]
+        );
+    }
+
+    #[test]
+    fn a_function_parameter_shadows_a_module_item_in_the_body() {
+        assert_eq!(
+            unused_in_root(
+                "pub fn width() -> u32 { 1 }\npub fn entry(width: u32) -> u32 { width }\n"
+            ),
+            vec!["width", "entry"]
+        );
+    }
+
+    /// `let x = x();` is the ordering case: the binding starts after the
+    /// initializer, so the call still names the item.
+    #[test]
+    fn a_binding_does_not_shadow_the_initializer_that_creates_it() {
+        assert_eq!(
+            unused_in_root(
+                "pub fn seeded() -> u32 { 1 }\npub fn entry() -> u32 { let seeded = seeded(); seeded }\n"
+            ),
+            vec!["entry"]
+        );
+    }
+
+    /// Rust resolves values and types apart, so a `let` binding must not
+    /// silence a type of the same name: doing so would report a live item as
+    /// dead, which is the failure this whole phase is shaped around.
+    #[test]
+    fn a_value_binding_does_not_shadow_a_type_of_the_same_name() {
+        assert_eq!(
+            unused_in_root(
+                "pub struct Cfg { pub n: u32 }\npub fn entry() -> u32 { let mut Cfg = 1; Cfg += 1; let _t: Cfg = Default::default(); Cfg }\n"
+            ),
+            vec!["entry"]
+        );
+    }
+
+    #[test]
+    fn a_generic_type_parameter_shadows_a_type_of_the_same_name() {
+        assert_eq!(
+            unused_in_root("pub struct Marker;\npub fn wrap<Marker>(m: Marker) -> Marker { m }\n"),
+            vec!["Marker", "wrap"]
+        );
+    }
+
+    /// The other half of the split: a type parameter lives in the type
+    /// namespace only, so an *expression* of that name still names the item.
+    #[test]
+    fn a_generic_type_parameter_does_not_shadow_an_expression_of_the_same_name() {
+        assert_eq!(
+            unused_in_root("pub const N: usize = 4;\npub fn take<N>(_v: N) -> usize { N }\n"),
+            vec!["take"]
+        );
+    }
+
+    #[test]
+    fn a_generic_parameter_binds_only_for_the_item_declaring_it() {
+        assert_eq!(
+            unused_in_root(
+                "pub struct Marker;\npub fn wrap<Marker>(m: Marker) -> Marker { m }\npub fn plain(m: Marker) -> Marker { m }\n"
+            ),
+            vec!["wrap", "plain"]
+        );
+    }
+
+    #[test]
+    fn a_tuple_struct_pattern_names_the_struct_and_binds_only_its_leaves() {
+        assert_eq!(
+            unused_in_root(
+                "pub struct Pair(pub u32);\npub fn value() -> u32 { 1 }\npub fn entry() -> u32 { let Pair(value) = Default::default(); value }\n"
+            ),
+            vec!["value", "entry"]
+        );
+    }
+
+    #[test]
+    fn a_struct_pattern_names_the_struct_and_binds_only_its_fields() {
+        assert_eq!(
+            unused_in_root(
+                "pub struct Wrap { pub inner: u32 }\npub fn inner() -> u32 { 1 }\npub fn entry() -> u32 { let Wrap { inner } = Default::default(); inner }\n"
+            ),
+            vec!["inner", "entry"]
+        );
+    }
+
+    /// A bare name in pattern position is a unit-struct pattern rather than a
+    /// binding — Rust rejects `let Unit = ..;` beside `struct Unit;` outright
+    /// (E0530) — so it has to be resolved as a use.
+    #[test]
+    fn a_bare_pattern_naming_a_unit_struct_is_a_use_rather_than_a_binding() {
+        assert_eq!(
+            unused_in_root(
+                "pub struct Unit;\npub fn entry(v: u32) -> u32 { match v { Unit => 1, _ => 0 } }\n"
+            ),
+            vec!["entry"]
+        );
+    }
+
+    #[test]
+    fn a_bare_pattern_naming_a_const_is_a_use_rather_than_a_binding() {
+        assert_eq!(
+            unused_in_root(
+                "pub const LIMIT: u32 = 4;\npub fn entry(v: u32) -> u32 { match v { LIMIT => 0, other => other } }\n"
+            ),
+            vec!["entry"]
+        );
+    }
+
+    /// The same question asked where the scope has holes: an unfollowable
+    /// glob could be bringing a `const` of that name in, so the pattern is
+    /// resolved as a use and reaches every item with the name.
+    #[test]
+    fn a_bare_pattern_in_an_opaque_scope_is_a_use_rather_than_a_binding() {
+        assert_eq!(
+            unused_in(&[
+                ("", "mod holder;\nmod user;\n"),
+                ("holder", "pub const LIMIT: u32 = 1;\n"),
+                (
+                    "user",
+                    "use other_crate::*;\npub fn entry(v: u32) -> u32 { match v { LIMIT => 0, other => other } }\n"
+                ),
+            ]),
+            vec!["entry"]
+        );
+    }
+
+    #[test]
+    fn a_binding_does_not_outlive_its_block() {
+        assert_eq!(
+            unused_in_root(
+                "pub fn scoped() -> u32 { 1 }\npub fn entry() -> u32 { { let scoped = 2; let _ = scoped; } scoped() }\n"
+            ),
+            vec!["entry"]
+        );
+    }
+
+    #[test]
+    fn a_match_arms_binding_does_not_reach_the_other_arms() {
+        assert_eq!(
+            unused_in_root(
+                "pub fn armed() -> u32 { 1 }\npub fn entry(v: Option<u32>) -> u32 { match v { Some(armed) => armed, None => armed() } }\n"
+            ),
+            vec!["entry"]
+        );
+    }
+
+    #[test]
+    fn a_let_else_block_runs_before_the_binding_exists() {
+        assert_eq!(
+            unused_in_root(
+                "pub fn fallback() -> u32 { 1 }\npub fn entry(v: Option<u32>) -> u32 { let Some(fallback) = v else { return fallback() }; fallback }\n"
+            ),
+            vec!["entry"]
+        );
+    }
+
+    #[test]
+    fn an_if_let_binding_does_not_reach_the_else_branch() {
+        assert_eq!(
+            unused_in_root(
+                "pub fn other() -> u32 { 1 }\npub fn entry(v: Option<u32>) -> u32 { if let Some(other) = v { other } else { other() } }\n"
+            ),
+            vec!["entry"]
+        );
+    }
+
+    #[test]
+    fn a_closure_parameter_binds_only_inside_the_closure() {
+        assert_eq!(
+            unused_in_root(
+                "pub fn cb() -> u32 { 1 }\npub fn entry() -> u32 { let f = |cb: u32| cb; f(1) + cb() }\n"
+            ),
+            vec!["entry"]
+        );
+    }
+
+    #[test]
+    fn a_for_loop_pattern_does_not_shadow_the_iterator_expression() {
+        assert_eq!(
+            unused_in_root(
+                "pub fn source() -> Vec<u32> { Vec::new() }\npub fn entry() -> u32 { let mut n = 0; for source in source() { n += source; } n }\n"
+            ),
+            vec!["entry"]
+        );
+    }
+
+    /// A local shadows a name, never a path through it.
+    #[test]
+    fn a_qualified_path_is_never_shadowed_by_a_local() {
+        assert_eq!(
+            unused_in_root(
+                "pub mod deep { pub fn thing() -> u32 { 1 } }\npub fn entry() -> u32 { let deep = 2; deep + deep::thing() }\n"
+            ),
+            vec!["entry"]
+        );
+    }
+
+    /// Rust rejects reaching an enclosing function's local from an item
+    /// nested in it (E0434), so no compiling program depends on the answer.
+    /// Starting each item from an empty scope is the direction that keeps the
+    /// module's item alive rather than reporting it dead.
+    #[test]
+    fn an_item_nested_in_a_function_does_not_see_that_functions_locals() {
+        assert_eq!(
+            unused_in_root(
+                "pub fn shared() -> u32 { 1 }\npub fn entry() -> u32 { let shared = 2; fn inner() -> u32 { shared() } shared + inner() }\n"
+            ),
+            vec!["entry"]
+        );
+    }
+
+    /// The same boundary in the type namespace: an outer generic parameter is
+    /// not in scope inside a nested item (E0401), so a type of that name
+    /// there is the module's.
+    #[test]
+    fn an_item_nested_in_a_function_does_not_see_that_functions_generics() {
+        assert_eq!(
+            unused_in_root(
+                "pub struct Held;\npub fn entry<Held>(v: Held) -> Held { struct Inner(Held); v }\n"
+            ),
+            vec!["entry"]
+        );
+    }
+
+    /// A macro name lives in its own namespace, so neither a generic
+    /// parameter nor a local shadows it — but a macro reached from inside a
+    /// path's generic arguments inherits that path's namespace.
+    #[test]
+    fn a_macro_name_is_not_shadowed_by_a_binding_of_the_same_name() {
+        assert_eq!(
+            unused_in_root(
+                "pub fn thing() -> u32 { 1 }\npub fn caller<thing>(_v: Vec<thing!()>) -> u32 { 0 }\n"
+            ),
+            vec!["caller"]
+        );
+        assert_eq!(
+            unused_in_root(
+                "pub fn thing() -> u32 { 1 }\npub fn caller() -> u32 { let thing = 2; take::<{ thing!() }>() }\n"
+            ),
+            vec!["caller"]
+        );
     }
 }

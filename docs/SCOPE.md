@@ -327,6 +327,69 @@ named went unreported. Module resolution now carries the answer with the file
 
 Closes [#14](https://github.com/rlorenzo/deadwood/issues/14).
 
+## Phase 8 — lexical scope tracking (shipped)
+
+`let helper = 5;` names a local, and until now it also marked the module's
+`pub fn helper` used. `src/resolve.rs` now tracks bindings as it walks and
+resolves nothing for a path one of them covers. This is the second phase that
+can report *more* rather than less, and the first where a mistake in the new
+code manufactures a false positive directly — a suppressed path is a use that
+vanishes — so, as in phase 4, the shape was chosen for that risk.
+
+- **Namespaces are the whole reason this was its own slice.** Rust resolves
+  values and types apart, so a `let` binding shadows only *expression* paths
+  and a generic parameter only *type* paths. A binding set applied by name
+  alone would let `let Foo = 1;` silence the `: Foo` on the next line and
+  report a live type as dead.
+- **The namespace is recorded on the walker, not resolved at each parent.**
+  `visit_path` sees a bare `syn::Path` and cannot tell expression position from
+  type position, so the position has to arrive from the parent node. The two
+  parents that establish one — `visit_expr_path` and `visit_type_path`, plus
+  `visit_trait_bound`, which holds a bare `Path` — set a field that
+  `visit_path` reads back. The rejected alternative was resolving the path in
+  those parents instead: a dozen syn node kinds own a `syn::Path`, and each
+  would then need its own copy of the `impl_self` self-reference check and the
+  descent into generic arguments. Everything else keeps the position it always
+  had — "neither namespace", which is never shadowed and so resolves exactly
+  as before.
+- **A pattern is not automatically a binding, and this was the sharpest
+  edge.** `let Foo(x) = y;` and `Foo { field: x }` name a struct or a variant;
+  a *bare* name is a unit-struct, unit-variant or `const` pattern when one is
+  in scope and a fresh binding otherwise, and no syntax separates the two. The
+  symbol table decides: only those three kinds can appear as a bare path
+  pattern, so a name resolving to a `fn`, `mod`, `trait`, `enum` or `static`
+  binds, and anything less certain — including a name in a module an
+  unfollowable glob made opaque — is marked used and binds nothing. Rust
+  agrees where it can: `let Cfg = ..;` beside `pub struct Cfg;` is rejected
+  outright (E0530), so the conservative reading is the only reading of that
+  program.
+- **Order and scope exit are ordinary correctness, and both are pinned.** A
+  `let` initializer is resolved before its pattern binds (`let x = x();` still
+  names the item), a `let ... else` block before that too, and `match` arms,
+  `if let`, `for` patterns and closure parameters bind inside their own body
+  and nowhere else. An item nested in a function body starts from an empty
+  scope: Rust rejects reaching an enclosing local or generic from there
+  (E0434, E0401), so no compiling program depends on the answer, and starting
+  empty is the direction that keeps the module's item alive.
+- **Only a bare name is ever shadowed.** `helper::thing` names a module
+  however `helper` is bound, and so does `::helper`.
+- **What it found.** Not one finding changed, anywhere: byte-identical `--json`
+  across all 14 existing fixtures, the 34 crates in the local registry, and
+  Deadwood itself. Instrumenting the suppression showed why that is a result
+  and not a no-op — 171,371 paths in the registry crates are now resolved
+  against a binding instead of against the symbol table, and none of them was
+  the last reference to an unreferenced `pub` item. Recall was checked the
+  other way instead, as in phase 5: shadowing `strsim`'s `generic_levenshtein`
+  with a local of that name reports it, and removing the shadow makes it quiet
+  again. The new `scopes` fixture carries the rest, in code that compiles.
+
+One nuance in the issue's example does *not* land here. `pub struct Cfg;` in
+`pub fn entry(_c: Cfg)` is genuinely referenced by `entry`'s signature; it is
+dead only because `entry` is, which is reachability — item 1 below — and not
+lexical scope. The `helper` half of that example is reported.
+
+Closes [#8](https://github.com/rlorenzo/deadwood/issues/8).
+
 ## Next (sequenced, one slice at a time)
 
 1. **Reachability over reference counting** — an item referenced only by
@@ -334,11 +397,7 @@ Closes [#14](https://github.com/rlorenzo/deadwood/issues/14).
    anything names it, not on whether that something is alive. Also what a
    "test-only item" finding kind would need before it could be honest; see
    the `cfg(test)` decision in phase 4.
-2. **Lexical scope tracking** — a local, parameter, or generic parameter
-   sharing a name with a module item currently resolves to that item and
-   keeps it alive. Costs findings only; the fix must be namespace-aware, as
-   a value binding must not silence a type of the same name.
-3. **Report a `[dev-dependencies]` entry the library itself names.** The
+2. **Report a `[dev-dependencies]` entry the library itself names.** The
    check has never made that claim, because the likeliest explanation used to
    be a mis-attribution of ours rather than a manifest that cannot compile.
    The largest of those, an out-of-line `#[cfg(test)] mod tests;`, is closed

@@ -1,0 +1,9 @@
+# Test fixture: locals, parameters and generic parameters that share a name
+# with a module item. The empty [workspace] table keeps it out of any
+# enclosing workspace.
+[package]
+name = "scopes"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
