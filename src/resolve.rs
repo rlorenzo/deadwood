@@ -1629,14 +1629,35 @@ fn describe(
     }
 }
 
+/// Whether `attr` is one of `names`.
+///
+/// Two forgivenesses, both of which can only keep an item alive. The *last*
+/// path segment decides, so a re-exported or namespaced spelling of an
+/// attribute is the attribute it is. And `unsafe(...)` is unwrapped: edition
+/// 2024 spells the linker exports `#[unsafe(no_mangle)]`, which parses as an
+/// attribute named `unsafe` whose tokens hold the real one, so reading the
+/// outer path alone would miss every export written the way current Rust
+/// requires.
+fn attr_is(attr: &syn::Attribute, names: &[&str]) -> bool {
+    if attr.path().is_ident("unsafe")
+        && let syn::Meta::List(list) = &attr.meta
+        && let Some(TokenTree::Ident(inner)) = list.tokens.clone().into_iter().next()
+    {
+        return names.contains(&inner.to_string().as_str());
+    }
+    attr.path()
+        .segments
+        .last()
+        .is_some_and(|segment| names.contains(&segment.ident.to_string().as_str()))
+}
+
 /// Attributes that mark an item as used externally or deliberately kept.
 fn has_skip_attr(attrs: &[syn::Attribute]) -> bool {
     attrs.iter().any(|attr| {
-        let path = attr.path();
-        if path.is_ident("no_mangle") || path.is_ident("used") || path.is_ident("export_name") {
+        if attr_is(attr, &["no_mangle", "used", "export_name"]) {
             return true;
         }
-        if (path.is_ident("allow") || path.is_ident("expect"))
+        if attr_is(attr, &["allow", "expect"])
             && let syn::Meta::List(list) = &attr.meta
         {
             let lints = list.tokens.to_string();

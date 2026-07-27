@@ -146,6 +146,20 @@ mod tests {
         assert!(unused_names(&[unit]).is_empty());
     }
 
+    /// Edition 2024 spells the linker exports `#[unsafe(no_mangle)]`, which
+    /// parses as an attribute named `unsafe` holding the real one. Reading the
+    /// outer path alone reports every export written the way current Rust
+    /// requires.
+    #[test]
+    fn skips_an_export_wrapped_in_the_unsafe_attribute() {
+        let unit = crate_of(&[(
+            "",
+            "#[unsafe(no_mangle)]\npub extern \"C\" fn exported() {}\n\
+             #[unsafe(export_name = \"renamed\")]\npub fn named() {}\n",
+        )]);
+        assert!(unused_names(&[unit]).is_empty());
+    }
+
     #[test]
     fn check_is_skipped_when_a_file_cannot_be_parsed() {
         let unit = crate_of(&[("", "pub fn dead() {}\n"), ("broken", "fn oops( {\n")]);
