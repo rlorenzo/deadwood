@@ -352,7 +352,7 @@ pub(crate) struct SymbolTable {
     /// find the definition a path is written *inside*. Keyed by module rather
     /// than file because one file pulled into two crates defines its items
     /// once per crate.
-    defs_at: HashMap<(usize, usize, String), Vec<usize>>,
+    defs_at: HashMap<(usize, usize), Vec<usize>>,
     /// Every definition some resolved path names, whoever named it. This is
     /// phase 1's answer and still half the report.
     used: HashSet<usize>,
@@ -500,6 +500,16 @@ impl SymbolTable {
                     walker.visit_item(item);
                 }
             }
+        }
+
+        // One edge per referrer and target, recorded once rather than checked
+        // on every insert. A function calling the same helper twenty times
+        // pushes twenty identical edges, and the walk needs one — across the
+        // crates in a local registry that is 65% of the slots. Deduping here
+        // rather than in `mark_def_used` keeps the hot path a push.
+        for targets in self.edges.values_mut() {
+            targets.sort_unstable();
+            targets.dedup();
         }
     }
 
@@ -712,19 +722,32 @@ impl SymbolTable {
             .or_default()
             .push(id);
         self.defs_at
-            .entry((def.module, def.line, def.name.clone()))
+            .entry((def.module, def.line))
             .or_default()
             .push(id);
         self.defs.push(def);
         id
     }
 
-    /// The definitions written at a site, for attributing the paths inside one
-    /// to it. Several only happens where two `use` leaves share a line, and
+    /// The definitions named `name` written at a site, for attributing the
+    /// paths inside one to it.
+    ///
+    /// The name is not part of the key, because a key holding one would have
+    /// to be built — and so allocated — at every lookup. A module and a line
+    /// almost always hold a single definition, so filtering the handful there
+    /// is cheaper than hashing a `String` to find them.
+    ///
+    /// Several matches only happens where two `use` leaves share a line, and
     /// taking all of them is the forgiving direction: the use holds if any one
     /// of them is reached.
-    fn defs_at(&self, module: usize, line: usize, name: &str) -> Option<&Vec<usize>> {
-        self.defs_at.get(&(module, line, name.to_string()))
+    fn defs_at(&self, module: usize, line: usize, name: &str) -> Vec<usize> {
+        self.defs_at
+            .get(&(module, line))
+            .into_iter()
+            .flatten()
+            .copied()
+            .filter(|&id| self.defs[id].name == name)
+            .collect()
     }
 
     /// Record the module-level items of `items` into `module`.
@@ -1386,9 +1409,11 @@ impl RefWalker<'_> {
     /// reportable and never reachable — keeps what it names alive instead of
     /// silently condemning it.
     fn defined_at(&self, line: usize, name: &str) -> Referrer {
-        match self.table.defs_at(self.module, line, name) {
-            Some(ids) => Referrer::Defs(ids.clone()),
-            None => Referrer::Root,
+        let ids = self.table.defs_at(self.module, line, name);
+        if ids.is_empty() {
+            Referrer::Root
+        } else {
+            Referrer::Defs(ids)
         }
     }
 
