@@ -233,6 +233,22 @@ const UNPARSABLE_REASON: &str = "a source file could not be read or parsed";
 /// How deep a chain of `include!`d files is followed. Real code never nests.
 const MAX_INCLUDE_DEPTH: usize = 8;
 
+/// Whether a target is test code in its entirety.
+///
+/// A test, example or bench target is built by `cargo test`/`cargo bench` and
+/// run by nothing that consumes the package, so everything in one is test code
+/// — not only the functions carrying `#[test]`. This check answers both the
+/// question "which table does a mention of this crate name place an entry in"
+/// ([`Contexts::of_target`]) and "is an entry point written here reached by a
+/// build with no tests in it" ([`crate::resolve`]); they are the same question
+/// about the same targets, and two copies of the list could disagree.
+pub(crate) fn is_dev_target(target: &Target) -> bool {
+    target
+        .kind
+        .iter()
+        .any(|kind| kind == "test" || kind == "example" || kind == "bench")
+}
+
 /// Which code of a package a mention of a crate name was found in.
 ///
 /// A set rather than a single value, because a crate name is usually mentioned
@@ -259,10 +275,9 @@ impl Contexts {
 
     /// Where the files of `target` are attributed.
     fn of_target(target: &Target) -> Contexts {
-        let kind = |name| target.kind.iter().any(|k| k == name);
-        if kind("custom-build") {
+        if target.kind.iter().any(|kind| kind == "custom-build") {
             Contexts::BUILD_SCRIPT
-        } else if kind("test") || kind("example") || kind("bench") {
+        } else if is_dev_target(target) {
             Contexts::DEV
         } else {
             Contexts::RUNTIME

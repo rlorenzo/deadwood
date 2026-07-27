@@ -1,0 +1,12 @@
+[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+# `harness = false` is what makes this target's `fn main` the entry point
+# rather than a `#[test]` function: the target split has to answer for it, and
+# the attribute split cannot.
+[[test]]
+name = "it"
+path = "tests/it.rs"
+harness = false

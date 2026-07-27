@@ -23,6 +23,7 @@ this project was bootstrapped from.
 | **Unused dependencies** | `Cargo.toml` entries — normal, dev, or build — whose crate name the declaring package's code never mentions | Cargo has no reason to look, and an unused entry still costs build time and supply-chain surface |
 | **Misplaced dependencies** | `Cargo.toml` entries declared in a table the code naming them cannot see: a `[dependencies]` entry only tests, examples and benches use, or a `[build-dependencies]` entry the build script never touches | Cargo builds the entry wherever you put it; a normal dependency only your tests need is compiled by everyone who depends on you |
 | **Unsatisfiable `cfg` gates** | `#[cfg(...)]` gates that can hold in no build of the package, e.g. a `mod` behind a feature the manifest does not declare | The code is never compiled, so no lint ever sees it — and the gate reads as deliberate |
+| **Test-only public items** *(off by default)* | `pub` items the workspace reaches only through its test code — reached, so not dead, but `pub` for nobody | `dead_code` says nothing about an item in a test, bench or example target, since the only build that compiles one also uses it. Where rustc *can* see the item it usually does report it, in a build with the tests left out — see [Known limitations](#known-limitations-tracked-not-hidden) |
 
 What each check reports can be tuned by a `deadwood.toml` — see
 [Configuration](#configuration).
@@ -80,6 +81,26 @@ Deadwood cannot see call it — and **everything opaque**. A root is still
 reported when nothing in the workspace names it, which is why rooting the
 public surface costs no finding: what it changes is that an item the surface
 *calls* is not dragged down with it.
+
+That walk runs twice, and the difference between the two answers is a
+finding of its own. Once from the whole root set — the build Deadwood analyzes
+— and once from the root set with the test entry points taken out: `#[test]`
+and `#[bench]` functions, and every entry point written in a test, bench or
+example target, which are test code in their entirety rather than only where
+the attribute is. An item in the first and not the second is reached only by
+test code, which is not the same claim as "dead", so it is not the same
+finding:
+
+```console
+src/parser.rs:14: pub fn `scan_all` is reached only from test code: make it `pub(crate)`, or move it behind `#[cfg(test)]`
+```
+
+The kind is `off` by default — every `#[cfg(test)]` helper in every codebase
+is a candidate, so it would fire on the first run of every project — and a
+project asks for it with `test_only_item = "warn"` under
+[`[severity]`](#configuration). Nothing on a library's public surface is ever
+reported this way, whatever its tests do: a consumer Deadwood cannot see
+reaches it in a build with no tests in it at all.
 
 The bias is still toward staying quiet rather than raising noise. Anything
 that cannot be resolved counts as a use of *every* item with that name:
@@ -199,7 +220,8 @@ Misplaced dependencies:
   new ones; see [Adopting on an existing codebase](#adopting-on-an-existing-codebase)
 - `--prune-baseline` — drop baseline entries that no longer occur
 - Exit codes: `0` clean, `1` findings that are configured `deny` (the default
-  for every kind), `2` error — suitable for CI gates.
+  for every kind except `test_only_item`, which is `off`), `2` error —
+  suitable for CI gates.
 
 Requires `cargo` on `PATH` (workspace discovery shells out to
 `cargo metadata --no-deps`, which works offline).
@@ -287,7 +309,9 @@ that file is missing. Relative patterns are resolved against the directory
 holding the file.
 
 ```toml
-# deadwood.toml — every setting, with its default behavior noted.
+# deadwood.toml — every setting, with its default behavior noted. The values
+# shown are an illustrative policy, not the defaults: each block states its own
+# default in the comment above it, and an omitted block leaves it in force.
 
 # Files no finding may be reported about. Patterns are `/`-separated globs
 # where `*` stays inside one segment, `**` spans any number of them, and `?` is
@@ -298,7 +322,11 @@ ignore = ["crates/*/src/generated/**", "vendor"]
 # What each finding kind costs. `deny` reports it and fails the run (exit 1),
 # `warn` reports it and exits 0, `off` never reports it at all. The keys are
 # the finding kinds as they appear in `--json`.
-# Default: `deny` for every kind, which is the pre-config behavior.
+# Default: `deny` for every kind that reports something to delete — which is
+# the pre-config behavior — and `off` for `test_only_item`, which reports a
+# visibility to narrow and would otherwise fire on the first run of every
+# project that has a `#[cfg(test)]` helper. There is no other exception, and a
+# new kind has to state its own default rather than inherit one.
 [severity]
 dead_file = "deny"
 unused_pub_item = "warn"
@@ -306,6 +334,9 @@ unused_reexport = "warn"
 unused_dependency = "deny"
 misplaced_dependency = "deny"
 unsatisfiable_cfg = "deny"
+test_only_item = "warn"     # `off` unless you ask; nothing else defaults to `off`
+# (`unused_pub_item` and `unused_reexport` above are `deny` unless a line like
+# these turns them down — the two spellings are what the setting is for.)
 
 # Crates and items whose `pub` surface is API rather than leftovers. Deadwood
 # only sees consumers inside the workspace, so for a published library this is
@@ -374,7 +405,9 @@ package.
 **Severity is per kind, and only `deny` fails the run.** A `warn` finding is
 printed with its group marked `(warn)` and carries `"severity": "warn"` in the
 JSON, so a project can adopt a check as advisory before enforcing it. An `off`
-finding does not exist: it is absent from the output, the JSON, and the count.
+finding does not exist: it is absent from the output, the JSON, and the count —
+which is exactly what `test_only_item` is until a `[severity]` entry asks for
+it, and why adding that kind changed no output anywhere.
 
 **`public-api` covers unused-pub items and unused re-exports alike**, since a
 `pub use` is surface too. An allowlisted dependency entry that *is* referenced
@@ -387,7 +420,15 @@ a dead file either, because nothing reaches it only in the sense that this
 build does not contain it. That is the lever's real cost and its real value:
 `test = false` turns a test-only helper into an unused-pub finding, which is
 either the question you wanted answered or a page of noise, depending on the
-project. The `unsatisfiable_cfg` finding is the one thing the matrix does *not*
+project. That overlaps `test_only_item` and does not replace it, in either
+direction. The matrix takes the tests out of the *build*, so it also takes
+them out of the evidence — a dev-dependency only the tests use becomes an
+unused-dependency finding, and a `#[cfg(test)]`-only file becomes a dead one —
+and what it reports is `unused_pub_item`, whose message says the item is dead.
+`test_only_item` keeps the tests in the build, changes no other check's
+answer, and says what to do instead. The matrix has the better recall (it does
+not care that an `assert_eq!` names the item); the kind has the narrower blast
+radius and the truer message. The `unsatisfiable_cfg` finding is the one thing the matrix does *not*
 affect — a gate is judged impossible against every build there could be, so
 narrowing the matrix never invents one and never silences one.
 
@@ -452,10 +493,13 @@ toolchain is pinned to `stable` with `clippy` and `rustfmt` via
 5. **Reachability** — those recorded edges are walked from the root set
    (entry points, the linker and compiler exports, a library's public surface,
    `[public-api]`, and everything opaque), so an item is alive only when
-   something live names it (`src/resolve.rs`).
+   something live names it (`src/resolve.rs`). The same walk runs a second
+   time over the same edges with the test entry points removed, and what only
+   the first reaches is the `test_only_item` finding.
 6. **Detectors** — dead files are `src/**.rs` minus the reachable set and the
    `cfg`-excluded set; unused pub items and re-exports are the definitions
-   nothing live reached (`src/unused.rs`); unused dependencies are the
+   nothing live reached, and test-only items the ones only the first walk
+   reached (`src/unused.rs`); unused dependencies are the
    manifest entries whose crate name appears nowhere in the package, reachable
    or not, and misplaced ones are the entries every mention of which lands in
    code their table does not serve (`src/deps.rs`).
@@ -497,10 +541,31 @@ toolchain is pinned to `stable` with `clippy` and `rustfmt` via
   `all(feature = "a", not(feature = "a"))` reads as satisfiable even though it
   provably is not. The finding is lost, never invented.
 - Under the default matrix `#[cfg(test)]` code counts as a use and `#[test]`
-  functions are roots, so an item only tests reach is not reported.
-  `[cfg] test = false` asks the other question, and the answers are
-  `unused_pub_item` findings rather than a kind that says "test-only"
-  ([#23](https://github.com/rlorenzo/deadwood/issues/23)).
+  functions are roots, so an item only tests reach is not an `unused_pub_item`
+  finding. It may be a `test_only_item` one, which is `off` by default; `[cfg]
+  test = false` asks the same question a blunter way, and the paragraph on it
+  under [Configuration](#configuration) is why both exist.
+- The test-only claim is narrower than it sounds, in three directions that all
+  cost findings rather than invent them. **Anything a consumer could name is
+  out**: a library's public surface, whatever a surface item reaches, anything
+  `[public-api]` declares, and anything a `pub use inner::*;` re-exports. **An
+  opaque mention keeps an item out entirely** — a name in macro input is a
+  root, and `assert_eq!(thing(), 1)` is how most tests name what they test, so
+  one assertion is enough. And **an entry point inside an inline `#[cfg(test)]
+  mod`** that is not itself `#[test]`/`#[bench]` — a `#[no_mangle]`, an
+  `#[allow(dead_code)]` — reads as a non-test root, so what it reaches is not
+  test-only either. Out-of-line `#[cfg(test)] mod tests;` files do not have
+  that gap ([#27](https://github.com/rlorenzo/deadwood/issues/27); simulating
+  the fix changed no finding on any fixture, on the 34 crates in a local
+  registry, or on Deadwood itself).
+- Much of what `test_only_item` reports about a package's own `src/` is also
+  reported by rustc, as `dead_code`, in any build that leaves the tests out —
+  `cargo build`, and `cargo clippy --all-targets`, which compiles the crate
+  both ways. What rustc cannot report is a `pub` item in a test, bench or
+  example target, because the only build that compiles one also uses it. The
+  kind is worth the `[severity]` line where you want that answer in the report
+  with everything else, in JSON, and baselineable; it is not worth turning on
+  expecting to be told something your compiler is not already telling you.
 - Reachability follows references, not containment: an item inside a module
   nothing names is judged on the paths that name *it*. A module can be reached
   through a glob, a `pub use`, or generated code without ever being named, so
@@ -530,6 +595,14 @@ toolchain is pinned to `stable` with `clippy` and `rustfmt` via
   item paths are listed under `[public-api]`. Re-exports on a library's public
   surface are skipped for the same reason, which also means a genuinely dead
   one there is missed.
+- A `pub use inner::*;` glob puts `inner`'s items on a library's public
+  surface, and the reachability root set does not follow it — a glob binds no
+  name, so it records no edge the way a named `pub use` does. An item behind
+  one whose only referrer is dead is reported as dead, though a consumer can
+  name it ([#25](https://github.com/rlorenzo/deadwood/issues/25)). The
+  `test_only_item` kind consults a rule that *does* follow those globs, since
+  there it can only remove a finding; fixing the root set itself would move
+  existing ones, and needs its own measurement.
 - Anything that resolves ambiguously (a name behind two modules, an alias
   chain we cannot follow) is treated as used.
 - A dependency whose name is a common word (`log`, `time`, `bytes`) is kept

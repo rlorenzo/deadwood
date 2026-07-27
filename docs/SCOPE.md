@@ -155,9 +155,9 @@ shape was chosen for that risk rather than for coverage.
   the tenet asks for, since every `#[cfg(test)]` helper in every codebase
   would fire. Making it a matrix axis adds no second mechanism, and the
   answers come back as ordinary `unused_pub_item` findings, which is what they
-  are. Reachability landed in phase 9 below, so the claim is now provable and
-  the kind is filed as
-  [#23](https://github.com/rlorenzo/deadwood/issues/23).
+  are. Reachability landed in phase 9 below, which made the claim provable;
+  phase 10 built the kind, kept the matrix axis, and wrote down why both
+  exist.
 - **Pruning, not plumbing.** Items the matrix rules out are removed from the
   AST in `src/modtree.rs` right after parsing, so `src/resolve.rs` and
   `src/deps.rs` never learn what a `cfg` is. The one thing that could not be
@@ -481,27 +481,175 @@ that.
 
 Closes [#21](https://github.com/rlorenzo/deadwood/issues/21).
 
+## Phase 10 — a "test-only item" finding kind (shipped)
+
+Phase 4 wanted this kind and refused to build it, because without reachability
+"only tests reach this" is really "no *non-test* path resolves here". Phase 9
+built the analysis, so the honest version is available and it is one extra
+traversal over an edge set that already exists: walk from the full root set,
+walk again from the root set with the test entry points removed, and an item in
+the first and not the second is reached only by test code.
+
+The phase turned on a measurement rather than on a mechanism — the mechanism is
+fifty lines — so the numbers are first.
+
+- **What it found.** Five findings across the 34 crates in the local registry,
+  in three of them: `clap 4.6.4`'s `pub enum Value` in `examples/find.rs`, and
+  `for_each_rust_file`/`rayon_init` in `tests/repo/mod.rs` in each of
+  `syn 2.0.119` and `syn 3.0.3`. Every one was opened and confirmed by hand,
+  and every one is the same shape: `pub` on an item in a target nothing outside
+  a test binary can name. Run on itself, Deadwood reports none. Default output is
+  byte-identical everywhere — the kind ships `off`, so there is no finding to
+  print — across every fixture, the registry crates and Deadwood itself, exit
+  codes included. One line moved, and it is not a finding: the warning that
+  names the checks an incomplete parse skips now names this kind too, because
+  the same resolution pass produces both and a reader who turned the kind on
+  and saw nothing would otherwise not know the check had been skipped. It
+  appears in exactly one place in the corpus, the `broken` fixture, which
+  exists to produce it.
+- **The first run found a false positive, and that shaped the kind.**
+  `winnow 0.7.15`'s `combinator::iterator` came out test-only: documented,
+  doc-tested public API, reached from `pub use self::core::*;` in a `pub mod`
+  over a *private* `mod core`. The surface rule follows `pub mod` chains, and a
+  glob binds no name so it records no edge — so the item looked unreachable
+  from anything but the crate's own tests. Modules reached through an exported
+  glob are now excluded from the claim — and the `pub` modules under them,
+  since a glob re-exports modules as well as functions, so `facade::nested` is
+  as nameable as `facade::from_glob` and stopping at the glob's own module
+  would leave the same false positive one level down. That exclusion is
+  deliberately *not*
+  folded into the root set: rooting those items would change what
+  `unused_pub_item` says about the code naming them, which is a behavior change
+  to a shipped kind and wants its own measurement. It is filed as
+  [#25](https://github.com/rlorenzo/deadwood/issues/25), with the
+  false-positive it already causes.
+- **The overlap with rustc is the honest limit of the kind's value, and it is
+  large.** For an item in a package's own `src/`, `dead_code` reports the same
+  thing — as "never used" — in any build that leaves the tests out, which
+  includes `cargo clippy --all-targets`, since that compiles the crate both
+  ways. The `testonly` fixture is reported in full by clippy, `mentioned`
+  included, which Deadwood misses. What rustc cannot report is a `pub` item in
+  a test, bench or example target, because the only build that compiles one
+  also uses it — and that is where all five registry findings landed. So the
+  kind earns its place by being `off`: it costs nothing to a project that does
+  not ask, it puts the answer in the report with everything else when asked,
+  and README says plainly that a compiler is telling most projects most of this
+  already.
+
+The four decisions the issue left open.
+
+- **Severity, and it is a first.** `off`, not `warn`. Both are quiet about the
+  exit code, but `warn` *prints*, and every `#[cfg(test)]` helper in every
+  codebase is a candidate — a project that installed Deadwood for dead files
+  would get a page of visibility advice on its first run, which is the
+  quiet-default tenet exactly. Shipping `off` also keeps the issue's own
+  acceptance criterion true as written: default output is byte-identical, not
+  merely equal in exit code. The cost is the honest one: `[severity]` no longer
+  defaults uniformly. The default moved onto the kind
+  (`FindingKind::default_severity`, an exhaustive match) rather than onto the
+  `Severity` type, so phase 3's guarantee survives intact — `FindingKind::ALL`,
+  `[severity]`, `ignore` and the baseline all cover the new kind with no
+  plumbing of its own — and a kind added later has to state its default rather
+  than inherit one. The config documentation says all of this now; claiming
+  uniformity would have been the second-worst outcome after shipping `deny`.
+- **What the claim is.** "Only tests reach this" is not "this is dead", and the
+  message says the actionable thing: *make it `pub(crate)`, or move it behind
+  `#[cfg(test)]`*. A test-only helper is frequently exactly what the author
+  wants; a finding that said "delete this" about a function with visible
+  callers would read as a bug. It is a separate kind rather than a flag on
+  `unused_pub_item` for the same reason, and the two can never describe one
+  definition: the test-only claim is only made about items that pass *both* of
+  the unused check's conditions — something names it, and something live does.
+- **Two mechanisms, and both stay.** `[cfg] test = false` takes the tests out
+  of the build, so it takes them out of the evidence too: a dev-dependency only
+  the tests name becomes an unused-dependency finding, a `#[cfg(test)]`-only
+  file becomes a dead one, and the answer arrives as `unused_pub_item`, whose
+  message says the item is dead. It has the better recall — it does not care
+  that an `assert_eq!` names the item — and a blast radius across every
+  detector. The kind keeps the tests in the build, changes no other check's
+  answer, and says what to do instead. Neither subsumes the other, and README
+  now carries that paragraph rather than leaving a reader to guess.
+- **Opaque stays opaque.** A mention we have admitted we cannot read must not
+  become evidence, so an opaque mention is a root in *both* walks and an item
+  one names is never test-only. `assert_eq!(thing(), 1)` is how most tests name
+  what they test, so this is not a corner: it is most of the recall the kind
+  gives up, it is documented as a limitation rather than worked around, and the
+  fixture carries the two shapes side by side.
+
+The mechanism, briefly. `Def::entry_point` was a `bool` conflating `fn main`,
+`#[test]`, `#[bench]`, the linker and compiler exports and the `dead_code`
+opt-outs, and it splits into `EntryPoint::{None, Test, NonTest}`. The split
+covers whole *targets* as well as attributes — a test, bench or example target
+is code `cargo test` builds and no consumer runs, so a `harness = false` test's
+`fn main` is a test root exactly as a `#[test]` function is — and reuses
+`deps::is_dev_target` rather than copying the target list, since the dependency
+check already asks that question about those targets. Phase 7's
+`ParsedFile::test_only` is the third input. `reachable` takes a `RootSet`
+instead of gaining a second copy: the difference between the two answers *is*
+the claim, so they must not be able to drift. Every other root — a library's
+public surface, whatever it reaches, `[public-api]`, everything opaque — seeds
+both walks unchanged. The second traversal is not measurable against parsing.
+
+Recall was checked the other way, by mutation: fifteen inversions — each half
+of the entry-point split, each root clause in the second walk, the
+opaque-is-a-root rule, the glob-visibility rule and its `pub` half, each
+condition on the claim, and both halves of the per-kind severity default — and
+all fifteen were caught by a named test — sixteen with the `pub`-children
+descent, added in review. Two of them were not on the first attempt: the surface and `[public-api]` clauses were each covered twice, by a
+filter and by the root set, so neither inversion was visible. The redundant
+filter is gone and the tests now pin what a surface item *reaches*, which is
+the part only the root set can answer.
+
+One asymmetry is left open and measured. `#[cfg(test)] mod tests;` in a file
+makes that file test code (phase 7), and an inline `#[cfg(test)] mod tests {
+... }` does not — so an entry point that is neither `#[test]` nor `#[bench]`
+inside an inline one (`#[allow(dead_code)]`, `#[no_mangle]`) reads as a
+non-test root, and what it reaches is not test-only. The honest predicate is
+`cfg::Gates::test_only`, which is per-package and lives in a module
+`src/resolve.rs` has never been given, and the cheap alternative is a second
+copy of a rule `src/cfg.rs` already owns. Simulating the fix with a
+deliberately over-broad predicate changed **not one finding** across the
+fixtures, the registry crates and Deadwood itself, so it is filed with that
+number in it rather than built on a hunch
+([#27](https://github.com/rlorenzo/deadwood/issues/27)).
+
+Closes [#23](https://github.com/rlorenzo/deadwood/issues/23), and files the two
+gaps it leaves: [#25](https://github.com/rlorenzo/deadwood/issues/25), a glob
+re-export the public-surface rule does not follow, and
+[#27](https://github.com/rlorenzo/deadwood/issues/27), the inline `#[cfg(test)]
+mod` above.
+
 ## Next (sequenced, one slice at a time)
 
-1. **Give a baseline entry an identity a same-named neighbour cannot share**
+1. **Follow a `pub use` glob into the public surface**
+   ([#25](https://github.com/rlorenzo/deadwood/issues/25)) — `mod inner; pub
+   use inner::*;` makes `inner`'s items public API, and the reachability root
+   set does not follow it, so an item whose only referrer is dead is reported
+   though a consumer can name it. Phase 10 built the rule that does follow
+   those globs and consults it only where it can remove a finding; moving it
+   into the root set changes what `unused_pub_item` reports, so it needs a
+   measurement of its own. First because it is a live false positive rather
+   than a missed finding.
+2. **Give a baseline entry an identity a same-named neighbour cannot share**
    ([#16](https://github.com/rlorenzo/deadwood/issues/16)) — one entry
    suppresses every finding with its key, so a second `twin` in the same file
    is accepted before it exists. The item's module path is the candidate, and
    it is a format change: older baselines carry no such field and must keep
    matching.
-2. **Survive a moved file**
+3. **Survive a moved file**
    ([#17](https://github.com/rlorenzo/deadwood/issues/17)) — the path is in
    the key, so `git mv` un-baselines everything in the file. Rename detection
    needs a similarity signal we do not compute, and the honest answer may be
    to document the `--prune-baseline` + `--write-baseline` workaround instead
    of guessing; weigh that before building anything.
-3. **A "test-only item" finding kind**
-   ([#23](https://github.com/rlorenzo/deadwood/issues/23)) — phase 4 wanted
-   one and could not prove the claim; phase 9 built the analysis that can.
-   One extra traversal over an edge set that already exists, and one real
-   decision: it would fire on every `#[cfg(test)]` helper in every codebase,
-   so it is the first kind that could not default to `deny`.
-4. **Report a `[dev-dependencies]` entry the library itself names.** The
+4. **Make an inline `#[cfg(test)] mod` test code for the entry-point split**
+   ([#27](https://github.com/rlorenzo/deadwood/issues/27)) — the out-of-line
+   spelling is handled and the inline one is not, so the two disagree about an
+   entry point that is neither `#[test]` nor `#[bench]`. Last of the filed
+   entries because it was measured before it was filed: simulating the fix
+   changed no finding anywhere. It wants `cfg::Gates` reachable from
+   `src/resolve.rs`, which phase 4 deliberately kept out of it.
+5. **Report a `[dev-dependencies]` entry the library itself names.** The
    check has never made that claim, because the likeliest explanation used to
    be a mis-attribution of ours rather than a manifest that cannot compile.
    The largest of those, an out-of-line `#[cfg(test)] mod tests;`, is closed

@@ -162,8 +162,9 @@ fn detectors_skip_when_module_resolution_is_incomplete() {
         analysis
             .warnings
             .iter()
-            .any(|w| w.contains("unused-pub check skipped")),
-        "the unused-pub skip must be surfaced: {:?}",
+            .any(|w| w.contains("unused-pub and test-only checks skipped")),
+        "the skip must be surfaced, and must name both kinds the one resolution \
+         pass produces: {:?}",
         analysis.warnings
     );
     // A file that failed to parse could hold the only reference to a
@@ -1404,6 +1405,22 @@ fn suppressed(analysis: &Analysis) -> usize {
 /// A copy of the `baseline` fixture in a scratch directory, so a test may
 /// write to it. The fixture itself is never modified by any test.
 fn scratch_fixture(test: &str) -> PathBuf {
+    let dir = scratch_copy("baseline", test);
+    // The `*.toml` config files beside the fixture each name a baseline of
+    // their own. These tests run without `--config` and against the default
+    // location, so the copies come along only to confuse a future reader.
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let path = entry.unwrap().path();
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        if name != "Cargo.toml" && (name.ends_with(".toml") || name.ends_with("-baseline.json")) {
+            std::fs::remove_file(&path).unwrap();
+        }
+    }
+    dir
+}
+
+/// A copy of a fixture in a scratch directory, for the runs that write.
+fn scratch_copy(fixture: &str, test: &str) -> PathBuf {
     fn copy_into(from: &Path, to: &Path) {
         std::fs::create_dir_all(to).unwrap();
         for entry in std::fs::read_dir(from).unwrap() {
@@ -1417,19 +1434,10 @@ fn scratch_fixture(test: &str) -> PathBuf {
         }
     }
 
-    let dir = std::env::temp_dir().join(format!("deadwood-baseline-{}-{test}", std::process::id()));
+    let dir =
+        std::env::temp_dir().join(format!("deadwood-{fixture}-{}-{test}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    copy_into(&fixtures().join("baseline"), &dir);
-    // The `*.toml` config files beside the fixture each name a baseline of
-    // their own. These tests run without `--config` and against the default
-    // location, so the copies come along only to confuse a future reader.
-    for entry in std::fs::read_dir(&dir).unwrap() {
-        let path = entry.unwrap().path();
-        let name = path.file_name().unwrap().to_string_lossy().into_owned();
-        if name != "Cargo.toml" && (name.ends_with(".toml") || name.ends_with("-baseline.json")) {
-            std::fs::remove_file(&path).unwrap();
-        }
-    }
+    copy_into(&fixtures().join(fixture), &dir);
     dir
 }
 
@@ -1953,4 +1961,177 @@ fn a_binding_hides_the_item_it_shadows_and_only_the_item_it_shadows() {
             analysis.findings
         );
     }
+}
+
+// -- test-only items ---------------------------------------------------------
+//
+// The `testonly` fixture is a workspace of code that compiles and whose tests
+// pass; every claim below is written down beside the item it is about.
+
+/// Findings of the new kind, as `(file, name)` pairs in report order.
+fn test_only(analysis: &Analysis) -> Vec<(String, &str)> {
+    reported(analysis, FindingKind::TestOnlyItem)
+}
+
+/// The shipped default, and the reason the acceptance criterion for this phase
+/// could stay "byte-identical": `off` produces no finding at all, so there is
+/// nothing to change in the text, the JSON, the count or the exit code.
+#[test]
+fn the_test_only_kind_reports_nothing_until_a_project_asks_for_it() {
+    let analysis = analyze_fixture("testonly");
+    assert!(
+        analysis.findings.is_empty(),
+        "the fixture is quiet by default: {:?}",
+        analysis.findings
+    );
+    assert!(!analysis.has_denied());
+}
+
+/// The claim, and its two halves. `only_tests` is reached — it is not an
+/// unused-pub finding — and reached only from a `#[test]` function; `both` is
+/// reached from `fn main` as well and must stay quiet.
+#[test]
+fn an_item_only_test_code_reaches_is_reported_and_one_main_reaches_is_not() {
+    let analysis = analyze_configured("testonly", "warn.toml");
+    let names: Vec<&str> = test_only(&analysis).into_iter().map(|(_, n)| n).collect();
+
+    assert!(names.contains(&"only_tests"), "{names:?}");
+    assert!(
+        !names.contains(&"both"),
+        "`both` is reached from `fn main` too: {names:?}"
+    );
+    assert!(
+        !analysis
+            .findings
+            .iter()
+            .any(|f| f.kind == FindingKind::UnusedPubItem),
+        "a test-only item is alive, so nothing here is an unused-pub finding: {:?}",
+        analysis.findings
+    );
+    assert_finding_message(
+        &analysis,
+        "only_tests",
+        "is reached only from test code: make it `pub(crate)`, or move it behind `#[cfg(test)]`",
+    );
+}
+
+/// The two halves of the split have to agree. `from_target` is reached from a
+/// `harness = false` test target's `fn main` — no `#[test]` attribute anywhere
+/// in that crate — and lands in the same kind as the inline `#[cfg(test)]`
+/// case above.
+#[test]
+fn a_test_target_and_an_inline_test_module_are_classified_alike() {
+    let analysis = analyze_configured("testonly", "warn.toml");
+    assert_eq!(
+        test_only(&analysis),
+        vec![
+            ("app/src/inline.rs".to_string(), "only_tests"),
+            ("app/tests/support/mod.rs".to_string(), "from_target"),
+            ("probe/src/hidden.rs".to_string(), "declared"),
+            ("probe/src/hidden.rs".to_string(), "undeclared"),
+        ],
+    );
+}
+
+/// An opaque mention is a root in both walks, so it keeps its target out of
+/// the kind. `mentioned` is named only by an `assert_eq!` in a `#[test]`
+/// function — as test-only as an item gets — and is not reported.
+#[test]
+fn an_opaque_mention_keeps_an_item_out_of_the_test_only_kind() {
+    let analysis = analyze_configured("testonly", "warn.toml");
+    let names: Vec<&str> = test_only(&analysis).into_iter().map(|(_, n)| n).collect();
+    assert!(!names.contains(&"mentioned"), "{names:?}");
+    // The comparison that gives the assertion above its teeth: the same shape
+    // written without the macro *is* reported.
+    assert!(names.contains(&"only_tests"), "{names:?}");
+}
+
+/// A library's public surface is a root in both walks: a consumer Deadwood
+/// cannot see reaches it in a build with no tests at all.
+#[test]
+fn nothing_on_a_librarys_public_surface_is_ever_test_only() {
+    let analysis = analyze_configured("testonly", "warn.toml");
+    let names: Vec<&str> = test_only(&analysis).into_iter().map(|(_, n)| n).collect();
+    assert!(!names.contains(&"exported"), "{names:?}");
+    // Nor is what a surface item reaches: `support` is `pub` in a private
+    // module and only the tests reach `exported`, but a consumer we cannot see
+    // reaches `exported` and `exported` reaches `support`.
+    assert!(!names.contains(&"support"), "{names:?}");
+    // Nor is anything a `pub use inner::*;` glob re-exports — `from_glob` is
+    // `probe::facade::from_glob` to a consumer — nor anything in a `pub` module
+    // the glob carries with it, one level further down.
+    assert!(!names.contains(&"from_glob"), "{names:?}");
+    assert!(!names.contains(&"deeper"), "{names:?}");
+    // ...while the same crate's private module, which no consumer can name,
+    // is judged like a binary's.
+    assert!(names.contains(&"undeclared"), "{names:?}");
+}
+
+/// `[public-api]` is that same claim made outright rather than inferred, and
+/// it keeps an item out of the kind for the same reason.
+#[test]
+fn a_declared_public_api_item_is_never_test_only() {
+    let analysis = analyze_configured("testonly", "declared.toml");
+    let names: Vec<&str> = test_only(&analysis).into_iter().map(|(_, n)| n).collect();
+    assert!(!names.contains(&"declared"), "{names:?}");
+    assert!(
+        names.contains(&"undeclared"),
+        "only the listed item is covered: {names:?}"
+    );
+}
+
+/// Phase 3's guarantee, for the kind that had to bend its rule: `[severity]`,
+/// `ignore`, the exit code and the JSON all cover a new kind by virtue of it
+/// being a finding, with no plumbing of its own.
+#[test]
+fn the_test_only_kind_is_configurable_typed_and_forgiving_of_the_run() {
+    let analysis = analyze_configured("testonly", "warn.toml");
+    assert!(
+        analysis
+            .findings
+            .iter()
+            .all(|f| f.severity == Severity::Warn),
+        "{:?}",
+        analysis.findings
+    );
+    assert!(
+        !analysis.has_denied(),
+        "a `warn` kind cannot fail a run: {:?}",
+        analysis.findings
+    );
+
+    let json: serde_json::Value =
+        serde_json::from_str(&deadwood::report::render_json(&analysis).unwrap()).unwrap();
+    assert_eq!(json["findings"][0]["kind"], "test_only_item");
+    assert_eq!(json["findings"][0]["severity"], "warn");
+    assert_eq!(json["findings"][0]["name"], "only_tests");
+
+    let text = deadwood::report::render_text(&analysis);
+    assert!(text.contains("Test-only public items (warn):\n"), "{text}");
+}
+
+/// And a baseline covers it too, which is the same guarantee from the other
+/// end: the key is (kind, file, name), and this kind carries all three.
+#[test]
+fn a_test_only_finding_is_baselineable_like_any_other() {
+    let dir = scratch_copy("testonly", "test-only");
+    let config = dir.join("warn.toml");
+
+    let (code, stdout) = run_binary(&dir, &["--config", config.to_str().unwrap()]);
+    assert_eq!(code, Some(0), "warn findings do not fail a run: {stdout}");
+    assert!(stdout.contains("4 finding(s)"), "{stdout}");
+
+    let (code, stdout) = run_binary(
+        &dir,
+        &["--config", config.to_str().unwrap(), "--write-baseline"],
+    );
+    assert_eq!(code, Some(0), "{stdout}");
+    assert!(stdout.contains("Wrote 4 finding(s)"), "{stdout}");
+    let recorded = std::fs::read_to_string(dir.join("deadwood-baseline.json")).unwrap();
+    assert!(recorded.contains("\"test_only_item\""), "{recorded}");
+
+    let (code, stdout) = run_binary(&dir, &["--config", config.to_str().unwrap()]);
+    assert_eq!(code, Some(0), "{stdout}");
+    assert!(stdout.contains("No issues found."), "{stdout}");
+    assert!(stdout.contains("4 finding(s) suppressed"), "{stdout}");
 }
