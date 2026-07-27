@@ -1452,7 +1452,14 @@ impl<'ast> Visit<'ast> for RefWalker<'_> {
     }
 
     fn visit_macro(&mut self, node: &'ast syn::Macro) {
-        syn::visit::visit_macro(self, node);
+        // A macro name is in the macro namespace, which no binding tracked
+        // here reaches. It matters because a macro can sit inside a path's
+        // generic arguments (`Vec<thing!()>`, `take::<{ thing!() }>()`) and
+        // would otherwise inherit that path's namespace, letting a generic
+        // parameter or a local of the same name suppress it.
+        self.with_pos(PathPos::Other, |walker| {
+            syn::visit::visit_macro(walker, node);
+        });
         self.table.mark_tokens_used(&node.tokens);
     }
 
@@ -2019,6 +2026,25 @@ mod tests {
                 "pub struct Held;\npub fn entry<Held>(v: Held) -> Held { struct Inner(Held); v }\n"
             ),
             vec!["entry"]
+        );
+    }
+
+    /// A macro name lives in its own namespace, so neither a generic
+    /// parameter nor a local shadows it — but a macro reached from inside a
+    /// path's generic arguments inherits that path's namespace.
+    #[test]
+    fn a_macro_name_is_not_shadowed_by_a_binding_of_the_same_name() {
+        assert_eq!(
+            unused_in_root(
+                "pub fn thing() -> u32 { 1 }\npub fn caller<thing>(_v: Vec<thing!()>) -> u32 { 0 }\n"
+            ),
+            vec!["caller"]
+        );
+        assert_eq!(
+            unused_in_root(
+                "pub fn thing() -> u32 { 1 }\npub fn caller() -> u32 { let thing = 2; take::<{ thing!() }>() }\n"
+            ),
+            vec!["caller"]
         );
     }
 }
