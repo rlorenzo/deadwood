@@ -155,7 +155,9 @@ shape was chosen for that risk rather than for coverage.
   the tenet asks for, since every `#[cfg(test)]` helper in every codebase
   would fire. Making it a matrix axis adds no second mechanism, and the
   answers come back as ordinary `unused_pub_item` findings, which is what they
-  are. Revisit once reachability lands.
+  are. Reachability landed in phase 9 below, so the claim is now provable and
+  the kind is filed as
+  [#23](https://github.com/rlorenzo/deadwood/issues/23).
 - **Pruning, not plumbing.** Items the matrix rules out are removed from the
   AST in `src/modtree.rs` right after parsing, so `src/resolve.rs` and
   `src/deps.rs` never learn what a `cfg` is. The one thing that could not be
@@ -390,28 +392,115 @@ lexical scope. The `helper` half of that example is reported.
 
 Closes [#8](https://github.com/rlorenzo/deadwood/issues/8).
 
+## Phase 9 — reachability, not reference counting (shipped)
+
+A use is now recorded against the definition the naming path is written
+*inside*, and an item is alive only when a walk from the root set reaches it
+(`src/resolve.rs`). A dead subsystem comes out in one run instead of one layer
+per run, and a dead cycle — which no number of reruns ever found, because both
+halves are permanently referenced — comes out at all.
+
+This is the first check that reports items which *are* resolved and referenced,
+on the strength of a claim about the referrer, so its failure mode is a false
+positive by construction rather than by bug. Every decision below is shaped by
+that.
+
+- **The report is two conditions, and dropping either was rejected.** An item
+  survives when something names it *and* that something is alive. Keeping the
+  first condition is what preserves every finding Deadwood made before this
+  phase: a root is not exempt from it, so a library's `pub fn` that nothing in
+  the workspace calls is reported exactly as it always was. Keeping the second
+  is the phase. The two read apart in the message — "is never referenced by any
+  resolved path" against "is referenced only from items that nothing reaches" —
+  because a message saying nothing names an item that visibly has callers reads
+  as a bug in the tool. Both stay one `unused_pub_item`, since they are one
+  claim with two kinds of evidence, and the baseline key (kind, file, name) is
+  unchanged by either.
+- **The root set is the whole of the risk**, since every omission is a live
+  item reported dead. It is: everything opaque; every entry point; a library's
+  public surface; and whatever `[public-api]` declares.
+- **Opaque means *root*, not merely reachable.** Macro input, attribute
+  arguments including strings, an unfollowable glob, an alias we cannot pin
+  down — all were already uses of every item with that name, and all now count
+  on their own rather than on their referrer's behalf. A mention we have
+  admitted we cannot read must never become evidence that something is dead.
+  The same goes for a use with no definition to attribute it to: at module
+  level, in an `impl` for a foreign or generic self type, inside an item nested
+  in a function body.
+- **"Public surface" means externally reachable, which is the line phase 1
+  already drew for re-exports**: `pub`, under `pub` modules, all the way to the
+  crate root of a crate something outside the workspace can name. That is what
+  keeps a library's API from cascading into a page of noise, and — because
+  roots are still reported when nothing names them — it costs no finding. The
+  rejected reading was the narrower "only what `[public-api]` declares": on a
+  library that would report the entire API and everything under it, which is
+  the failure the issue named. `[public-api]` still matters, for the surface
+  this rule cannot infer — an item behind a private module, or in a binary.
+- **A definition that is not `pub` is an ordinary node.** Rooting private items
+  would stop every cascade at the first private helper, and
+  `pub fn orphan()` → `fn glue()` → `pub fn helper()` is exactly the chain
+  rustc's `dead_code` cannot see and this check exists for. Where rustc *can*
+  see one, it already reports it.
+- **A dead cycle reports every member, not the group once.** Each member is
+  separately deletable and separately located; a group finding would need a
+  name, the baseline keys on names, and a group's name moves whenever a member
+  joins or leaves it ([#16](https://github.com/rlorenzo/deadwood/issues/16) is
+  already open on that key being weaker than it looks). Falling out of the
+  per-definition rule is also what makes the answer identical run to run.
+- **An `impl` block hangs off its self type and, where we can resolve it, its
+  trait.** A block has no definition of its own, and nothing can call a method
+  on a type nothing can name; the trait is in because dispatch through a `dyn`
+  or a bound never spells the implementing type. Everything else — a foreign
+  self type, a blanket `impl<T>`, a tuple, a reference — is a root.
+- **Containment is not reference.** An item inside a module nothing names is
+  judged on the paths that name *it*: a module can be reached through a glob,
+  a `pub use`, or generated code without ever being named.
+- **A `use` names its target on the bound name's behalf**, so an import nothing
+  goes through no longer keeps what it imports alive. This is also why a dead
+  `pub use` and the definition under it are now two findings rather than one —
+  two deletions in two places, and reporting only the first is the layer-per-run
+  behavior the phase exists to remove.
+- **What it found.** Six new findings across the 34 crates in the local
+  registry (123 → 129), not one existing finding changed, and every new one
+  opened and confirmed dead by hand: four in `proc-macro2 1.0.107`, where the
+  vendored `rustc_literal_escaper` module's `check_for_errors` was already
+  reported and its three `check_raw_*` callees and the `Mode` enum only it
+  names now come out with it; and two in `zmij 1.0.23`, where the already-
+  reported `_mm_set1_epi32`/`_mm_set1_epi16` are the only callers of
+  `_mm_set_epi32`/`_mm_set_epi16`. Dogfooding stays clean, before and after.
+  Instrumenting the walk shows the shape of the graph rather than just its
+  result: across those crates 132,017 uses are now attributed to an enclosing
+  definition, against 13,087 definitions the walk had to root because the
+  mention was opaque, 1,985 rooted as entry points and 1,521 as a library's
+  public surface. Of the 17,705 definitions something names, reachability
+  removed six.
+- Recall was checked the other way as well, by mutation: fifteen inversions of
+  the rules above — dropping each root clause, each half of the report, the
+  `impl` owner, the `use` attribution, the opaque-is-a-root rule, the
+  second-referrer edge — and all fifteen were caught by a named test.
+
+Closes [#21](https://github.com/rlorenzo/deadwood/issues/21).
+
 ## Next (sequenced, one slice at a time)
 
-1. **Reachability over reference counting**
-   ([#21](https://github.com/rlorenzo/deadwood/issues/21)) — an item
-   referenced only by other dead items is still dead; today each item is
-   judged on whether anything names it, not on whether that something is
-   alive. The largest remaining recall gap, and the first check whose failure
-   mode is a false positive by construction: what counts as a *root* is the
-   whole decision. Also what a "test-only item" finding kind would need
-   before it could be honest; see the `cfg(test)` decision in phase 4.
-2. **Give a baseline entry an identity a same-named neighbour cannot share**
+1. **Give a baseline entry an identity a same-named neighbour cannot share**
    ([#16](https://github.com/rlorenzo/deadwood/issues/16)) — one entry
    suppresses every finding with its key, so a second `twin` in the same file
    is accepted before it exists. The item's module path is the candidate, and
    it is a format change: older baselines carry no such field and must keep
    matching.
-3. **Survive a moved file**
+2. **Survive a moved file**
    ([#17](https://github.com/rlorenzo/deadwood/issues/17)) — the path is in
    the key, so `git mv` un-baselines everything in the file. Rename detection
    needs a similarity signal we do not compute, and the honest answer may be
    to document the `--prune-baseline` + `--write-baseline` workaround instead
    of guessing; weigh that before building anything.
+3. **A "test-only item" finding kind**
+   ([#23](https://github.com/rlorenzo/deadwood/issues/23)) — phase 4 wanted
+   one and could not prove the claim; phase 9 built the analysis that can.
+   One extra traversal over an edge set that already exists, and one real
+   decision: it would fire on every `#[cfg(test)]` helper in every codebase,
+   so it is the first kind that could not default to `deny`.
 4. **Report a `[dev-dependencies]` entry the library itself names.** The
    check has never made that claim, because the likeliest explanation used to
    be a mis-attribution of ours rather than a manifest that cannot compile.

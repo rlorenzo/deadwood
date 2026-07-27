@@ -18,8 +18,8 @@ this project was bootstrapped from.
 | Check | What it finds | Why rustc doesn't |
 | --- | --- | --- |
 | **Dead files** | `.rs` files under `src/` not reachable from any target root via `mod` declarations | Files outside the module tree are never compiled, so no lint ever sees them |
-| **Unused pub items** | Fully-`pub` fns, structs, enums, traits, type aliases, consts, statics, and unions that no path in the workspace resolves to | `dead_code` assumes `pub` items have external consumers |
-| **Unused re-exports** | `pub use` re-exports nothing in the workspace goes through, where outside code cannot reach them either | `unused_imports` only sees imports the crate itself does not use, not ones re-exported for nobody |
+| **Unused pub items** | Fully-`pub` fns, structs, enums, traits, type aliases, consts, statics, and unions that nothing live in the workspace reaches — either no path resolves to them, or every path that does is written inside something itself unreachable | `dead_code` assumes `pub` items have external consumers |
+| **Unused re-exports** | `pub use` re-exports nothing live in the workspace goes through, where outside code cannot reach them either | `unused_imports` only sees imports the crate itself does not use, not ones re-exported for nobody |
 | **Unused dependencies** | `Cargo.toml` entries — normal, dev, or build — whose crate name the declaring package's code never mentions | Cargo has no reason to look, and an unused entry still costs build time and supply-chain surface |
 | **Misplaced dependencies** | `Cargo.toml` entries declared in a table the code naming them cannot see: a `[dependencies]` entry only tests, examples and benches use, or a `[build-dependencies]` entry the build script never touches | Cargo builds the entry wherever you put it; a normal dependency only your tests need is compiled by everyone who depends on you |
 | **Unsatisfiable `cfg` gates** | `#[cfg(...)]` gates that can hold in no build of the package, e.g. a `mod` behind a feature the manifest does not declare | The code is never compiled, so no lint ever sees it — and the gate reads as deliberate |
@@ -41,10 +41,50 @@ Shadowing is per namespace — a `let` binding hides only expressions and a
 generic parameter only types, so `let Foo = 1;` cannot silence a `: Foo` beside
 it — and it stops at the end of the block, arm, or body that opened it.
 
+And being referenced is not enough — the referrer has to be alive too. Each
+use is recorded against the definition the naming path is written *inside*,
+and an item survives only when something names it *and* that something is
+itself reached:
+
+```rust
+pub fn orphan() { helper(); }   // reported: nothing names it
+pub fn helper() {}              // reported too: only `orphan` names it
+```
+
+So a dead subsystem comes out in one run rather than one layer per run, and a
+pair of mutually recursive functions nothing reaches — permanently referenced,
+and so invisible to any reference count — comes out at all. Both members of a
+dead cycle are reported: each is separately deletable, and a group finding
+would need a name that moved whenever a member joined or left it. The two
+kinds of evidence read apart in the message, since saying "never referenced"
+about an item with visible callers would read as a bug:
+
+```console
+src/api.rs:3: pub fn `orphan` is never referenced by any resolved path in this workspace
+src/api.rs:7: pub fn `helper` is referenced only from items that nothing reaches
+```
+
+The walk starts from a set of **roots**, and every omission from it would be a
+live item reported dead, so the set is deliberately generous: `fn main` and the
+build script, `#[test]` and `#[bench]` functions, the linker and compiler
+exports (`#[no_mangle]`, `#[export_name]`, `#[proc_macro*]`, `#[panic_handler]`
+and the rest, including the `#[unsafe(...)]` spelling), the `dead_code`
+opt-outs, everything `[public-api]` declares, **a library's public surface** —
+every `pub` item under `pub` modules from the crate root, since consumers
+Deadwood cannot see call it — and **everything opaque**. A root is still
+reported when nothing in the workspace names it, which is why rooting the
+public surface costs no finding: what it changes is that an item the surface
+*calls* is not dragged down with it.
+
 The bias is still toward staying quiet rather than raising noise. Anything
 that cannot be resolved counts as a use of *every* item with that name:
 identifiers inside macro invocations and attribute arguments, and names in a
-module holding a glob import that leads outside the workspace. Items marked
+module holding a glob import that leads outside the workspace. Under
+reachability those count as *roots* rather than as ordinary references — a
+mention Deadwood has admitted it cannot read must never become evidence that
+something is dead. So does a use written where there is no definition to
+attribute it to: in an `impl` block for a type outside the workspace or for a
+generic parameter, or inside an item nested in a function body. Items marked
 `#[no_mangle]`, `#[used]`, `#[export_name]`, or
 `#[allow(dead_code)]`/`#[expect(dead_code)]` are skipped, as is `fn main`. For
 library crates with external consumers, treat unused-pub findings as advisory
@@ -114,7 +154,10 @@ name outward: one that is reachable from a library's crate root (`pub use
 inner::Thing;` in `lib.rs`, or in any `pub mod` under it) is doing its job
 even when nothing inside the workspace uses it, so it is never reported. A
 re-export that outside code cannot reach — because some module on the way is
-private — has no such excuse, and is reported.
+private — has no such excuse, and is reported. A `use` names what it imports
+on the bound name's behalf, so such a re-export stops keeping its target
+alive: the definition under it is reported alongside it, because deleting one
+does not delete the other.
 
 ## Usage
 
@@ -129,6 +172,7 @@ Unsatisfiable cfg gates:
 Unused public items:
   src/lib.rs:3: pub fn `entry` is never referenced by any resolved path in this workspace
   src/lib.rs:7: pub fn `dead_fn` is never referenced by any resolved path in this workspace
+  src/lib.rs:9: pub fn `dead_helper` is referenced only from items that nothing reaches
 
 Unused re-exports:
   src/lib.rs:11: `pub use` re-export of `Stale` is never referenced through this module
@@ -139,7 +183,7 @@ Unused dependencies:
 Misplaced dependencies:
   Cargo.toml: dependency `assert_cmd` is referenced only by the test, example and bench code of package `demo`, so it belongs in `[dev-dependencies]` rather than `[dependencies]`
 
-7 finding(s) in workspace `/path/to/workspace`.
+8 finding(s) in workspace `/path/to/workspace`.
 ```
 
 - `deadwood check [PATH]` — analyze the package/workspace at `PATH` (default `.`)
@@ -398,21 +442,26 @@ toolchain is pinned to `stable` with `clippy` and `rustfmt` via
 4. **Usage resolution** — every target is a crate. For each one, a symbol
    table maps its modules to the items they define, the `use` aliases they
    bind, and the globs they import; then every path in every file is resolved
-   from the module it is written in, marking what it names (`src/resolve.rs`).
-5. **Detectors** — dead files are `src/**.rs` minus the reachable set and the
-   `cfg`-excluded set; unused pub items and re-exports are the definitions no
-   resolved path reached (`src/unused.rs`); unused dependencies are the
+   from the module it is written in, marking what it names and recording which
+   definition it was written inside (`src/resolve.rs`).
+5. **Reachability** — those recorded edges are walked from the root set
+   (entry points, the linker and compiler exports, a library's public surface,
+   `[public-api]`, and everything opaque), so an item is alive only when
+   something live names it (`src/resolve.rs`).
+6. **Detectors** — dead files are `src/**.rs` minus the reachable set and the
+   `cfg`-excluded set; unused pub items and re-exports are the definitions
+   nothing live reached (`src/unused.rs`); unused dependencies are the
    manifest entries whose crate name appears nowhere in the package, reachable
    or not, and misplaced ones are the entries every mention of which lands in
    code their table does not serve (`src/deps.rs`).
-6. **Configuration** — `deadwood.toml` is applied in one pass over the
+7. **Configuration** — `deadwood.toml` is applied in one pass over the
    findings, so `ignore` and `[severity]` cover every detector identically
    (`src/config.rs`); `public-api`, the dependency allowlist, and the `cfg`
    matrix are consulted by the detectors they belong to.
-7. **Baseline** — last of all, and after the configuration: recorded findings
+8. **Baseline** — last of all, and after the configuration: recorded findings
    are subtracted by kind, file and name, and recorded entries that matched
    nothing are reported stale (`src/baseline.rs`).
-8. **Reporting** — grouped text or JSON (`src/report.rs`).
+9. **Reporting** — grouped text or JSON (`src/report.rs`).
 
 ## Known limitations (tracked, not hidden)
 
@@ -442,11 +491,26 @@ toolchain is pinned to `stable` with `clippy` and `rustfmt` via
 - Gate evaluation does not track correlation between atoms:
   `all(feature = "a", not(feature = "a"))` reads as satisfiable even though it
   provably is not. The finding is lost, never invented.
-- Under the default matrix `#[cfg(test)]` code counts as a use, so an item
-  only tests reach is not reported. `[cfg] test = false` asks the other
-  question, and the answers are `unused_pub_item` findings rather than a kind
-  that says "test-only" — proving that would need reachability analysis
-  Deadwood does not have yet (`docs/SCOPE.md` has the reasoning).
+- Under the default matrix `#[cfg(test)]` code counts as a use and `#[test]`
+  functions are roots, so an item only tests reach is not reported.
+  `[cfg] test = false` asks the other question, and the answers are
+  `unused_pub_item` findings rather than a kind that says "test-only"
+  ([#23](https://github.com/rlorenzo/deadwood/issues/23)).
+- Reachability follows references, not containment: an item inside a module
+  nothing names is judged on the paths that name *it*. A module can be reached
+  through a glob, a `pub use`, or generated code without ever being named, so
+  reading "unnamed module" as "everything in it is dead" would be a claim about
+  code Deadwood has not seen.
+- An `impl` block hangs off its self type, and off the trait too where that
+  resolves inside the workspace. For anything else — a foreign self type
+  (`impl Trait for Vec<T>`), a blanket `impl<T>`, a tuple, a reference — there
+  is no definition to hang it off, so what its body names counts
+  unconditionally. That is most of the recall reachability gives up on generic
+  code, deliberately.
+- A definition that is not `pub` takes part in the walk like any other, so a
+  private helper only dead code calls stops keeping what *it* calls alive.
+  Rooting private items would end every cascade at the first one; rustc's
+  `dead_code` lint already reaches them where it can see them.
 - An unsatisfiable gate is reported where it is written, and only for the
   outermost gate — an inner `#![cfg(...)]` gates the whole file it is in, and
   nothing below a dead gate is walked. Enum variants and struct fields are not
