@@ -844,18 +844,39 @@ impl SymbolTable {
     /// it reaches what it names. A glob binds no name and so records no edge,
     /// which is exactly the hole this fills.
     ///
+    /// The closure follows two edges, and needs both. A `pub use` glob reaches
+    /// the module it names, and a visible module reaches its own `pub`
+    /// children — `pub use inner::*;` re-exports `inner::nested` as well as
+    /// `inner`'s functions, so `facade::nested::item` is nameable and stopping
+    /// at `inner` would leave the same false positive one level down.
+    ///
     /// This is deliberately *not* folded into the root set. Rooting these items
     /// would change what `unused_pub_item` says about the code that names them,
     /// which is a phase of its own
     /// ([#25](https://github.com/rlorenzo/deadwood/issues/25)); consulted here
     /// it can only remove a finding.
     fn externally_visible_modules(&self) -> HashSet<usize> {
+        // Only `pub` children: a private `mod` inside a glob-exported module is
+        // no more nameable from outside than a private `mod` anywhere else.
+        let mut pub_children: Vec<Vec<usize>> = vec![Vec::new(); self.modules.len()];
+        for (id, module) in self.modules.iter().enumerate() {
+            if let Some(parent) = module.parent
+                && module.declared_pub
+            {
+                pub_children[parent].push(id);
+            }
+        }
+
         let mut seen: HashSet<usize> = (0..self.modules.len())
             .filter(|&module| self.is_externally_reachable(module))
             .collect();
         let mut stack: Vec<usize> = seen.iter().copied().collect();
         while let Some(module) = stack.pop() {
-            for &source in &self.modules[module].pub_glob_sources {
+            let reached = self.modules[module]
+                .pub_glob_sources
+                .iter()
+                .chain(&pub_children[module]);
+            for &source in reached {
                 if seen.insert(source) {
                     stack.push(source);
                 }
@@ -3310,6 +3331,27 @@ mod tests {
                     "mod inner;\npub use inner::*;\n#[test]\nfn covered() { helper(); }\n",
                 ),
                 ("facade/inner", "pub fn helper() {}\n"),
+            ])
+            .is_empty()
+        );
+    }
+
+    /// A glob re-export carries the module's `pub` children with it:
+    /// `pub use inner::*;` makes `inner::nested` nameable as `facade::nested`,
+    /// so an item in it is surface for the same reason `from_glob` is. The
+    /// closure has to descend as well as follow globs, or it stops one level
+    /// short of the API.
+    #[test]
+    fn a_pub_module_under_a_glob_re_export_is_never_test_only() {
+        assert!(
+            test_only_in_library(&[
+                ("", "pub mod facade;\n"),
+                (
+                    "facade",
+                    "mod inner;\npub use inner::*;\n#[test]\nfn covered() { inner::nested::deeper(); }\n",
+                ),
+                ("facade/inner", "pub mod nested;\n"),
+                ("facade/inner/nested", "pub fn deeper() {}\n"),
             ])
             .is_empty()
         );

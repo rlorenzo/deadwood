@@ -508,7 +508,11 @@ fifty lines — so the numbers are first.
   over a *private* `mod core`. The surface rule follows `pub mod` chains, and a
   glob binds no name so it records no edge — so the item looked unreachable
   from anything but the crate's own tests. Modules reached through an exported
-  glob are now excluded from the claim. That exclusion is deliberately *not*
+  glob are now excluded from the claim — and the `pub` modules under them,
+  since a glob re-exports modules as well as functions, so `facade::nested` is
+  as nameable as `facade::from_glob` and stopping at the glob's own module
+  would leave the same false positive one level down. That exclusion is
+  deliberately *not*
   folded into the root set: rooting those items would change what
   `unused_pub_item` says about the code naming them, which is a behavior change
   to a shipped kind and wants its own measurement. It is filed as
@@ -585,8 +589,8 @@ Recall was checked the other way, by mutation: fifteen inversions — each half
 of the entry-point split, each root clause in the second walk, the
 opaque-is-a-root rule, the glob-visibility rule and its `pub` half, each
 condition on the claim, and both halves of the per-kind severity default — and
-all fifteen were caught by a named test. Two of them were not on the first
-attempt: the surface and `[public-api]` clauses were each covered twice, by a
+all fifteen were caught by a named test — sixteen with the `pub`-children
+descent, added in review. Two of them were not on the first attempt: the surface and `[public-api]` clauses were each covered twice, by a
 filter and by the root set, so neither inversion was visible. The redundant
 filter is gone and the tests now pin what a surface item *reaches*, which is
 the part only the root set can answer.

@@ -2056,6 +2056,11 @@ fn nothing_on_a_librarys_public_surface_is_ever_test_only() {
     // module and only the tests reach `exported`, but a consumer we cannot see
     // reaches `exported` and `exported` reaches `support`.
     assert!(!names.contains(&"support"), "{names:?}");
+    // Nor is anything a `pub use inner::*;` glob re-exports — `from_glob` is
+    // `probe::facade::from_glob` to a consumer — nor anything in a `pub` module
+    // the glob carries with it, one level further down.
+    assert!(!names.contains(&"from_glob"), "{names:?}");
+    assert!(!names.contains(&"deeper"), "{names:?}");
     // ...while the same crate's private module, which no consumer can name,
     // is judged like a binary's.
     assert!(names.contains(&"undeclared"), "{names:?}");
