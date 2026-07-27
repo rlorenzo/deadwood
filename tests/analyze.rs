@@ -1728,6 +1728,15 @@ fn pruning_preserves_every_field_of_the_entries_it_keeps() {
 /// once, from inside the scope where a binding of that name is live. So the
 /// list below is the whole claim: these four are shadowed, and the other nine
 /// survive a binding that must not silence them.
+///
+/// The `assert_eq!` carries most of that weight, because it pins the *whole*
+/// finding vector: an item wrongly reported fails it whether or not the loop
+/// below names that item. The loop is there to say which survivor proves
+/// which rule. Eight of the nine are in it; the ninth is `pub mod deep`,
+/// which a `mod` declaration's `reportable: false` keeps out of
+/// `unused_pub_item` entirely, so asserting it here would assert nothing.
+/// What that module is for is the qualified path through it, and `thing` at
+/// the end of that path is checked.
 #[test]
 fn a_binding_hides_the_item_it_shadows_and_only_the_item_it_shadows() {
     let analysis = analyze_fixture("scopes");
