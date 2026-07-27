@@ -247,8 +247,10 @@ No issues found.
 
 The file is `deadwood-baseline.json` in the workspace root unless a
 `deadwood.toml` says otherwise, and it holds exactly the objects `--json` puts
-in its `findings` array — no second format, and readable in a diff. It is meant
-to be committed: the debt stays visible, and it can only shrink.
+in its `findings` array — no second format, and readable in a diff. That is a
+constraint rather than a coincidence: everything the matching keys on has to be
+producible from a report, so a baseline stays something you can write by hand.
+It is meant to be committed: the debt stays visible, and it can only shrink.
 
 **A baselined finding is subtracted, not marked.** It is absent from the text
 report, from the JSON `findings` array, and from the count; only the summary
@@ -256,11 +258,35 @@ line says how many there were. The report is for what you have to act on, and
 reprinting the accepted list would reproduce exactly the noise the baseline was
 adopted to remove.
 
-**Matching survives line drift.** An entry is matched on kind, file and item
-name — not the line, which moves with every edit above it, and not the
-severity, which is a `deadwood.toml` decision: putting it in the key would mean
-that turning a check down from `deny` to `warn` un-baselines every finding of
-that kind at once.
+**Matching survives line drift.** An entry is matched on kind, file, item name
+and the module the item is written in — not the line, which moves with every
+edit above it, and not the severity, which is a `deadwood.toml` decision:
+putting it in the key would mean that turning a check down from `deny` to
+`warn` un-baselines every finding of that kind at once. The module path is in
+the key for the same reason the line is not: it tells `alpha::twin` from
+`beta::twin` in one file, and it does not move when code above it does.
+
+```json
+{ "kind": "unused_pub_item", "severity": "deny", "file": "src/lib.rs",
+  "line": 11, "name": "twin", "module": "crate::alpha",
+  "message": "pub fn `twin` is never referenced by any resolved path in this workspace" }
+```
+
+Only the three item kinds have a module: a dead file is not an item, the two
+dependency kinds name an entry in a manifest, and an unsatisfiable gate names
+the site the gate is written at. **An entry with no `module` is not an entry in
+the crate root** — it is an entry that says nothing about modules, and modules
+are compared only when both sides name one. That is what keeps a baseline
+written by an older Deadwood matching exactly what it always matched, with no
+edit: the crate root is spelled `crate`, never omitted, so the two cases can
+never be confused.
+
+The compatibility runs one way. A baseline this version writes makes an older
+Deadwood exit 2 with ``unknown field `module` ``, on a file it read yesterday —
+the same strictness that turns a typo'd key into an error rather than a silently
+ignored one, and the reason a field that decides matching may not be quietly
+dropped. Downgrading after rewriting the baseline means deleting the field by
+hand, or regenerating the file with the older binary.
 
 **Fixed findings are reported, not forgotten.** An entry nothing matches any
 more is stale, and every run says so; `--prune-baseline` rewrites the file
@@ -291,9 +317,10 @@ Two rules keep the file from lying:
   in it — that is a project that has not adopted a baseline, and it behaves
   exactly like a Deadwood without the feature.
 
-One entry covers every finding that shares its key, so a *second* item with the
-same name in the same file is suppressed along with the first
-([#16](https://github.com/rlorenzo/deadwood/issues/16)), and moving a file
+One entry covers every finding that shares its key, so two items that share a
+file, a name *and* a module are still suppressed together — a `pub struct Group`
+beside a `pub fn Group(..)`, or two `#[cfg]`-alternative definitions of one item
+([#30](https://github.com/rlorenzo/deadwood/issues/30)). Moving a file
 un-baselines the findings in it
 ([#17](https://github.com/rlorenzo/deadwood/issues/17)).
 
@@ -634,12 +661,16 @@ toolchain is pinned to `stable` with `clippy` and `rustfmt` via
 - A `[target.'...'.dependencies]` table keyed by a bare target triple rather
   than a `cfg(...)` expression is not modelled, so narrowing `target-os` does
   not reach its entries; they are judged as if always built.
-- A baseline entry suppresses *every* finding that shares its key, so a second
-  item with the same name in the same file is covered by the first one's entry
-  ([#16](https://github.com/rlorenzo/deadwood/issues/16)). Since the key
-  deliberately ignores the line, there is no way to say which occurrence is the
-  new one, and pointing at a baselined line would be a wrong finding rather
-  than a missed one.
+- A baseline entry suppresses *every* finding that shares its key. The item's
+  module is part of that key, so two same-named items in one file are two
+  entries — but two definitions sharing a file, a name *and* a module are not
+  ([#30](https://github.com/rlorenzo/deadwood/issues/30)). That is `pub struct
+  Group` beside `#[allow(non_snake_case)] pub fn Group(..)`, which Rust
+  separates by namespace and the key does not model, and two
+  `#[cfg]`-alternative definitions of one item, where covering both with one
+  entry is the right answer. Since the key deliberately ignores the line, there
+  is no way to say which occurrence is the new one, and pointing at a baselined
+  line would be a wrong finding rather than a missed one.
 - The baseline key includes the file path, so moving a file un-baselines every
   finding in it and makes every entry that recorded them stale
   ([#17](https://github.com/rlorenzo/deadwood/issues/17)). `--prune-baseline`
