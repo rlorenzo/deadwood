@@ -1,0 +1,9 @@
+# Entries that name the module their item is written in, which is what tells
+# `alpha::twin` and `beta::twin` apart. One twin is recorded and the other is
+# news; every line number in the file is wrong, because a module path must not
+# reintroduce the drift the line was kept out of the key to avoid.
+#
+# One entry names a module nothing occurs in, so the comparison has teeth: an
+# implementation that recorded the module and never compared it would suppress
+# both twins and report nothing stale.
+baseline = "modules-baseline.json"
