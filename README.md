@@ -76,8 +76,10 @@ build script, `#[test]` and `#[bench]` functions, the linker and compiler
 exports (`#[no_mangle]`, `#[export_name]`, `#[proc_macro*]`, `#[panic_handler]`
 and the rest, including the `#[unsafe(...)]` spelling), the `dead_code`
 opt-outs, everything `[public-api]` declares, **a library's public surface** —
-every `pub` item under `pub` modules from the crate root, since consumers
-Deadwood cannot see call it — and **everything opaque**. A root is still
+every `pub` item under `pub` modules from the crate root, and everything a
+`pub use inner::*;` glob re-exports from the crate root or from one of those
+modules — `inner` itself need not be `pub`, which is the whole point — since
+consumers Deadwood cannot see call it — and **everything opaque**. A root is still
 reported when nothing in the workspace names it, which is why rooting the
 public surface costs no finding: what it changes is that an item the surface
 *calls* is not dragged down with it.
@@ -177,7 +179,8 @@ are followed as before.
 
 Re-exports get one extra filter, because a `pub use` exists *only* to expose a
 name outward: one that is reachable from a library's crate root (`pub use
-inner::Thing;` in `lib.rs`, or in any `pub mod` under it) is doing its job
+inner::Thing;` in `lib.rs`, in any `pub mod` under it, or in a module a
+`pub use inner::*;` glob re-exports) is doing its job
 even when nothing inside the workspace uses it, so it is never reported. A
 re-export that outside code cannot reach — because some module on the way is
 private — has no such excuse, and is reported. A `use` names what it imports
@@ -547,8 +550,11 @@ toolchain is pinned to `stable` with `clippy` and `rustfmt` via
   under [Configuration](#configuration) is why both exist.
 - The test-only claim is narrower than it sounds, in three directions that all
   cost findings rather than invent them. **Anything a consumer could name is
-  out**: a library's public surface, whatever a surface item reaches, anything
-  `[public-api]` declares, and anything a `pub use inner::*;` re-exports. **An
+  out**: a library's public surface, whatever a surface item reaches, and
+  anything `[public-api]` declares. That still covers everything a `pub use
+  inner::*;` re-exports, but by the ordinary route rather than a rule of its
+  own — a glob re-export *is* public surface, so it is a root in both walks
+  like the rest of it. **An
   opaque mention keeps an item out entirely** — a name in macro input is a
   root, and `assert_eq!(thing(), 1)` is how most tests name what they test, so
   one assertion is enough. And **an entry point inside an inline `#[cfg(test)]
@@ -595,14 +601,14 @@ toolchain is pinned to `stable` with `clippy` and `rustfmt` via
   item paths are listed under `[public-api]`. Re-exports on a library's public
   surface are skipped for the same reason, which also means a genuinely dead
   one there is missed.
-- A `pub use inner::*;` glob puts `inner`'s items on a library's public
-  surface, and the reachability root set does not follow it — a glob binds no
-  name, so it records no edge the way a named `pub use` does. An item behind
-  one whose only referrer is dead is reported as dead, though a consumer can
-  name it ([#25](https://github.com/rlorenzo/deadwood/issues/25)). The
-  `test_only_item` kind consults a rule that *does* follow those globs, since
-  there it can only remove a finding; fixing the root set itself would move
-  existing ones, and needs its own measurement.
+- A `pub use inner::*;` glob puts `inner`'s items — and the `pub` modules under
+  it — on a library's public surface, and the root set follows it. A *named*
+  `pub use` of a **module** (`pub use inner::sub;`) reaches the same place by a
+  route the rule does not take, so an item under one whose only referrer is
+  dead is still reported though a consumer can name it
+  ([#28](https://github.com/rlorenzo/deadwood/issues/28); simulating the fix
+  changed no finding on any fixture, on the 34 crates in a local registry, or
+  on Deadwood itself).
 - Anything that resolves ambiguously (a name behind two modules, an alias
   chain we cannot follow) is treated as used.
 - A dependency whose name is a common word (`log`, `time`, `bytes`) is kept

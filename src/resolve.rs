@@ -353,7 +353,7 @@ struct Module {
     glob_sources: Vec<usize>,
     /// The subset of those a `pub use` glob pulls in, so their items can be
     /// named from here by anyone who can name this module. See
-    /// [`SymbolTable::externally_visible_modules`].
+    /// [`SymbolTable::externally_reachable_modules`].
     pub_glob_sources: Vec<usize>,
     /// A glob import that could not be followed into the workspace, so a name
     /// missing from `items` might still refer to a workspace item.
@@ -634,9 +634,10 @@ impl SymbolTable {
     /// than by whichever copy happened to be indexed first.
     pub(crate) fn unused_definitions(&self, public_api: &PublicApi) -> Vec<UnusedDef> {
         let site = |def: &Def| (def.file.clone(), def.line, def.name.clone());
+        let surface = self.externally_reachable_modules();
         let used: HashSet<_> = self.used.iter().map(|&id| site(&self.defs[id])).collect();
         let reached: HashSet<_> = self
-            .reachable(public_api, RootSet::Full)
+            .reachable(public_api, &surface, RootSet::Full)
             .iter()
             .map(|&id| site(&self.defs[id]))
             .collect();
@@ -645,7 +646,7 @@ impl SymbolTable {
         let mut out: Vec<UnusedDef> = self
             .defs
             .iter()
-            .filter(|def| def.reportable && self.is_worth_reporting(def))
+            .filter(|def| def.reportable && self.is_worth_reporting(def, &surface))
             .filter(|def| !self.is_declared_api(def, public_api))
             .filter(|def| {
                 let site = site(def);
@@ -679,23 +680,24 @@ impl SymbolTable {
     /// 3. **Nothing reaches it once the test entry points are gone**
     ///    ([`RootSet::WithoutTests`]).
     ///
-    /// What this cannot say is as important as what it can. Anything a
-    /// consumer could name is out: a library's public surface is a root in
-    /// *both* walks, so a `pub fn` on it is never test-only however plainly
-    /// only the tests call it here — we cannot see the consumers, and claiming
-    /// otherwise is the false positive this whole check is shaped to avoid. So
-    /// is anything a `pub use` glob re-exports, which the root set does not
-    /// cover ([`SymbolTable::externally_visible_modules`]). And everything
-    /// opaque is a root in both walks too ([`Referrer::Root`]): one mention in
-    /// macro input — an `assert_eq!` naming the item is the common one — keeps
-    /// an item out of this kind entirely. Every one of those costs findings,
-    /// and none of them invents one.
+    /// What this cannot say is as important as what it can, and one rule
+    /// answers for most of it: a library's public surface is a root in *both*
+    /// walks — every `pub` item under `pub` modules from the crate root, and
+    /// everything a `pub use` glob re-exports from the crate root or one of
+    /// those modules ([`SymbolTable::externally_reachable_modules`]) — so a
+    /// `pub fn` a consumer could name is never test-only however plainly only
+    /// the tests call it here. We cannot see the consumers, and claiming
+    /// otherwise is the false positive this whole check is shaped to avoid.
+    /// And everything opaque is a root in both walks too ([`Referrer::Root`]):
+    /// one mention in macro input — an `assert_eq!` naming the item is the
+    /// common one — keeps an item out of this kind entirely. Every one of
+    /// those costs findings, and none of them invents one.
     pub(crate) fn test_only_definitions(&self, public_api: &PublicApi) -> Vec<TestOnlyDef> {
         let site = |def: &Def| (def.file.clone(), def.line, def.name.clone());
-        let visible = self.externally_visible_modules();
+        let surface = self.externally_reachable_modules();
         let used: HashSet<_> = self.used.iter().map(|&id| site(&self.defs[id])).collect();
         let sites = |roots| -> HashSet<_> {
-            self.reachable(public_api, roots)
+            self.reachable(public_api, &surface, roots)
                 .iter()
                 .map(|&id| site(&self.defs[id]))
                 .collect()
@@ -707,13 +709,15 @@ impl SymbolTable {
         let mut out: Vec<TestOnlyDef> = self
             .defs
             .iter()
-            .filter(|def| def.reportable && self.is_worth_reporting(def))
-            // No `is_declared_api` filter beside this one: a declared item is
-            // a root in *both* walks, so it cannot reach the conditions below.
-            // `unused_definitions` needs the filter because an item nothing
-            // names is reported however rooted it is; this claim is only ever
-            // made about items something does name.
-            .filter(|def| !visible.contains(&def.module))
+            .filter(|def| def.reportable && self.is_worth_reporting(def, &surface))
+            // No `is_declared_api` filter here, and no surface filter either:
+            // both are roots in *both* walks, so neither can reach the
+            // conditions below. `unused_definitions` needs the first because an
+            // item nothing names is reported however rooted it is; this claim is
+            // only ever made about items something does name. The surface filter
+            // was phase 10's second copy of the rule
+            // ([#25](https://github.com/rlorenzo/deadwood/issues/25)), and it is
+            // gone because the root set now answers for it.
             .filter(|def| {
                 let site = site(def);
                 used.contains(&site)
@@ -746,13 +750,15 @@ impl SymbolTable {
     ///   opt-outs ([`entry_point_attr`]). [`RootSet::WithoutTests`] drops the
     ///   test ones, and that difference is the whole of
     ///   [`SymbolTable::test_only_definitions`];
-    /// - **a library's public surface** — every `pub` definition under `pub`
-    ///   modules all the way to the crate root of a crate something outside
-    ///   the workspace can name. Consumers we cannot see call these, so a use
-    ///   written inside one is not evidence that anything is dead. That the
-    ///   surface *itself* is still reported when nothing in the workspace
-    ///   names it is condition 1 in [`SymbolTable::unused_definitions`], and
-    ///   is why rooting it costs no finding Deadwood used to make;
+    /// - **a library's public surface** — every `pub` definition in a module
+    ///   [`SymbolTable::externally_reachable_modules`] covers: `pub` modules
+    ///   all the way to the crate root of a crate something outside the
+    ///   workspace can name, and the modules a `pub use` glob exports from
+    ///   there. Consumers we cannot see call these, so a use written inside
+    ///   one is not evidence that anything is dead. That the surface *itself*
+    ///   is still reported when nothing in the workspace names it is condition
+    ///   1 in [`SymbolTable::unused_definitions`], and is why rooting it costs
+    ///   no finding Deadwood used to make;
     /// - **whatever `[public-api]` declares**, which is the same claim made
     ///   deliberately rather than inferred, and reaches items in private
     ///   modules and in binaries that the surface rule cannot.
@@ -765,9 +771,16 @@ impl SymbolTable {
     /// this check exists for. And containment is not reference: an item in a
     /// dead module is judged on the paths that name *it*, because a module
     /// being unnamed says nothing about who reaches inside it.
-    fn reachable(&self, public_api: &PublicApi, roots: RootSet) -> HashSet<usize> {
+    fn reachable(
+        &self,
+        public_api: &PublicApi,
+        surface: &HashSet<usize>,
+        roots: RootSet,
+    ) -> HashSet<usize> {
         let mut stack: Vec<usize> = self.rooted.iter().copied().collect();
-        stack.extend((0..self.defs.len()).filter(|&id| self.is_root(id, public_api, roots)));
+        stack.extend(
+            (0..self.defs.len()).filter(|&id| self.is_root(id, public_api, surface, roots)),
+        );
         let mut seen: HashSet<usize> = stack.iter().copied().collect();
         while let Some(id) = stack.pop() {
             for &next in self.edges.get(&id).into_iter().flatten() {
@@ -786,10 +799,20 @@ impl SymbolTable {
     /// it. A library's public surface stays a root in both walks, because a
     /// consumer we cannot see reaches it in a build with no tests at all —
     /// which is why nothing on a library's surface is ever test-only.
-    fn is_root(&self, id: usize, public_api: &PublicApi, roots: RootSet) -> bool {
+    ///
+    /// `surface` is [`SymbolTable::externally_reachable_modules`], computed
+    /// once by the caller and shared by both walks so the two answers cannot
+    /// differ in anything but the entry points.
+    fn is_root(
+        &self,
+        id: usize,
+        public_api: &PublicApi,
+        surface: &HashSet<usize>,
+        roots: RootSet,
+    ) -> bool {
         let def = &self.defs[id];
         roots.admits(def.entry_point)
-            || (def.is_pub && self.is_externally_reachable(def.module))
+            || (def.is_pub && surface.contains(&def.module))
             || self.is_declared_api(def, public_api)
     }
 
@@ -804,8 +827,15 @@ impl SymbolTable {
     /// even reach, because a module on the way is private, has no such
     /// excuse. Definitions are judged on their own `pub`ness, as before: an
     /// over-permissive `pub` is exactly what that check is for.
-    fn is_worth_reporting(&self, def: &Def) -> bool {
-        !def.kind.is_reexport() || !self.is_externally_reachable(def.module)
+    ///
+    /// "Reachable from the crate root" is
+    /// [`SymbolTable::externally_reachable_modules`], the same rule the root
+    /// set uses, so a `pub use` inside a module a `pub use inner::*;` exports
+    /// is doing its job for exactly the reason an item beside it is nameable.
+    /// Asking the narrower question here and the wider one there is the drift
+    /// this phase existed to remove.
+    fn is_worth_reporting(&self, def: &Def, surface: &HashSet<usize>) -> bool {
+        !def.kind.is_reexport() || !surface.contains(&def.module)
     }
 
     /// Whether the project has declared this item part of a crate's public
@@ -829,33 +859,47 @@ impl SymbolTable {
         public_api.covers(krate, &path)
     }
 
-    /// Every module whose items code outside the workspace could name.
+    /// Every module whose items code outside the workspace could name: a
+    /// library's public surface, and the only rule in this module that answers
+    /// that question.
     ///
-    /// [`SymbolTable::is_externally_reachable`] answers most of this — `pub`
+    /// [`SymbolTable::is_pub_to_the_crate_root`] answers most of it — `pub`
     /// modules all the way to a library's crate root — and misses one form:
     /// `mod inner; pub use inner::*;` puts `inner`'s items on the surface under
     /// the re-exporting module's path without `inner` being `pub` at all.
-    /// `winnow`'s `combinator::iterator` is that shape, and calling it
-    /// test-only because the crate's own tests are the only callers *here*
-    /// would be a finding about documented public API.
+    /// `winnow`'s `combinator::iterator` is that shape, and reporting it
+    /// because the crate's own tests are the only callers *here* would be a
+    /// finding about documented public API.
     ///
     /// A named `pub use` needs no such treatment: it is a definition of its
-    /// own, it is a root when its module is externally reachable, and reaching
-    /// it reaches what it names. A glob binds no name and so records no edge,
+    /// own, it is a root when its module is on the surface, and reaching it
+    /// reaches what it names. A glob binds no name and so records no edge,
     /// which is exactly the hole this fills.
     ///
     /// The closure follows two edges, and needs both. A `pub use` glob reaches
-    /// the module it names, and a visible module reaches its own `pub`
+    /// the module it names, and a surface module reaches its own `pub`
     /// children — `pub use inner::*;` re-exports `inner::nested` as well as
     /// `inner`'s functions, so `facade::nested::item` is nameable and stopping
     /// at `inner` would leave the same false positive one level down.
     ///
-    /// This is deliberately *not* folded into the root set. Rooting these items
-    /// would change what `unused_pub_item` says about the code that names them,
-    /// which is a phase of its own
-    /// ([#25](https://github.com/rlorenzo/deadwood/issues/25)); consulted here
-    /// it can only remove a finding.
-    fn externally_visible_modules(&self) -> HashSet<usize> {
+    /// Three callers, one answer, and that is the point of the shape. The root
+    /// set ([`SymbolTable::is_root`]) roots what a consumer could call, the
+    /// re-export filter ([`SymbolTable::is_worth_reporting`]) asks whether a
+    /// `pub use` is doing its job by existing, and
+    /// [`SymbolTable::test_only_definitions`] gets its answer from the root set
+    /// rather than filtering a second time. Phase 10 consulted a second copy of
+    /// this rule from the last of those alone, where it could only remove a
+    /// finding; folding it into the root set is
+    /// [#25](https://github.com/rlorenzo/deadwood/issues/25), and it is what
+    /// keeps the two from drifting.
+    ///
+    /// A glob whose target is *outside* the workspace reaches nothing here — it
+    /// is unresolvable, so it makes its module opaque instead, and opaque is
+    /// already a root in every walk. A cross-crate glob within the workspace
+    /// (`pub use other_member::*;`) adds nothing either: the only modules of
+    /// another member a path can name are `pub` from that member's own crate
+    /// root, so this rule already covers them.
+    fn externally_reachable_modules(&self) -> HashSet<usize> {
         // Only `pub` children: a private `mod` inside a glob-exported module is
         // no more nameable from outside than a private `mod` anywhere else.
         let mut pub_children: Vec<Vec<usize>> = vec![Vec::new(); self.modules.len()];
@@ -868,7 +912,7 @@ impl SymbolTable {
         }
 
         let mut seen: HashSet<usize> = (0..self.modules.len())
-            .filter(|&module| self.is_externally_reachable(module))
+            .filter(|&module| self.is_pub_to_the_crate_root(module))
             .collect();
         let mut stack: Vec<usize> = seen.iter().copied().collect();
         while let Some(module) = stack.pop() {
@@ -885,9 +929,14 @@ impl SymbolTable {
         seen
     }
 
-    /// Whether code outside the workspace could name items in this module:
-    /// it belongs to a library, and every `mod` on the way in is `pub`.
-    fn is_externally_reachable(&self, module: usize) -> bool {
+    /// Whether this module belongs to a library and every `mod` on the way in
+    /// from its crate root is `pub`.
+    ///
+    /// One of the two edges [`SymbolTable::externally_reachable_modules`] is
+    /// built from, and its only caller: the surface question is asked of that
+    /// set, never of this, because a module a `pub use` glob exports is on the
+    /// surface without any `mod` on the way to it being `pub` at all.
+    fn is_pub_to_the_crate_root(&self, module: usize) -> bool {
         let mut current = module;
         loop {
             let module = &self.modules[current];
@@ -2442,6 +2491,19 @@ mod tests {
         }
     }
 
+    /// The same crate under a name other crates can write, with its files in a
+    /// directory of their own so two crates in one table cannot collide on the
+    /// `(file, line, name)` site the report deduplicates by.
+    fn named_unit(name: &str, sources: &[(&str, &str)]) -> CrateUnit {
+        let mut unit = unit(sources);
+        unit.names = vec![name.to_string()];
+        for file in &mut unit.files {
+            let module = file.module.join("/");
+            file.path = PathBuf::from(format!("/ws/{name}/src/{module}.rs"));
+        }
+        unit
+    }
+
     /// The reportable definitions in `sources` that no resolved path reaches,
     /// by name, in report order.
     fn unused_in(sources: &[(&str, &str)]) -> Vec<String> {
@@ -3030,6 +3092,250 @@ mod tests {
             unused_in(&[("", "pub mod inner;\n"), ("inner", inner)]),
             vec!["helper"],
             "both are surface now, so `deeper` is reached however dead `helper` looks"
+        );
+    }
+
+    // -- the public surface, through a `pub use` glob -----------------------
+    //
+    // `mod inner; pub use inner::*;` puts `inner`'s items on a library's
+    // surface without `inner` being `pub`, and the root set follows it
+    // ([`SymbolTable::externally_reachable_modules`]). Every case below pins
+    // one edge of that closure, or one shape it deliberately leaves alone —
+    // and rooting *removes* findings, so the two that must still be reported
+    // matter more than the ones that go quiet.
+
+    /// The reproducer from
+    /// [#25](https://github.com/rlorenzo/deadwood/issues/25): a consumer can
+    /// write `globgap::thing`, so the fact that its only in-workspace referrer
+    /// is dead is not evidence about it. `helper`, which nothing names at all,
+    /// is right and stays.
+    #[test]
+    fn an_item_a_pub_use_glob_re_exports_is_a_surface_root() {
+        assert_eq!(
+            unused_in(&[
+                ("", "mod inner;\nmod other;\npub use inner::*;\n"),
+                ("inner", "pub fn thing() -> u32 { 1 }\n"),
+                (
+                    "other",
+                    "pub fn helper() -> u32 { crate::inner::thing() }\n"
+                ),
+            ]),
+            vec!["helper"],
+            "`thing` is nameable as `fixture::thing`; only `helper` is dead"
+        );
+    }
+
+    /// The half that must not move, and it is the difference between silencing
+    /// a handful of findings and silencing a library's whole surface. A root is
+    /// not exempt from condition 1 of [`SymbolTable::unused_definitions`]: an
+    /// item behind a glob that *nothing names* is reported exactly as before.
+    #[test]
+    fn an_item_behind_a_pub_use_glob_that_nothing_names_is_still_reported() {
+        assert_eq!(
+            unused_in(&[
+                ("", "mod inner;\npub use inner::*;\n"),
+                ("inner", "pub fn named_by_nobody() -> u32 { 1 }\n"),
+            ]),
+            vec!["named_by_nobody"],
+            "rooting an item never subtracts it from the report"
+        );
+    }
+
+    /// A glob re-exports the module's `pub` *modules* as well as its
+    /// functions, so `facade::nested::deeper` is nameable and the closure has
+    /// to descend as well as follow the glob. Stopping at `inner` would leave
+    /// the same false positive one level down.
+    #[test]
+    fn a_pub_module_under_a_glob_re_export_is_a_surface_root_too() {
+        assert_eq!(
+            unused_in(&[
+                ("", "pub mod facade;\nmod other;\n"),
+                ("facade", "mod inner;\npub use inner::*;\n"),
+                ("facade/inner", "pub mod nested;\n"),
+                ("facade/inner/nested", "pub fn deeper() -> u32 { 1 }\n"),
+                (
+                    "other",
+                    "pub fn dead() -> u32 { crate::facade::inner::nested::deeper() }\n"
+                ),
+            ]),
+            vec!["dead"],
+            "`deeper` is `facade::nested::deeper` to a consumer"
+        );
+    }
+
+    /// ...and a *private* module under the same glob is not, because
+    /// `pub use inner::*;` re-exports only what is `pub` in `inner`. Without
+    /// the `pub` half of the descent the surface would swallow every module
+    /// under a glob-exported one.
+    #[test]
+    fn a_private_module_under_a_glob_re_export_is_not_on_the_surface() {
+        assert_eq!(
+            unused_in(&[
+                ("", "mod inner;\nmod other;\npub use inner::*;\n"),
+                ("inner", "mod deep;\n"),
+                ("inner/deep", "pub fn buried() -> u32 { 1 }\n"),
+                (
+                    "other",
+                    "pub fn dead() -> u32 { crate::inner::deep::buried() }\n"
+                ),
+            ]),
+            vec!["buried", "dead"],
+            "nothing outside can name `deep`, so `buried` falls with its caller"
+        );
+    }
+
+    /// A plain `use inner::*;` re-exports nothing, so it must not root what it
+    /// imports. This is the same claim
+    /// `a_private_glob_import_does_not_make_its_source_externally_visible`
+    /// makes about the test-only kind, now about the cascade, and without the
+    /// `pub` half of the rule every module that imports a glob for its own use
+    /// would become public API.
+    #[test]
+    fn a_private_glob_import_does_not_root_its_source() {
+        assert_eq!(
+            unused_in(&[
+                ("", "mod inner;\nmod other;\nuse inner::*;\n"),
+                ("inner", "pub fn thing() -> u32 { 1 }\n"),
+                (
+                    "other",
+                    "pub fn helper() -> u32 { crate::inner::thing() }\n"
+                ),
+            ]),
+            vec!["thing", "helper"],
+            "an import is not a re-export, so the cascade still runs"
+        );
+    }
+
+    /// A binary has no public surface to put anything on, so the glob rule
+    /// stops at the crate root and the cascade is untouched. Every case above
+    /// would go quiet in a binary too if the closure seeded itself from
+    /// anything but a library's crate root.
+    #[test]
+    fn a_glob_re_export_in_a_binary_puts_nothing_on_a_surface_it_does_not_have() {
+        assert_eq!(
+            unused_in_binary(&[
+                ("", "mod inner;\nmod other;\npub use inner::*;\n"),
+                ("inner", "pub fn thing() -> u32 { 1 }\n"),
+                (
+                    "other",
+                    "pub fn helper() -> u32 { crate::inner::thing() }\n"
+                ),
+            ]),
+            vec!["thing", "helper"],
+            "nothing outside a binary can name any of it, glob or no glob"
+        );
+    }
+
+    /// A glob we cannot follow puts nothing on the surface: it is unresolvable,
+    /// so it makes its module *opaque* instead, which is already a root in
+    /// every walk. Conservatism is unchanged by this phase — an unreadable
+    /// mention never becomes evidence, and it never becomes surface either.
+    #[test]
+    fn a_glob_leading_outside_the_workspace_puts_nothing_on_the_surface() {
+        assert_eq!(
+            unused_in(&[
+                ("", "mod inner;\n"),
+                (
+                    "inner",
+                    "pub use outside::*;\npub fn buried() -> u32 { 1 }\nfn caller() -> u32 { buried() }\n"
+                ),
+            ]),
+            vec!["buried"],
+            "`inner` is opaque, not surface, so its own items are judged as before"
+        );
+    }
+
+    /// A cross-crate glob roots nothing this rule did not already cover. The
+    /// only modules of another workspace member a path can name are `pub` from
+    /// that member's own crate root, which is the surface already — so the
+    /// reading this phase takes ("a consumer *can* name them through this
+    /// crate") costs nothing and claims nothing about a crate the glob's author
+    /// does not own.
+    #[test]
+    fn a_cross_crate_glob_re_export_roots_no_module_the_surface_rule_did_not_already_cover() {
+        let dep = &[
+            ("", "pub mod api;\nmod hidden;\n"),
+            ("api", "pub fn open() -> u32 { 1 }\n"),
+            (
+                "hidden",
+                "pub fn buried() -> u32 { 1 }\nfn caller() -> u32 { buried() }\n",
+            ),
+        ];
+        let with_glob = [
+            named_unit("dep", dep),
+            named_unit("facade", &[("", "pub use dep::*;\n")]),
+        ];
+        let without = [
+            named_unit("dep", dep),
+            named_unit("facade", &[("", "pub fn nothing() -> u32 { 1 }\n")]),
+        ];
+
+        let mut table = SymbolTable::build(&with_glob);
+        let facade_root = *table
+            .by_path
+            .get(&(1, Vec::new()))
+            .expect("the facade crate has a root module");
+        assert!(
+            !table.modules[facade_root].pub_glob_sources.is_empty(),
+            "the glob has to resolve for this test to be about anything"
+        );
+        table.record_references(&with_glob);
+        let reported: Vec<String> = table
+            .unused_definitions(&PublicApi::default())
+            .into_iter()
+            .map(|def| def.name)
+            .collect();
+
+        assert_eq!(
+            reported,
+            vec!["open", "buried"],
+            "`hidden` is private to `dep`, so no glob anywhere can name into it"
+        );
+        let mut control = SymbolTable::build(&without);
+        control.record_references(&without);
+        assert_eq!(
+            reported,
+            control
+                .unused_definitions(&PublicApi::default())
+                .into_iter()
+                .map(|def| def.name)
+                .filter(|name| name != "nothing")
+                .collect::<Vec<_>>(),
+            "the glob changed no answer"
+        );
+    }
+
+    /// `is_worth_reporting` asks the same surface question about a `pub use`,
+    /// and it now gets the same answer: a re-export inside a module a glob
+    /// exports is reachable from outside, so it is doing its job by existing
+    /// and reporting it would be advice to delete public API.
+    #[test]
+    fn a_pub_use_inside_a_glob_exported_module_is_not_reported() {
+        assert!(
+            unused_in(&[
+                ("", "mod inner;\npub use inner::*;\n"),
+                ("inner", "mod deep;\npub use deep::Thing as Renamed;\n"),
+                ("inner/deep", "pub struct Thing;\n"),
+            ])
+            .is_empty(),
+            "`fixture::Renamed` is nameable, and the re-export is what names it"
+        );
+    }
+
+    /// ...and the same re-export with the glob taken away is reported, along
+    /// with the definition under it. A stale `pub use` is the cheapest thing in
+    /// this tool to delete, so this is the half of the re-export rule worth
+    /// guarding.
+    #[test]
+    fn a_pub_use_no_glob_exports_is_still_reported_with_the_definition_under_it() {
+        assert_eq!(
+            unused_in(&[
+                ("", "mod inner;\nuse inner::*;\n"),
+                ("inner", "mod deep;\npub use deep::Thing as Renamed;\n"),
+                ("inner/deep", "pub struct Thing;\n"),
+            ]),
+            vec!["Thing", "Renamed"],
+            "outside code cannot reach either, and they are two deletions"
         );
     }
 

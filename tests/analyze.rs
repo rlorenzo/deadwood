@@ -448,6 +448,66 @@ fn a_librarys_public_surface_keeps_what_it_calls_alive() {
     );
 }
 
+/// `mod inner; pub use inner::*;` puts `inner`'s items on a library's public
+/// surface, and the root set follows the glob there
+/// ([#25](https://github.com/rlorenzo/deadwood/issues/25)). Rooting *removes*
+/// findings, so the assertions that matter most here are the ones that must
+/// still be made.
+#[test]
+fn a_pub_use_glob_puts_what_it_re_exports_on_the_public_surface() {
+    let analysis = analyze_fixture("globs");
+
+    assert_eq!(
+        reported(&analysis, FindingKind::UnusedPubItem),
+        vec![
+            // Under a module no glob exports: the plain `use crate::imported::*;`
+            // in `other` is an import, and an import re-exports nothing.
+            ("facade/src/imported/buried.rs".to_string(), "Stale"),
+            ("facade/src/imported.rs".to_string(), "from_import"),
+            // `deep` is `pub(crate)`, so the descent under the glob stops
+            // above it however `pub` the item in it is.
+            ("facade/src/inner/deep.rs".to_string(), "buried"),
+            // The half rooting must not move: behind the glob, so a consumer
+            // can name it, and reported anyway because nothing does.
+            ("facade/src/inner.rs".to_string(), "never_named"),
+            ("facade/src/other.rs".to_string(), "helper"),
+            // A binary has no surface for the glob in `main.rs` to reach.
+            ("tool/src/dead_end.rs".to_string(), "caller"),
+            ("tool/src/hidden.rs".to_string(), "from_glob"),
+        ],
+    );
+
+    // The four findings this phase removed, and every one of them was a claim
+    // about something a consumer can write: `facade::thing`,
+    // `facade::nested::deeper`, and `facade::Carried` through the re-export
+    // that carries it — which is itself no longer reported, for the same
+    // reason a `pub use` in `lib.rs` never was.
+    for name in ["thing", "deeper", "Carried"] {
+        assert!(
+            !analysis
+                .findings
+                .iter()
+                .any(|f| f.name.as_deref() == Some(name)),
+            "`{name}` is nameable through the glob: {:?}",
+            analysis.findings
+        );
+    }
+
+    // `hub` re-exports `facade` across the workspace and roots nothing new:
+    // the only modules of another member a path can name are `pub` from that
+    // member's own crate root, which the surface rule already covered — so
+    // `imported` and `inner::deep` keep the findings above.
+    assert_eq!(
+        reported(&analysis, FindingKind::UnusedReexport),
+        vec![("facade/src/imported.rs".to_string(), "Stale")],
+    );
+    assert_finding_message(
+        &analysis,
+        "from_import",
+        "is referenced only from items that nothing reaches",
+    );
+}
+
 /// Paths that cross workspace members resolve by crate name, with cargo's
 /// dash-to-underscore normalization (`engine-core` is `engine_core` in a
 /// path). Items the other member never reaches are still reported.
