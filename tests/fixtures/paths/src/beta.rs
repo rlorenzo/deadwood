@@ -20,3 +20,16 @@ fn through_super_path() -> u32 {
 fn through_self_path() -> inner::Deep {
     self::inner::Deep
 }
+
+// The three functions above are where this fixture's `crate::`, `super::` and
+// `self::` paths are written, so something has to reach them for those paths
+// to count. A `#[test]` is a root under the default `cfg` matrix.
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_qualified_paths_above_are_reached() {
+        assert_eq!(super::through_crate_path(), 2);
+        assert_eq!(super::through_super_path(), 1);
+        let _ = super::through_self_path();
+    }
+}

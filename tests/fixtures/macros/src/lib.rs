@@ -22,3 +22,15 @@ fn in_macro_arguments() {
     // is inside macro input, which Deadwood does not expand.
     println!("{}", only_in_macro as usize);
 }
+
+// `go` is where the resolvable paths in this fixture are written, and a path
+// written inside something nothing reaches is not evidence of anything. A
+// `#[test]` is a root under the default `cfg` matrix, which is how library
+// code with no other caller yet stays alive.
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_driver_above_is_reached() {
+        let _ = super::go();
+    }
+}

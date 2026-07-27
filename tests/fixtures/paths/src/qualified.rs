@@ -17,8 +17,12 @@ pub mod inner {
     /// Dead for the same reason, with a namesake in scope at the impl.
     pub struct Wrapper;
 
-    /// Alive: the bare `Wrapper` inside the second impl below is *this* one,
-    /// renamed by a `use`, not the type being implemented.
+    /// The bare `Wrapper` inside the second impl below is *this* one, renamed
+    /// by a `use`, and not the type being implemented — so a path does reach
+    /// it. It is still reported, because that path is written inside an `impl`
+    /// of a type nothing reaches, and the two are different findings: mistake
+    /// the bare name for the impl's self-reference and this becomes the
+    /// stronger "nothing names it" claim instead.
     pub struct Other;
 
     impl Other {

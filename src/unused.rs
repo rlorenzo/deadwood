@@ -18,9 +18,14 @@
 //!   ([`UnusedItem::reexport`]), instead of being invisible — unless it sits
 //!   on a library's public surface, where having no workspace-internal user
 //!   is the point rather than a defect.
+//! - Being referenced is not enough: the referrer has to be alive too
+//!   ([`UnusedItem::only_from_unreached`]). An item a dead subsystem calls is
+//!   dead, and so is a pair of mutually recursive functions nothing reaches —
+//!   the case a reference count cannot express at all.
 //!
-//! Whatever cannot be resolved is still treated as a use — see
-//! [`crate::resolve`] for the exact fallbacks. Items carrying `#[no_mangle]`,
+//! Whatever cannot be resolved is still treated as a use — and, under
+//! reachability, as an unconditional one; see [`crate::resolve`] for the exact
+//! fallbacks and for what counts as a root. Items carrying `#[no_mangle]`,
 //! `#[used]`, `#[export_name]`, or an `allow`/`expect` for
 //! `dead_code`/`unused` are skipped, as is `fn main`.
 //!
@@ -39,7 +44,7 @@ use std::path::PathBuf;
 use crate::config::PublicApi;
 use crate::resolve::{CrateUnit, SymbolTable};
 
-/// A `pub` item or re-export that no path in the workspace resolves to.
+/// A `pub` item or re-export that nothing live in the workspace reaches.
 pub struct UnusedItem {
     pub name: String,
     /// Item kind for display: "fn", "struct", "re-export", ...
@@ -48,6 +53,12 @@ pub struct UnusedItem {
     pub line: usize,
     /// True for a `pub use` re-export rather than a definition.
     pub reexport: bool,
+    /// Whether paths do resolve to this item and every one of them is written
+    /// inside something nothing reaches. The two are one finding kind because
+    /// they are one claim — the item is dead — but they are not the same
+    /// evidence, and a message saying "never referenced" about an item with
+    /// callers reads as a bug in the tool.
+    pub only_from_unreached: bool,
 }
 
 /// Report `pub` items and `pub use` re-exports that nothing refers to,
@@ -82,6 +93,7 @@ pub fn find_unused_items(
             file: def.file,
             line: def.line,
             reexport: def.kind.is_reexport(),
+            only_from_unreached: def.only_from_unreached,
         })
         .collect()
 }
@@ -188,7 +200,7 @@ mod tests {
         // The old identifier census could not tell these apart and stayed
         // quiet about both.
         let unit = crate_of(&[
-            ("", "mod a;\nmod b;\nfn go() { a::helper(); }\n"),
+            ("", "mod a;\nmod b;\n#[test]\nfn go() { a::helper(); }\n"),
             ("a", "pub fn helper() {}\n"),
             ("b", "pub fn helper() {}\n"),
         ]);
@@ -226,7 +238,24 @@ mod tests {
             ("thing", "pub struct Wrapper;\n"),
             ("other", "pub fn called() {}\n"),
         ]);
-        assert_eq!(unused_names(&[unit]), vec!["Wrapper"]);
+        let mut warnings = Vec::new();
+        let found = find_unused_items(&[unit], &PublicApi::default(), &mut warnings);
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+
+        // `called` comes out with `Wrapper` because the only thing naming it
+        // is an `impl` of a type nothing reaches, which is reachability doing
+        // its job rather than the header suppressing anything.
+        let names: Vec<&str> = found.iter().map(|item| item.name.as_str()).collect();
+        assert_eq!(names, vec!["called", "Wrapper"]);
+        let called = found
+            .iter()
+            .find(|item| item.name == "called")
+            .expect("`called` is reported");
+        assert!(
+            called.only_from_unreached,
+            "the body path resolved to `called`; had the header suppressed it the finding \
+             would be the stronger `nothing names it` one"
+        );
     }
 
     #[test]
@@ -271,7 +300,7 @@ mod tests {
         let unit = crate_of(&[
             (
                 "",
-                "mod wrapper;\nfn go() -> wrapper::Used { wrapper::Used }\n",
+                "mod wrapper;\n#[test]\nfn go() -> wrapper::Used { wrapper::Used }\n",
             ),
             (
                 "wrapper",
@@ -316,7 +345,7 @@ mod tests {
         let unit = crate_of(&[
             (
                 "",
-                "mod inner;\nuse inner::original as renamed;\nfn go() { renamed(); }\n",
+                "mod inner;\nuse inner::original as renamed;\n#[test]\nfn go() { renamed(); }\n",
             ),
             ("inner", "pub fn original() {}\n"),
         ]);
