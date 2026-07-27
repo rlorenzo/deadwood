@@ -7,10 +7,12 @@
 //! - **Dead module files**: `.rs` files under a package's `src/` that are not
 //!   reachable from any target root through `mod` declarations.
 //! - **Unused public items and re-exports**: fully-`pub` items, and `pub use`
-//!   re-exports, that no path anywhere in the workspace resolves to. Usage is
+//!   re-exports, that nothing live in the workspace reaches. Usage is
 //!   established by resolving `use` declarations and qualified paths against
 //!   a per-crate symbol table (`src/resolve.rs`), with a conservative
-//!   fallback wherever resolution is not possible (`src/unused.rs`).
+//!   fallback wherever resolution is not possible (`src/unused.rs`); a use is
+//!   then attributed to the definition it is written inside, so an item only
+//!   dead code refers to is reported along with it.
 //! - **Unused dependencies**: `Cargo.toml` entries whose crate name a
 //!   package's code never mentions, in any target and through any channel we
 //!   can see (`src/deps.rs`).
@@ -64,9 +66,11 @@ use crate::config::{Config, Severity};
 pub enum FindingKind {
     /// A source file not reachable from any crate root via `mod` declarations.
     DeadFile,
-    /// A `pub` item no resolved path in the workspace refers to.
+    /// A `pub` item nothing live in the workspace refers to: either no
+    /// resolved path names it, or every path that does is written inside
+    /// something nothing reaches.
     UnusedPubItem,
-    /// A `pub use` re-export no resolved path in the workspace goes through.
+    /// A `pub use` re-export nothing live in the workspace goes through.
     UnusedReexport,
     /// A `Cargo.toml` dependency the declaring package's code never names.
     UnusedDependency,
@@ -320,16 +324,24 @@ pub fn analyze_with(
                     severity: Severity::default(),
                     file: relative_to(&item.file, &meta.workspace_root),
                     line: Some(item.line),
-                    message: if item.reexport {
-                        format!(
+                    message: match (item.reexport, item.only_from_unreached) {
+                        (true, false) => format!(
                             "`pub use` re-export of `{}` is never referenced through this module",
                             item.name
-                        )
-                    } else {
-                        format!(
+                        ),
+                        (true, true) => format!(
+                            "`pub use` re-export of `{}` is referenced only from items that \
+                             nothing reaches",
+                            item.name
+                        ),
+                        (false, false) => format!(
                             "pub {} `{}` is never referenced by any resolved path in this workspace",
                             item.kind, item.name
-                        )
+                        ),
+                        (false, true) => format!(
+                            "pub {} `{}` is referenced only from items that nothing reaches",
+                            item.kind, item.name
+                        ),
                     },
                     name: Some(item.name),
                 }),

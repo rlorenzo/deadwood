@@ -37,6 +37,24 @@ fn analyze_configured(name: &str, config: &str) -> Analysis {
     analysis
 }
 
+/// Assert the finding named `name` says `expected`.
+///
+/// The two unused-pub messages are two different claims — "nothing names it"
+/// and "only unreachable things do" — so which one is made is part of what a
+/// test can pin.
+fn assert_finding_message(analysis: &Analysis, name: &str, expected: &str) {
+    let finding = analysis
+        .findings
+        .iter()
+        .find(|f| f.name.as_deref() == Some(name))
+        .unwrap_or_else(|| panic!("`{name}` should be reported: {:?}", analysis.findings));
+    assert!(
+        finding.message.contains(expected),
+        "`{name}` should be reported as `{expected}`, got `{}`",
+        finding.message
+    );
+}
+
 /// Findings of one kind, as `(file, name)` pairs in report order.
 fn reported(analysis: &Analysis, kind: FindingKind) -> Vec<(String, &str)> {
     analysis
@@ -216,20 +234,26 @@ fn resolution_sees_through_names_impls_and_reexports() {
             // Same, one module down; the bare `Wrapper` at that impl is a
             // different type, so it is not mistaken for a self-reference.
             ("src/qualified.rs".to_string(), "Wrapper"),
+            // Reached only from inside `impl ...::inner::Wrapper`, which is an
+            // impl of the dead type above it.
+            ("src/qualified.rs".to_string(), "Other"),
+            // Reached only through the dead re-exports below.
+            ("src/surface/hidden.rs".to_string(), "Ignored"),
+            ("src/surface/hidden.rs".to_string(), "Renamed"),
         ]
     );
 
     // The bare `Wrapper` in that impl body is `inner::Other`, renamed by a
-    // `use`. Treating it as the impl's self-reference would drop the only
-    // path that reaches `Other` and report a live item as dead.
-    assert!(
-        !analysis
-            .findings
-            .iter()
-            .any(|f| f.name.as_deref() == Some("Other")),
-        "a namesake in scope is not the impl's own type: {:?}",
-        analysis.findings
+    // `use`. `Other` is reported because the impl holding that path is itself
+    // unreachable — not because the path was dropped, which is what treating
+    // the bare name as the impl's self-reference would have done. The two read
+    // apart in the message, so the assertion can tell them apart too.
+    assert_finding_message(
+        &analysis,
+        "Other",
+        "is referenced only from items that nothing reaches",
     );
+
     assert_eq!(
         reported(&analysis, FindingKind::UnusedReexport),
         vec![
@@ -238,15 +262,16 @@ fn resolution_sees_through_names_impls_and_reexports() {
         ]
     );
 
-    // The re-exported definitions themselves are *not* reported as well: a
-    // dead re-export is one finding, and removing it is what surfaces the
-    // item underneath on the next run.
+    // `Exposed` is reached *through* its re-export, so neither is reported:
+    // a `use` names its target on the bound name's behalf, and that name is
+    // live. The other two definitions come out beside their re-exports
+    // because a dead re-export and the definition under it are two deletions.
     assert!(
         !analysis
             .findings
             .iter()
-            .any(|f| f.file == Path::new("src/surface/hidden.rs")),
-        "re-export targets must not cascade into a second finding: {:?}",
+            .any(|f| f.name.as_deref() == Some("Exposed")),
+        "a live re-export keeps its target alive: {:?}",
         analysis.findings
     );
 
@@ -275,6 +300,150 @@ fn unresolvable_paths_keep_their_targets_alive() {
         reported(&analysis, FindingKind::UnusedPubItem),
         vec![("src/glob_source.rs".to_string(), "never_named")],
         "only the item behind a followed glob that nobody names is dead"
+    );
+}
+
+/// A dead subsystem comes out in one run, not one layer per run: `orphan` is
+/// named by nothing, so `helper` — which only `orphan` calls — is dead too,
+/// and so is `deeper` below that.
+#[test]
+fn a_dead_chain_is_reported_to_its_end_in_one_run() {
+    let analysis = analyze_fixture("reach");
+
+    assert_eq!(
+        reported(&analysis, FindingKind::UnusedPubItem)
+            .into_iter()
+            .filter(|(file, _)| file == "app/src/cascade.rs")
+            .map(|(_, name)| name)
+            .collect::<Vec<_>>(),
+        vec!["orphan", "helper", "deeper"]
+    );
+    // Only the head of the chain is unreferenced; the two below it are
+    // referenced by something that is itself unreachable, which is the claim
+    // reference counting could not make.
+    assert_finding_message(
+        &analysis,
+        "orphan",
+        "is never referenced by any resolved path",
+    );
+    for name in ["helper", "deeper"] {
+        assert_finding_message(
+            &analysis,
+            name,
+            "is referenced only from items that nothing reaches",
+        );
+    }
+}
+
+/// The case no number of reruns ever finds: `ping` and `pong` name each other
+/// and nothing names either, so both are referenced and both are dead. Each is
+/// reported separately, because each is separately deletable and a group
+/// finding would need a name the baseline could key on.
+#[test]
+fn a_mutually_recursive_dead_pair_is_reported_in_full() {
+    let analysis = analyze_fixture("reach");
+
+    assert_eq!(
+        reported(&analysis, FindingKind::UnusedPubItem)
+            .into_iter()
+            .filter(|(file, _)| file == "app/src/cycle.rs")
+            .collect::<Vec<_>>(),
+        vec![
+            ("app/src/cycle.rs".to_string(), "ping"),
+            ("app/src/cycle.rs".to_string(), "pong"),
+        ]
+    );
+}
+
+/// The finding reachability must not invent: `main` reaches `start`, `start`
+/// reaches `middle`, `middle` reaches `leaf`, and every one of them stays
+/// quiet.
+#[test]
+fn a_live_chain_from_an_entry_point_stays_quiet() {
+    let analysis = analyze_fixture("reach");
+
+    assert!(
+        !analysis
+            .findings
+            .iter()
+            .any(|f| f.file == Path::new("app/src/live.rs")),
+        "an entry point carries all the way down: {:?}",
+        analysis.findings
+    );
+}
+
+/// An opaque mention is a root rather than an edge. `mentioned` is named only
+/// from inside macro input, and that input sits in a function nothing reaches
+/// — the one case where reading the mention as an ordinary reference would
+/// build a false positive out of something we had already admitted we could
+/// not read.
+#[test]
+fn an_opaque_mention_keeps_its_target_alive_when_every_referrer_is_dead() {
+    let analysis = analyze_fixture("reach");
+
+    assert_eq!(
+        reported(&analysis, FindingKind::UnusedPubItem)
+            .into_iter()
+            .filter(|(file, _)| file == "app/src/opaque.rs")
+            .map(|(_, name)| name)
+            .collect::<Vec<_>>(),
+        vec!["dead_caller"],
+        "the caller is dead; what it mentions through a macro is not"
+    );
+}
+
+/// A library's public surface is a root, because consumers Deadwood cannot see
+/// call it — declared outright by `[public-api]`, or by being `pub` under
+/// `pub` modules from the crate root. Either way what the surface calls stays
+/// quiet, which is the difference between a usable report on a library and a
+/// page of noise.
+#[test]
+fn a_librarys_public_surface_keeps_what_it_calls_alive() {
+    let analysis = analyze_fixture("reach");
+
+    // `entry` is on the surface and nothing in the workspace names it, which
+    // is the advisory finding Deadwood has always made. Being a root does not
+    // exempt it — it exempts what it *calls*.
+    assert_finding_message(
+        &analysis,
+        "entry",
+        "is never referenced by any resolved path",
+    );
+    for name in ["worker", "detail"] {
+        assert!(
+            !analysis
+                .findings
+                .iter()
+                .any(|f| f.name.as_deref() == Some(name)),
+            "`{name}` is reached through the surface: {:?}",
+            analysis.findings
+        );
+    }
+
+    // `hidden` is the half the surface rule cannot infer: a private module, so
+    // `plugin` is an ordinary node and `support` falls with it.
+    assert_finding_message(
+        &analysis,
+        "plugin",
+        "is never referenced by any resolved path",
+    );
+    assert_finding_message(
+        &analysis,
+        "support",
+        "is referenced only from items that nothing reaches",
+    );
+
+    // Declaring both surfaces silences the items themselves and everything
+    // they call — including `support`, whose only claim to being reached is
+    // the `[public-api]` listing on `plugin`.
+    let declared = analyze_configured("reach", "public-api.toml");
+    assert!(
+        !declared
+            .findings
+            .iter()
+            .any(|f| f.file.starts_with("declared/")),
+        "a declared API and its callees are quiet: {:?}",
+        declared.findings
     );
 }
 
@@ -718,6 +887,10 @@ fn a_workspace_with_no_config_file_behaves_exactly_as_before() {
                 "surface/src/generated.rs:call_helper".into()
             ),
             (
+                FindingKind::UnusedPubItem,
+                "surface/src/internal/hidden.rs:Buried".into()
+            ),
+            (
                 FindingKind::UnusedReexport,
                 "surface/src/internal.rs:Buried".into()
             ),
@@ -777,6 +950,7 @@ fn ignore_patterns_suppress_findings_without_dropping_references() {
         reported(&analysis, FindingKind::UnusedPubItem),
         vec![
             ("surface/src/api.rs".to_string(), "public_entry"),
+            ("surface/src/internal/hidden.rs".to_string(), "Buried"),
             ("surface/src/internal.rs".to_string(), "internal_leftover"),
             ("surface/src/lib.rs".to_string(), "another_entry"),
         ]
@@ -850,7 +1024,7 @@ fn warn_severity_reports_everything_and_fails_nothing() {
 
     let text = deadwood::report::render_text(&analysis);
     assert!(text.contains("Dead files (warn):"), "{text}");
-    assert!(text.contains("0 deny, 10 warn"), "{text}");
+    assert!(text.contains("0 deny, 11 warn"), "{text}");
 }
 
 /// `off` is stronger than `warn`: the finding never exists, so it is absent
@@ -948,6 +1122,7 @@ fn public_api_item_globs_cover_only_what_they_name() {
             // `surface::api::*` covers `public_entry`, and nothing below.
             ("surface/src/generated.rs".to_string(), "generated_thing"),
             ("surface/src/generated.rs".to_string(), "call_helper"),
+            ("surface/src/internal/hidden.rs".to_string(), "Buried"),
             ("surface/src/internal.rs".to_string(), "internal_leftover"),
             ("surface/src/lib.rs".to_string(), "another_entry"),
         ],
@@ -1020,7 +1195,7 @@ fn exit_codes_follow_severity() {
 
     let (code, stdout) = run(None);
     assert_eq!(code, Some(1), "unconfigured findings fail the run");
-    assert!(stdout.contains("10 finding(s)"), "{stdout}");
+    assert!(stdout.contains("11 finding(s)"), "{stdout}");
 
     let (code, stdout) = run(Some("severity-warn.toml"));
     assert_eq!(code, Some(0), "advisory findings do not fail the run");

@@ -23,6 +23,9 @@
 //! 4. **Lexical scopes** — a single-segment path that a local binding,
 //!    parameter, or generic parameter covers names that binding and not an
 //!    item, so it resolves to nothing. See [Lexical scopes](#lexical-scopes).
+//! 5. **Reachability** — each use is recorded against the definition the
+//!    naming path is written *inside*, and only the definitions reachable
+//!    from a root are alive. See [Reachability](#reachability).
 //!
 //! # Conservatism
 //!
@@ -79,11 +82,51 @@
 //! as before, which is how a construct this module does not model — a pattern
 //! in macro input, say — keeps costing findings rather than precision.
 //!
+//! # Reachability
+//!
+//! "Something names this" is not the same as "something alive names this".
+//! `pub fn orphan() { helper(); }` keeps `helper` referenced for exactly as
+//! long as `orphan` exists, and a pair of mutually recursive functions nothing
+//! reaches keeps *itself* referenced forever. So every use is recorded against
+//! the definition the naming path is written inside — a [`Referrer`] — and a
+//! definition is alive only when a walk from the root set gets to it.
+//!
+//! Reporting an item that *is* resolved and referenced, on the strength of a
+//! claim about its referrer, is the one thing in this module whose failure
+//! mode is a false positive by construction rather than by bug. Two rules keep
+//! that in hand:
+//!
+//! - **A missing referrer is a root, never an absence.** Anything opaque —
+//!   macro input, attribute arguments, an unfollowable glob, an alias we
+//!   cannot pin down — is already a use of every item of that name, and it
+//!   becomes a *root* rather than an edge. A mention we admit we cannot read
+//!   must not be turned into evidence that something is dead. So is a use
+//!   written where there is no definition to attribute it to: at module level,
+//!   in an `impl` block for a type outside the workspace, inside an item
+//!   nested in a function body.
+//! - **A root is not exempt from being reported.** The report subtracts
+//!   nothing: an item nothing names is a finding exactly as it was before
+//!   reachability existed. That is what lets a library's whole public surface
+//!   be a root — consumers we cannot see call it, so a path written inside one
+//!   is no evidence — without silencing a single finding Deadwood used to
+//!   make. See [`SymbolTable::unused_definitions`] and
+//!   [`SymbolTable::reachable`].
+//!
 //! # Known limitations
 //!
 //! - Purely syntactic: method calls (`x.foo()`), trait dispatch, and
 //!   associated items are not resolved. Only free-standing item definitions
 //!   are reported, so this costs findings, never precision.
+//! - Reachability follows references, not containment: an item inside a module
+//!   nothing names is judged on the paths that name *it*. A module can be
+//!   reached without being named — through a glob, through a `pub use`, from
+//!   generated code — so treating "unnamed module" as "everything in it is
+//!   dead" would be a claim about code we have not seen.
+//! - An `impl` block hangs off its self type and, where we can resolve it, the
+//!   trait it implements. That is right for an inherent impl and for a trait
+//!   impl on a workspace type, and it is a root — costing findings, not
+//!   precision — for everything else: a foreign self type, a blanket
+//!   `impl<T>`, a tuple, a reference, an array.
 //! - Lexical scopes are tracked syntactically, so what a *macro* binds is
 //!   invisible: an identifier in macro input already counts as a use of every
 //!   item with that name, and a local a macro expands to shadows nothing.
@@ -212,6 +255,15 @@ struct Def {
     /// Whether an unreferenced occurrence is worth reporting: `pub`, not
     /// `fn main`, and not opted out with an attribute.
     reportable: bool,
+    /// Whether the definition is fully `pub`, which — inside a library, under
+    /// `pub` modules all the way to the crate root — is what makes it surface
+    /// that code we cannot see may call. [`Def::reportable`] is not a stand-in
+    /// for this: it also excludes `fn main` and the attribute escape hatches,
+    /// which are roots for entirely different reasons.
+    is_pub: bool,
+    /// Whether something outside the source calls this: an entry point, a
+    /// linker export, or an explicit opt-out. See [`entry_point_attr`].
+    entry_point: bool,
     /// For [`DefKind::Mod`]: the module this name opens into.
     child: Option<usize>,
     /// For alias kinds: the path being imported, to be resolved from
@@ -296,15 +348,57 @@ pub(crate) struct SymbolTable {
     /// allowlist. `None` for targets nothing can name (bins, tests, examples,
     /// benches), which have no external consumers to declare.
     crate_names: Vec<Option<String>>,
+    /// Definitions by the site they are written at, so the reference walk can
+    /// find the definition a path is written *inside*. Keyed by module rather
+    /// than file because one file pulled into two crates defines its items
+    /// once per crate.
+    defs_at: HashMap<(usize, usize), Vec<usize>>,
+    /// Every definition some resolved path names, whoever named it. This is
+    /// phase 1's answer and still half the report.
     used: HashSet<usize>,
+    /// Referrer to the definitions named from inside it: the edges
+    /// reachability walks.
+    edges: HashMap<usize, Vec<usize>>,
+    /// Definitions named from a context that is alive whatever else is —
+    /// see [`Referrer::Root`].
+    rooted: HashSet<usize>,
 }
 
-/// A reportable definition that no resolved path reaches.
+/// A reportable definition that nothing live reaches.
 pub(crate) struct UnusedDef {
     pub name: String,
     pub kind: DefKind,
     pub file: PathBuf,
     pub line: usize,
+    /// Whether paths do name this definition and every one of them is written
+    /// inside something nothing reaches. `false` is the older and stronger
+    /// claim: no path names it at all.
+    pub only_from_unreached: bool,
+}
+
+/// What a use is attributed to: the definition the naming path is written
+/// inside.
+///
+/// This is the whole of reachability. A use recorded against a definition
+/// holds only while that definition is itself reached, and a use recorded
+/// against [`Referrer::Root`] holds unconditionally.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Referrer {
+    /// The use is not inside any definition we can name, or came through a
+    /// channel we cannot see into. It counts on its own.
+    ///
+    /// Everything opaque lands here deliberately: an identifier in macro
+    /// input, a name in an attribute's string argument, and a name an
+    /// unfollowable glob may have brought into scope are all already read as
+    /// uses of *every* item with that name ("Conservatism", above). Reading
+    /// them as ordinary edges instead would let an opaque mention whose only
+    /// visible referrer is dead cascade into a false positive, which is the
+    /// one failure this whole check has to avoid.
+    Root,
+    /// Written inside these definitions; the use holds if any one of them is
+    /// reached. More than one only happens for an `impl` block, which hangs
+    /// off its self type and, when we can see it, the trait it implements.
+    Defs(Vec<usize>),
 }
 
 impl SymbolTable {
@@ -323,7 +417,10 @@ impl SymbolTable {
                 .iter()
                 .map(|unit| unit.names.first().cloned())
                 .collect(),
+            defs_at: HashMap::new(),
             used: HashSet::new(),
+            edges: HashMap::new(),
+            rooted: HashSet::new(),
         };
 
         for krate in 0..crates.len() {
@@ -397,16 +494,48 @@ impl SymbolTable {
                     pos: PathPos::Other,
                     value_scopes: Vec::new(),
                     type_scopes: Vec::new(),
+                    enclosing: Referrer::Root,
                 };
                 for item in &ast.items {
                     walker.visit_item(item);
                 }
             }
         }
+
+        // One edge per referrer and target, recorded once rather than checked
+        // on every insert. A function calling the same helper twenty times
+        // pushes twenty identical edges, and the walk needs one — across the
+        // crates in a local registry that is 65% of the slots. Deduping here
+        // rather than in `mark_def_used` keeps the hot path a push.
+        for targets in self.edges.values_mut() {
+            targets.sort_unstable();
+            targets.dedup();
+        }
     }
 
-    /// Reportable definitions that no resolved path reaches, ordered by
-    /// source location.
+    /// Reportable definitions nothing live reaches, ordered by source
+    /// location.
+    ///
+    /// A definition survives on two conditions, and failing either is a
+    /// finding:
+    ///
+    /// 1. **Something names it.** This is phase 1's question, unchanged, and
+    ///    it is what keeps every finding Deadwood made before reachability
+    ///    existed. A root is not exempt from it: a library's `pub fn` that
+    ///    nothing in the workspace calls is reported exactly as it always was.
+    /// 2. **Something live names it.** A path written inside a definition
+    ///    nothing reaches is not evidence of anything, so an item whose every
+    ///    referrer is itself dead is dead — which is what makes a dead
+    ///    subsystem, and a dead cycle, come out in one run instead of one
+    ///    layer per run.
+    ///
+    /// A dead cycle reports every member rather than the group once. Each is
+    /// separately deletable and separately located, and the alternative needs
+    /// a name for the group — which the baseline keys on, and which would move
+    /// whenever a member joined or left it
+    /// ([#16](https://github.com/rlorenzo/deadwood/issues/16) is already open
+    /// on that key being weaker than it looks). Falling out of the
+    /// per-definition rule is also what makes the answer identical run to run.
     ///
     /// Definitions are deduplicated by location: a file pulled into several
     /// crates (via `#[path]`) defines the same item once per crate, and it
@@ -417,6 +546,11 @@ impl SymbolTable {
     pub(crate) fn unused_definitions(&self, public_api: &PublicApi) -> Vec<UnusedDef> {
         let site = |def: &Def| (def.file.clone(), def.line, def.name.clone());
         let used: HashSet<_> = self.used.iter().map(|&id| site(&self.defs[id])).collect();
+        let reached: HashSet<_> = self
+            .reachable(public_api)
+            .iter()
+            .map(|&id| site(&self.defs[id]))
+            .collect();
 
         let mut seen = HashSet::new();
         let mut out: Vec<UnusedDef> = self
@@ -424,16 +558,74 @@ impl SymbolTable {
             .iter()
             .filter(|def| def.reportable && self.is_worth_reporting(def))
             .filter(|def| !self.is_declared_api(def, public_api))
-            .filter(|def| !used.contains(&site(def)) && seen.insert(site(def)))
+            .filter(|def| {
+                let site = site(def);
+                !(used.contains(&site) && reached.contains(&site)) && seen.insert(site)
+            })
             .map(|def| UnusedDef {
                 name: def.name.clone(),
                 kind: def.kind,
                 file: def.file.clone(),
                 line: def.line,
+                only_from_unreached: used.contains(&site(def)),
             })
             .collect();
         out.sort_by(|a, b| (&a.file, a.line, &a.name).cmp(&(&b.file, b.line, &b.name)));
         out
+    }
+
+    /// Every definition reached from a root by following the edges the
+    /// reference walk recorded.
+    ///
+    /// The root set is the whole of the risk in this check: every omission is
+    /// a live item reported dead. It is
+    ///
+    /// - **everything opaque** — [`SymbolTable::rooted`], filled by every use
+    ///   whose referrer we could not name and by every conservative
+    ///   by-name fallback (see [`Referrer::Root`]);
+    /// - **every entry point** — `fn main`, `#[test]`, `#[bench]`, the linker
+    ///   and compiler exports, and the `dead_code` opt-outs
+    ///   ([`entry_point_attr`]);
+    /// - **a library's public surface** — every `pub` definition under `pub`
+    ///   modules all the way to the crate root of a crate something outside
+    ///   the workspace can name. Consumers we cannot see call these, so a use
+    ///   written inside one is not evidence that anything is dead. That the
+    ///   surface *itself* is still reported when nothing in the workspace
+    ///   names it is condition 1 in [`SymbolTable::unused_definitions`], and
+    ///   is why rooting it costs no finding Deadwood used to make;
+    /// - **whatever `[public-api]` declares**, which is the same claim made
+    ///   deliberately rather than inferred, and reaches items in private
+    ///   modules and in binaries that the surface rule cannot.
+    ///
+    /// Two things deliberately outside it. A definition that is not `pub` is
+    /// an ordinary node: rustc's `dead_code` lint already reaches private
+    /// items this way, so rooting them would only stop the cascade at the
+    /// first private helper — while `pub fn orphan()` calling `fn glue()`
+    /// calling `pub fn helper()` is exactly the chain rustc cannot see and
+    /// this check exists for. And containment is not reference: an item in a
+    /// dead module is judged on the paths that name *it*, because a module
+    /// being unnamed says nothing about who reaches inside it.
+    fn reachable(&self, public_api: &PublicApi) -> HashSet<usize> {
+        let mut stack: Vec<usize> = self.rooted.iter().copied().collect();
+        stack.extend((0..self.defs.len()).filter(|&id| self.is_root(id, public_api)));
+        let mut seen: HashSet<usize> = stack.iter().copied().collect();
+        while let Some(id) = stack.pop() {
+            for &next in self.edges.get(&id).into_iter().flatten() {
+                if seen.insert(next) {
+                    stack.push(next);
+                }
+            }
+        }
+        seen
+    }
+
+    /// Whether this definition is alive before any edge is followed. See
+    /// [`SymbolTable::reachable`] for why each clause is here.
+    fn is_root(&self, id: usize, public_api: &PublicApi) -> bool {
+        let def = &self.defs[id];
+        def.entry_point
+            || (def.is_pub && self.is_externally_reachable(def.module))
+            || self.is_declared_api(def, public_api)
     }
 
     /// Whether an unreferenced definition of this kind, in this position, is
@@ -529,8 +721,33 @@ impl SymbolTable {
             .entry(def.name.clone())
             .or_default()
             .push(id);
+        self.defs_at
+            .entry((def.module, def.line))
+            .or_default()
+            .push(id);
         self.defs.push(def);
         id
+    }
+
+    /// The definitions named `name` written at a site, for attributing the
+    /// paths inside one to it.
+    ///
+    /// The name is not part of the key, because a key holding one would have
+    /// to be built — and so allocated — at every lookup. A module and a line
+    /// almost always hold a single definition, so filtering the handful there
+    /// is cheaper than hashing a `String` to find them.
+    ///
+    /// Several matches only happens where two `use` leaves share a line, and
+    /// taking all of them is the forgiving direction: the use holds if any one
+    /// of them is reached.
+    fn defs_at(&self, module: usize, line: usize, name: &str) -> Vec<usize> {
+        self.defs_at
+            .get(&(module, line))
+            .into_iter()
+            .flatten()
+            .copied()
+            .filter(|&id| self.defs[id].name == name)
+            .collect()
     }
 
     /// Record the module-level items of `items` into `module`.
@@ -559,6 +776,13 @@ impl SymbolTable {
                         line: m.ident.span().start().line,
                         module,
                         reportable: false,
+                        // A `mod` declaration is a leaf in the edge graph —
+                        // paths written inside the module belong to the items
+                        // holding them, not to the declaration — so whether it
+                        // is reached decides nothing, and neither flag needs
+                        // to claim anything.
+                        is_pub: false,
+                        entry_point: false,
                         child: Some(child),
                         target: None,
                     });
@@ -581,6 +805,8 @@ impl SymbolTable {
                             line: e.ident.span().start().line,
                             module,
                             reportable: false,
+                            is_pub: false,
+                            entry_point: false,
                             child: Some(root),
                             target: None,
                         });
@@ -589,16 +815,21 @@ impl SymbolTable {
                 other => {
                     if let Some((ident, kind, attrs, vis)) = describe(other) {
                         let name = ident.to_string();
-                        let reportable = matches!(vis, syn::Visibility::Public(_))
-                            && !(kind == DefKind::Fn && name == "main")
-                            && !has_skip_attr(attrs);
+                        let is_pub = matches!(vis, syn::Visibility::Public(_));
+                        // `fn main` is the binary and build-script entry point
+                        // and has been exempt from reporting since v0.1; being
+                        // a root is the same fact stated for the cascade.
+                        let is_main = kind == DefKind::Fn && name == "main";
+                        let entry_point = is_main || entry_point_attr(attrs);
                         self.add_def(Def {
                             name,
                             kind,
                             file: file.path.clone(),
                             line: ident.span().start().line,
                             module,
-                            reportable,
+                            reportable: is_pub && !is_main && !has_skip_attr(attrs),
+                            is_pub,
+                            entry_point,
                             child: None,
                             target: None,
                         });
@@ -648,6 +879,12 @@ impl SymbolTable {
                 line: leaf.line,
                 module,
                 reportable: kind == DefKind::Reexport && !has_skip_attr(&item.attrs),
+                // A `pub use` on a library's surface is reachable from
+                // outside, so what it re-exports is too; a plain `use` is
+                // reachable only from whatever goes through it, which is what
+                // lets a dead import stop keeping its target alive.
+                is_pub: kind == DefKind::Reexport,
+                entry_point: entry_point_attr(&item.attrs),
                 child: None,
                 target: Some(path),
             });
@@ -780,7 +1017,11 @@ impl SymbolTable {
     }
 
     /// Resolve `path` from `module`, collecting the definitions it names into
-    /// `reached`.
+    /// `reached`, one group per segment.
+    ///
+    /// Grouping is what lets a caller ask which definitions the *last* segment
+    /// named — the item an `impl` block belongs to — without re-walking the
+    /// path; every other caller flattens it.
     ///
     /// `in_use` marks paths written in a `use` declaration, which may be
     /// crate-root-relative in edition 2015.
@@ -790,7 +1031,7 @@ impl SymbolTable {
         path: &RefPath,
         in_use: bool,
         depth: usize,
-        reached: &mut Vec<usize>,
+        reached: &mut Vec<Vec<usize>>,
     ) -> Outcome {
         if depth > MAX_ALIAS_DEPTH {
             return Outcome::Opaque(0);
@@ -868,7 +1109,7 @@ impl SymbolTable {
 
             match step {
                 Step::Defs(defs) => {
-                    reached.extend(&defs);
+                    reached.push(defs.clone());
                     index += 1;
                     match self.step_into(&defs, depth) {
                         Target::Module(next) => current = next,
@@ -891,19 +1132,41 @@ impl SymbolTable {
 
     // -- marking -----------------------------------------------------------
 
-    /// Mark everything `path`, written in `module`, refers to.
-    fn mark_path_used(&mut self, module: usize, path: &RefPath, in_use: bool) {
+    /// Mark everything `path`, written inside `from` in `module`, refers to.
+    fn mark_path_used(&mut self, from: &Referrer, module: usize, path: &RefPath, in_use: bool) {
         let mut reached = Vec::new();
         let outcome = self.walk_path(module, path, in_use, 0, &mut reached);
-        for id in reached {
-            self.mark_def_used(id);
+        for id in reached.into_iter().flatten() {
+            self.mark_def_used(from, id);
         }
-        if let Outcome::Opaque(from) = outcome {
-            for index in from..path.segments.len() {
+        if let Outcome::Opaque(index) = outcome {
+            // The tail we could not account for names anything of that name,
+            // anywhere, and there is no telling what: an unconditional claim.
+            for index in index..path.segments.len() {
                 let name = path.segments[index].clone();
                 self.mark_name_used(&name);
             }
         }
+    }
+
+    /// Every definition the last segment of `path`, written in `module`,
+    /// names — following alias chains to what they ultimately mean.
+    ///
+    /// `None` whenever the answer is not certain, including when the path
+    /// leads outside the workspace: an `impl` block for a foreign or generic
+    /// type has no definition here to hang off, and reading that as "hangs off
+    /// nothing" would report everything it calls as dead.
+    fn owner_defs(&self, module: usize, path: &RefPath) -> Option<Vec<usize>> {
+        let mut reached = Vec::new();
+        match self.walk_path(module, path, false, 0, &mut reached) {
+            Outcome::Item | Outcome::Module(_) => {}
+            Outcome::Opaque(_) | Outcome::Foreign => return None,
+        }
+        let last = reached.last()?;
+        if last.is_empty() {
+            return None;
+        }
+        last.iter().map(|&id| self.terminal_def_of(id, 0)).collect()
     }
 
     /// Whether the bare `name`, written in `module`, means exactly the item
@@ -944,7 +1207,7 @@ impl SymbolTable {
             Outcome::Item | Outcome::Module(_) => {}
             Outcome::Opaque(_) | Outcome::Foreign => return None,
         }
-        self.terminal_def_of(*reached.last()?, depth)
+        self.terminal_def_of(*reached.last()?.last()?, depth)
     }
 
     /// The definition an alias ultimately names; the definition itself when
@@ -959,26 +1222,51 @@ impl SymbolTable {
         }
     }
 
-    fn mark_def_used(&mut self, id: usize) {
+    fn mark_def_used(&mut self, from: &Referrer, id: usize) {
+        // The edge is recorded before the visited check, because a second
+        // referrer of the same definition is new information even though the
+        // definition is not: it is another way for it to stay alive.
+        match from {
+            Referrer::Root => {
+                self.rooted.insert(id);
+            }
+            Referrer::Defs(defs) => {
+                for &referrer in defs {
+                    self.edges.entry(referrer).or_default().push(id);
+                }
+            }
+        }
         if !self.used.insert(id) {
-            // Already marked; this also stops cycles of mutual re-exports.
+            // Already expanded; this also stops cycles of mutual re-exports.
+            // The alias edge below is a property of the alias and not of who
+            // reached it, so recording it once is recording it for good.
             return;
         }
-        // Reaching an alias reaches whatever it re-exports.
+        // Reaching an alias reaches whatever it re-exports — from the alias,
+        // so that an import nothing goes through stops keeping its target
+        // alive.
         if let Some(target) = self.defs[id].target.clone() {
             let module = self.defs[id].module;
-            self.mark_path_used(module, &target, true);
+            self.mark_path_used(&Referrer::Defs(vec![id]), module, &target, true);
         }
     }
 
     /// The conservative fallback: treat every definition with this name,
-    /// anywhere in the workspace, as used.
+    /// anywhere in the workspace, as used — and as a root.
+    ///
+    /// Every caller is a channel we cannot see through: macro input, an
+    /// attribute's arguments, a name an unfollowable glob may have brought
+    /// into scope, a path through an alias we could not pin down. We do not
+    /// know which item the mention meant, so we certainly do not know which
+    /// item it was written inside; claiming an edge from the enclosing
+    /// definition would be a claim we cannot support, and the direction it
+    /// fails in is a live item reported dead.
     fn mark_name_used(&mut self, name: &str) {
         let Some(ids) = self.by_name.get(name) else {
             return;
         };
         for id in ids.clone() {
-            self.mark_def_used(id);
+            self.mark_def_used(&Referrer::Root, id);
         }
     }
 
@@ -1035,7 +1323,7 @@ impl SymbolTable {
                 .copied()
                 .collect();
             for id in items {
-                self.mark_def_used(id);
+                self.mark_def_used(&Referrer::Root, id);
             }
         }
     }
@@ -1084,6 +1372,9 @@ struct RefWalker<'a> {
     value_scopes: Vec<HashSet<String>>,
     /// Type-namespace bindings — generic parameters — innermost frame last.
     type_scopes: Vec<HashSet<String>>,
+    /// The definition the paths being walked are written inside, which is what
+    /// turns a flat set of uses into a graph.
+    enclosing: Referrer,
 }
 
 impl RefWalker<'_> {
@@ -1102,6 +1393,38 @@ impl RefWalker<'_> {
         let outer = std::mem::replace(&mut self.pos, pos);
         body(self);
         self.pos = outer;
+    }
+
+    /// Run `body` attributing the uses inside it to `from`.
+    fn within(&mut self, from: Referrer, body: impl FnOnce(&mut Self)) {
+        let outer = std::mem::replace(&mut self.enclosing, from);
+        body(self);
+        self.enclosing = outer;
+    }
+
+    /// The definition written at this site, as a referrer.
+    ///
+    /// [`Referrer::Root`] when there is none, which is how an item nested in a
+    /// function body — never collected into the symbol table, so never
+    /// reportable and never reachable — keeps what it names alive instead of
+    /// silently condemning it.
+    fn defined_at(&self, line: usize, name: &str) -> Referrer {
+        let ids = self.table.defs_at(self.module, line, name);
+        if ids.is_empty() {
+            Referrer::Root
+        } else {
+            Referrer::Defs(ids)
+        }
+    }
+
+    /// The definition an item is, as a referrer for the paths written inside
+    /// it. Items with no definition of their own — an `impl` block, a `use`, a
+    /// macro invocation at item level — are handled by the visitors below.
+    fn item_referrer(&self, item: &syn::Item) -> Referrer {
+        match describe(item) {
+            Some((ident, ..)) => self.defined_at(ident.span().start().line, &ident.to_string()),
+            None => Referrer::Root,
+        }
     }
 
     /// Bind `name` in the innermost scope. With no scope open there is
@@ -1156,8 +1479,12 @@ impl RefWalker<'_> {
                 if is_binding {
                     self.bind_value(name);
                 } else {
-                    self.table
-                        .mark_path_used(self.module, &RefPath::single(&name), false);
+                    self.table.mark_path_used(
+                        &self.enclosing,
+                        self.module,
+                        &RefPath::single(&name),
+                        false,
+                    );
                 }
                 if let Some((_, subpat)) = &node.subpat {
                     self.bind_pat_inner(subpat);
@@ -1220,7 +1547,13 @@ impl<'ast> Visit<'ast> for RefWalker<'_> {
         let values = std::mem::take(&mut self.value_scopes);
         let types = std::mem::take(&mut self.type_scopes);
         let pos = std::mem::replace(&mut self.pos, PathPos::Other);
-        self.in_scope(|walker| syn::visit::visit_item(walker, node));
+        // An item is also where a use stops being the enclosing item's and
+        // starts being this one's: `pub fn orphan() { helper(); }` names
+        // `helper` on `orphan`'s behalf and on nobody else's.
+        let from = self.item_referrer(node);
+        self.within(from, |walker| {
+            walker.in_scope(|walker| syn::visit::visit_item(walker, node));
+        });
         self.pos = pos;
         self.value_scopes = values;
         self.type_scopes = types;
@@ -1422,18 +1755,28 @@ impl<'ast> Visit<'ast> for RefWalker<'_> {
     }
 
     fn visit_item_use(&mut self, node: &'ast syn::ItemUse) {
-        // A `use` is a reference to whatever it imports — including a
-        // `pub use`, so a dead re-export is reported once, as a re-export,
-        // instead of cascading into a second finding about its target.
+        // A `use` is a reference to whatever it imports, made on behalf of the
+        // name it binds: the import is alive only where something goes through
+        // it, and only then is what it names. Attributing the reference to the
+        // file instead would make every `use` in the workspace a root, and
+        // nothing imported could ever be found dead.
+        //
+        // A glob and a `use x as _;` bind no name to hang it on — the second
+        // imports a trait's methods for a dispatch we cannot see at all — so
+        // both stay unconditional.
         let absolute = node.leading_colon.is_some();
         let mut leaves = Vec::new();
         flatten_use(&node.tree, &mut Vec::new(), &mut leaves);
         for leaf in leaves {
+            let from = match &leaf.alias {
+                Some(alias) => self.defined_at(leaf.line, alias),
+                None => Referrer::Root,
+            };
             let path = RefPath {
                 absolute,
                 segments: leaf.segments,
             };
-            self.table.mark_path_used(self.module, &path, true);
+            self.table.mark_path_used(&from, self.module, &path, true);
         }
     }
 
@@ -1445,7 +1788,8 @@ impl<'ast> Visit<'ast> for RefWalker<'_> {
         let names_self = node.leading_colon.is_none()
             && self.impl_self.as_deref() == path.segments.first().map(String::as_str);
         if !names_self && !self.shadowed(&path) {
-            self.table.mark_path_used(self.module, &path, false);
+            self.table
+                .mark_path_used(&self.enclosing, self.module, &path, false);
         }
         // Generic arguments inside the segments are paths of their own.
         syn::visit::visit_path(self, node);
@@ -1483,6 +1827,70 @@ impl<'ast> Visit<'ast> for RefWalker<'_> {
         for attr in &node.attrs {
             self.visit_attribute(attr);
         }
+        let owner = self.impl_owner(node);
+        self.within(owner, |walker| walker.visit_impl_body(node));
+    }
+}
+
+impl RefWalker<'_> {
+    /// What an `impl` block hangs off, for attributing the uses written
+    /// inside it.
+    ///
+    /// A block has no definition of its own, so it is alive exactly when its
+    /// self type is — nothing can call a method on a type nothing can name —
+    /// or, for a trait impl we can resolve, when the trait is: a trait's
+    /// methods are reached through a `dyn` or a bound with the implementing
+    /// type never spelled, and that dispatch is invisible to a syntactic tool.
+    ///
+    /// A self type we cannot pin to a definition here is
+    /// [`Referrer::Root`], and that covers most impls in most codebases:
+    /// a foreign type (`impl Trait for Vec<T>`), a generic parameter (a
+    /// blanket `impl<T> Trait for T`), a tuple, a reference, an array. Each is
+    /// a case where claiming the block is dead would be claiming something we
+    /// have no evidence for.
+    fn impl_owner(&self, node: &syn::ItemImpl) -> Referrer {
+        let syn::Type::Path(ty) = &*node.self_ty else {
+            return Referrer::Root;
+        };
+        if ty.qself.is_some() {
+            return Referrer::Root;
+        }
+        // `impl<T> Trait for T` names the block's own parameter, never a
+        // module item that happens to share its name. The parameters are read
+        // straight off the block because the scope frame that would hold them
+        // is opened by `visit_generics`, which has to run *after* this — the
+        // bounds it walks are uses attributed to the answer computed here.
+        let head = ty.path.segments.first().map(|segment| &segment.ident);
+        let names_own_param = ty.path.leading_colon.is_none()
+            && ty.path.segments.len() == 1
+            && node.generics.params.iter().any(|param| match param {
+                syn::GenericParam::Type(param) => Some(&param.ident) == head,
+                _ => false,
+            });
+        if names_own_param {
+            return Referrer::Root;
+        }
+        let Some(mut owners) = self
+            .table
+            .owner_defs(self.module, &RefPath::from_syn(&ty.path))
+        else {
+            return Referrer::Root;
+        };
+        if let Some((_, path, _)) = &node.trait_
+            && let Some(from_trait) = self.table.owner_defs(self.module, &RefPath::from_syn(path))
+        {
+            owners.extend(from_trait);
+        }
+        if owners.is_empty() {
+            Referrer::Root
+        } else {
+            Referrer::Defs(owners)
+        }
+    }
+
+    /// The rest of an `impl` block, once [`RefWalker::impl_owner`] has decided
+    /// who the paths in it belong to.
+    fn visit_impl_body(&mut self, node: &syn::ItemImpl) {
         self.visit_generics(&node.generics);
         // Implementing a trait is a use of the trait.
         if let Some((_, path, _)) = &node.trait_ {
@@ -1629,14 +2037,35 @@ fn describe(
     }
 }
 
+/// Whether `attr` is one of `names`.
+///
+/// Two forgivenesses, both of which can only keep an item alive. The *last*
+/// path segment decides, so `#[tokio::test]` and `#[async_std::test]` are the
+/// test entry points they are. And `unsafe(...)` is unwrapped: edition 2024
+/// spells the linker exports `#[unsafe(no_mangle)]`, which parses as an
+/// attribute named `unsafe` whose tokens hold the real one, so reading the
+/// outer path alone would miss every export written the way current Rust
+/// requires.
+fn attr_is(attr: &syn::Attribute, names: &[&str]) -> bool {
+    if attr.path().is_ident("unsafe")
+        && let syn::Meta::List(list) = &attr.meta
+        && let Some(TokenTree::Ident(inner)) = list.tokens.clone().into_iter().next()
+    {
+        return names.contains(&inner.to_string().as_str());
+    }
+    attr.path()
+        .segments
+        .last()
+        .is_some_and(|segment| names.contains(&segment.ident.to_string().as_str()))
+}
+
 /// Attributes that mark an item as used externally or deliberately kept.
 fn has_skip_attr(attrs: &[syn::Attribute]) -> bool {
     attrs.iter().any(|attr| {
-        let path = attr.path();
-        if path.is_ident("no_mangle") || path.is_ident("used") || path.is_ident("export_name") {
+        if attr_is(attr, &["no_mangle", "used", "export_name"]) {
             return true;
         }
-        if (path.is_ident("allow") || path.is_ident("expect"))
+        if attr_is(attr, &["allow", "expect"])
             && let syn::Meta::List(list) = &attr.meta
         {
             let lints = list.tokens.to_string();
@@ -1644,6 +2073,73 @@ fn has_skip_attr(attrs: &[syn::Attribute]) -> bool {
         }
         false
     })
+}
+
+/// Attributes that say something outside the source reaches an item, so
+/// nothing inside the workspace has to.
+///
+/// These are the entry points of [`SymbolTable::reachable`]'s root set. Each
+/// is a name a linker, the compiler, or a test harness knows and no path in
+/// the workspace ever spells; missing one would report a live item, and
+/// everything it reaches, as dead. The list is deliberately generous —
+/// including one an unresolved attribute macro merely *might* honour costs a
+/// finding, and leaving one out costs precision.
+const ENTRY_POINT_ATTRS: &[&str] = &[
+    // Harness entry points.
+    "test",
+    "bench",
+    // Named by the linker rather than by any path.
+    "no_mangle",
+    "export_name",
+    "used",
+    "link_section",
+    // Named by the compiler.
+    "main",
+    "start",
+    "panic_handler",
+    "global_allocator",
+    "alloc_error_handler",
+    "lang",
+    "proc_macro",
+    "proc_macro_derive",
+    "proc_macro_attribute",
+    // Registered before `main` by generated code we never see.
+    "ctor",
+    "dtor",
+];
+
+/// Whether an item's attributes make it a root.
+///
+/// The `dead_code` opt-outs count, because `#[allow(dead_code)]` is the author
+/// saying the item is kept on purpose and an item kept on purpose keeps what
+/// it names. Only those, though: [`has_skip_attr`] answers yes to any
+/// `allow`/`expect` whose tokens merely *contain* `unused`, which is right for
+/// suppressing a report — the author has said they do not want to hear about
+/// this item — and much too broad for rooting. `#[allow(unused_variables)]`
+/// says nothing about whether the function is reached, and rooting on it would
+/// silence a whole cascade under one of the most common attributes in Rust.
+fn entry_point_attr(attrs: &[syn::Attribute]) -> bool {
+    attrs
+        .iter()
+        .any(|attr| attr_is(attr, ENTRY_POINT_ATTRS) || allows_lint(attr, &["dead_code", "unused"]))
+}
+
+/// Whether `attr` is an `allow` or `expect` listing one of `lints`.
+///
+/// Matched on the whole lint name rather than on a substring, which is the
+/// difference between `unused` — the group that contains `dead_code` — and
+/// `unused_variables`, which is about a parameter and not about the item.
+fn allows_lint(attr: &syn::Attribute, lints: &[&str]) -> bool {
+    if !attr_is(attr, &["allow", "expect"]) {
+        return false;
+    }
+    let syn::Meta::List(list) = &attr.meta else {
+        return false;
+    };
+    list.tokens
+        .to_string()
+        .split(',')
+        .any(|lint| lints.contains(&lint.trim()))
 }
 
 #[cfg(test)]
@@ -1687,6 +2183,29 @@ mod tests {
     /// The same for a single crate-root file, which most scope cases are.
     fn unused_in_root(source: &str) -> Vec<String> {
         unused_in(&[("", source)])
+    }
+
+    /// The same for a crate nothing outside the workspace can name — a bin, a
+    /// test, a bench. No item in one is a root by being `pub`, which is what
+    /// makes a cascade visible at all: in a library the surface is rooted and
+    /// the walk stops at the first `pub fn` under `pub` modules.
+    fn unused_in_binary(sources: &[(&str, &str)]) -> Vec<String> {
+        let crates = [CrateUnit {
+            names: Vec::new(),
+            files: unit(sources).files,
+        }];
+        let mut table = SymbolTable::build(&crates);
+        table.record_references(&crates);
+        table
+            .unused_definitions(&PublicApi::default())
+            .into_iter()
+            .map(|def| def.name)
+            .collect()
+    }
+
+    /// The single-file case, which most reachability cases are.
+    fn unused_in_binary_root(source: &str) -> Vec<String> {
+        unused_in_binary(&[("", source)])
     }
 
     fn module_at(table: &SymbolTable, path: &[&str]) -> usize {
@@ -2026,6 +2545,329 @@ mod tests {
                 "pub struct Held;\npub fn entry<Held>(v: Held) -> Held { struct Inner(Held); v }\n"
             ),
             vec!["entry"]
+        );
+    }
+
+    // -- reachability ------------------------------------------------------
+
+    /// The cascade from #21: nothing names `orphan`, so nothing names
+    /// `helper` either however plainly `orphan` spells it.
+    #[test]
+    fn an_item_reached_only_from_an_unreached_item_is_reported() {
+        assert_eq!(
+            unused_in_binary_root(
+                "pub fn helper() -> u32 { 1 }\npub fn orphan() -> u32 { helper() }\n"
+            ),
+            vec!["helper", "orphan"]
+        );
+    }
+
+    /// The case a reference count can never express: both are referenced,
+    /// both are dead, and rerunning finds neither.
+    #[test]
+    fn a_mutually_recursive_pair_nothing_reaches_is_reported_in_full() {
+        assert_eq!(
+            unused_in_binary_root(
+                "pub fn ping(n: u32) -> u32 { pong(n) }\npub fn pong(n: u32) -> u32 { ping(n) }\n"
+            ),
+            vec!["ping", "pong"]
+        );
+    }
+
+    /// The finding this must not invent: an entry point carries all the way
+    /// down its chain.
+    #[test]
+    fn a_chain_from_an_entry_point_stays_quiet() {
+        assert!(
+            unused_in_binary_root(
+                "pub fn leaf() -> u32 { 1 }\npub fn middle() -> u32 { leaf() }\nfn main() { let _ = middle(); }\n"
+            )
+            .is_empty()
+        );
+    }
+
+    /// An opaque mention is a root, not an edge: it is a use of every item of
+    /// that name precisely because we cannot see which one it meant, so we
+    /// certainly cannot say whose behalf it was made on.
+    #[test]
+    fn an_opaque_mention_is_a_root_rather_than_an_edge() {
+        assert_eq!(
+            unused_in_binary_root(
+                "pub fn mentioned() -> u32 { 1 }\npub fn dead_caller() { println!(\"{}\", mentioned as usize); }\n"
+            ),
+            vec!["dead_caller"],
+            "the caller is dead; the macro input that names `mentioned` is not evidence we can read"
+        );
+    }
+
+    /// Same rule for an attribute's arguments, which a macro we do not expand
+    /// is what resolves.
+    #[test]
+    fn an_attribute_argument_is_a_root_rather_than_an_edge() {
+        assert_eq!(
+            unused_in_binary_root(
+                "pub fn target() -> u32 { 1 }\n#[some_attr(target)]\npub fn dead_holder() {}\n"
+            ),
+            vec!["dead_holder"]
+        );
+    }
+
+    /// A `use` names its target on the bound name's behalf, so an import
+    /// nothing goes through stops keeping what it imports alive. Attributing
+    /// it to the file instead would make every `use` in the workspace a root.
+    #[test]
+    fn an_import_nothing_goes_through_does_not_keep_its_target_alive() {
+        assert_eq!(
+            unused_in_binary(&[
+                (
+                    "",
+                    "mod inner;\nuse inner::thing;\npub fn dead_caller() -> u32 { thing() }\n"
+                ),
+                ("inner", "pub fn thing() -> u32 { 1 }\n"),
+            ]),
+            vec!["dead_caller", "thing"]
+        );
+    }
+
+    #[test]
+    fn an_import_something_reached_goes_through_keeps_its_target_alive() {
+        assert!(
+            unused_in(&[
+                (
+                    "",
+                    "mod inner;\nuse inner::thing;\n#[test]\nfn t() { thing(); }\n"
+                ),
+                ("inner", "pub fn thing() -> u32 { 1 }\n"),
+            ])
+            .is_empty()
+        );
+    }
+
+    /// An `impl` block has no definition of its own, so its body belongs to
+    /// the type it is written for: nothing can call a method on a type nothing
+    /// can name.
+    #[test]
+    fn an_impl_blocks_body_belongs_to_its_self_type() {
+        assert_eq!(
+            unused_in_binary_root(
+                "pub struct Owner;\npub fn helper() -> u32 { 1 }\nimpl Owner { fn go() -> u32 { helper() } }\n"
+            ),
+            vec!["Owner", "helper"]
+        );
+        assert!(
+            unused_in_binary_root(
+                "pub struct Owner;\npub fn helper() -> u32 { 1 }\nimpl Owner { fn go() -> u32 { helper() } }\nfn main() { let _ = Owner; }\n"
+            )
+            .is_empty(),
+            "reaching the type reaches its impls"
+        );
+    }
+
+    /// ...and to the trait as well, when we can resolve it. A trait's methods
+    /// are called through a `dyn` or a bound with the implementing type never
+    /// spelled, and that dispatch is invisible to a syntactic tool.
+    #[test]
+    fn an_impl_of_a_reached_trait_keeps_its_body_alive() {
+        assert_eq!(
+            unused_in_binary_root(
+                "pub trait Marker { fn m() -> u32; }\npub struct Owner;\npub fn helper() -> u32 { 1 }\n\
+                 impl Marker for Owner { fn m() -> u32 { helper() } }\nfn take<T: Marker>() {}\nfn main() { take::<u32>(); }\n"
+            ),
+            vec!["Owner"],
+            "the trait is reached, so the impl is, so its body is"
+        );
+    }
+
+    /// A self type outside the workspace leaves nothing to hang the block off,
+    /// so its body is unconditional. This covers most impls in most codebases
+    /// — foreign types, tuples, references, arrays.
+    #[test]
+    fn an_impl_for_a_type_outside_the_workspace_is_a_root() {
+        assert!(
+            unused_in_binary_root(
+                "pub fn helper() -> u32 { 1 }\nimpl Outside { fn go() -> u32 { helper() } }\n"
+            )
+            .is_empty()
+        );
+    }
+
+    /// `impl<T> Marker for T` names the block's own parameter, not a module
+    /// item that happens to share its name. Reading it as the item would hand
+    /// the whole blanket impl to a type nobody uses.
+    #[test]
+    fn a_blanket_impl_over_its_own_parameter_is_not_owned_by_a_namesake_item() {
+        assert_eq!(
+            unused_in_binary_root(
+                "pub struct T;\npub trait Marker { fn m() -> u32; }\npub fn helper() -> u32 { 1 }\n\
+                 impl<T> Marker for T { fn m() -> u32 { helper() } }\n"
+            ),
+            vec!["T"],
+            "only the struct nothing names is dead"
+        );
+    }
+
+    /// A library's public surface is a root, because consumers we cannot see
+    /// call it — but a root is not exempt from being reported. Both halves
+    /// matter: the first is what keeps a library's API from cascading into a
+    /// page of noise, the second is what keeps every finding Deadwood made
+    /// before reachability existed.
+    #[test]
+    fn a_librarys_public_surface_is_a_root_and_is_still_reported_when_nothing_names_it() {
+        assert_eq!(
+            unused_in_root("pub fn helper() -> u32 { 1 }\npub fn surface() -> u32 { helper() }\n"),
+            vec!["surface"],
+            "`helper` is reached through the surface; `surface` itself has no caller"
+        );
+    }
+
+    /// The line the surface rule draws is the one `is_externally_reachable`
+    /// already drew for re-exports: a `pub` item behind a private module is
+    /// not something outside code can name, so it is an ordinary node and the
+    /// cascade runs through it. Open the module and both are roots.
+    #[test]
+    fn a_pub_item_behind_a_private_module_is_not_a_surface_root() {
+        let inner = "pub fn helper() -> u32 { deeper() }\npub fn deeper() -> u32 { 1 }\n";
+        assert_eq!(
+            unused_in(&[("", "mod inner;\n"), ("inner", inner)]),
+            vec!["helper", "deeper"],
+            "nothing outside can name either, so `deeper` falls with `helper`"
+        );
+        assert_eq!(
+            unused_in(&[("", "pub mod inner;\n"), ("inner", inner)]),
+            vec!["helper"],
+            "both are surface now, so `deeper` is reached however dead `helper` looks"
+        );
+    }
+
+    /// Every referrer of a definition is another way for it to stay alive, so
+    /// the edge is recorded even when the definition has been seen already.
+    /// Recording only the first would make liveness depend on the order the
+    /// walk happens to reach things in.
+    #[test]
+    fn a_second_referrer_of_an_already_reached_definition_records_its_own_edge() {
+        assert_eq!(
+            unused_in_binary_root(
+                "pub fn shared() -> u32 { 1 }\npub fn dead() -> u32 { shared() }\n#[test]\nfn t() { shared(); }\n"
+            ),
+            vec!["dead"],
+            "the dead referrer comes first in the walk; the live one still counts"
+        );
+    }
+
+    /// An item nested in a function body is never collected into the symbol
+    /// table, so there is no definition to attribute its paths to. Falling
+    /// back to a root is the direction that keeps what it names alive.
+    #[test]
+    fn an_item_nested_in_a_function_body_keeps_what_it_names_alive() {
+        assert_eq!(
+            unused_in_binary_root(
+                "pub fn helper() -> u32 { 1 }\npub fn dead_outer() -> u32 { fn inner() -> u32 { helper() } inner() }\n"
+            ),
+            vec!["dead_outer"]
+        );
+    }
+
+    /// A `const` or `static` initializer is written inside its own
+    /// definition, so a table of function pointers nothing reaches takes the
+    /// functions in it down.
+    #[test]
+    fn a_const_initializer_belongs_to_the_const() {
+        assert_eq!(
+            unused_in_binary_root(
+                "pub fn handler() -> u32 { 1 }\npub const TABLE: [fn() -> u32; 1] = [handler];\n"
+            ),
+            vec!["handler", "TABLE"]
+        );
+    }
+
+    /// A field's type is written inside the struct, so reaching the struct
+    /// reaches it and not reaching the struct does not.
+    #[test]
+    fn a_field_type_belongs_to_the_struct_declaring_it() {
+        assert_eq!(
+            unused_in_binary_root("pub struct Inner;\npub struct Outer { pub field: Inner }\n"),
+            vec!["Inner", "Outer"]
+        );
+        assert!(
+            unused_in_binary_root(
+                "pub struct Inner;\npub struct Outer { pub field: Inner }\nfn main() { let _: Outer; }\n"
+            )
+            .is_empty()
+        );
+    }
+
+    /// A test harness calls a `#[test]` function that no path names, so it is
+    /// a root. The last path segment decides, which is what makes
+    /// `#[tokio::test]` and `#[async_std::test]` count too.
+    #[test]
+    fn a_test_attribute_makes_a_function_a_root() {
+        for attribute in ["#[test]", "#[tokio::test]", "#[bench]"] {
+            assert!(
+                unused_in_binary_root(&format!(
+                    "pub fn helper() -> u32 {{ 1 }}\n{attribute}\nfn t() {{ helper(); }}\n"
+                ))
+                .is_empty(),
+                "`{attribute}` is an entry point"
+            );
+        }
+    }
+
+    /// `#[allow(dead_code)]` is the author keeping an item on purpose, so it
+    /// is a root and what it names stays alive. `#[allow(unused_variables)]`
+    /// is about a parameter and says nothing about whether the item is
+    /// reached — rooting on it would silence a whole cascade under one of the
+    /// most common attributes in Rust, so the lint name has to match whole
+    /// rather than as a substring.
+    #[test]
+    fn only_the_dead_code_opt_outs_root_an_item() {
+        for attribute in [
+            "#[allow(dead_code)]",
+            "#[expect(dead_code)]",
+            "#[allow(unused)]",
+        ] {
+            assert!(
+                unused_in_binary_root(&format!(
+                    "pub fn helper() -> u32 {{ 1 }}\n{attribute}\npub fn kept() -> u32 {{ helper() }}\n"
+                ))
+                .is_empty(),
+                "`{attribute}` keeps the item, and so what it names"
+            );
+        }
+        for attribute in [
+            "#[allow(unused_variables)]",
+            "#[allow(unused_mut)]",
+            "#[expect(unused_imports)]",
+        ] {
+            // The item itself is still suppressed — that is `has_skip_attr`,
+            // unchanged, and the author has said they do not want to hear
+            // about it — but it is not reached, so what it names falls.
+            assert_eq!(
+                unused_in_binary_root(&format!(
+                    "pub fn helper() -> u32 {{ 1 }}\n{attribute}\npub fn caller(spare: u32) -> u32 {{ helper() }}\n"
+                )),
+                vec!["helper"],
+                "`{attribute}` silences its own item without rooting the cascade"
+            );
+        }
+    }
+
+    /// Edition 2024 spells the linker exports `#[unsafe(no_mangle)]`, which
+    /// parses as an attribute named `unsafe` holding the real one. Reading the
+    /// outer path alone would report every modern export, and everything it
+    /// calls, as dead.
+    #[test]
+    fn an_unsafe_wrapped_export_is_still_an_export() {
+        assert!(
+            unused_in_binary_root(
+                "pub fn helper() -> u32 { 1 }\n#[unsafe(no_mangle)]\npub extern \"C\" fn exported() -> u32 { helper() }\n"
+            )
+            .is_empty()
+        );
+        assert!(
+            unused_in_binary_root(
+                "pub fn helper() -> u32 { 1 }\n#[unsafe(export_name = \"x\")]\npub fn exported() -> u32 { helper() }\n"
+            )
+            .is_empty()
         );
     }
 

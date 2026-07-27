@@ -1,0 +1,15 @@
+# Test fixture: reachability rather than reference counting.
+#
+# Two members, because the question has two halves. `app` is a binary, where
+# nothing is externally reachable and every item is judged on whether the walk
+# from `fn main` gets to it. `declared` is a library, where the public surface
+# is a root because consumers Deadwood cannot see call it — and where
+# `[public-api]` says the same thing outright, for the items the surface rule
+# cannot reach.
+#
+# There is deliberately no `deadwood.toml` here: the unconfigured run is what
+# the reachability assertions are made against, and `public-api.toml` beside
+# this file is applied with `--config` for the declared-surface case alone.
+[workspace]
+resolver = "2"
+members = ["app", "declared"]

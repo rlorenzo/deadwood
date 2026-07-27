@@ -1,2 +1,9 @@
 /target
 **/*.rs.bk
+
+# Fixture packages are analyzed with `cargo metadata --no-deps`, never built by
+# the test suite — but they are written as code that compiles, so anyone
+# checking that with `cargo check` leaves a `target/` and a lock file behind.
+# Neither is input to anything, and both churn with the toolchain.
+tests/fixtures/**/target/
+tests/fixtures/**/Cargo.lock

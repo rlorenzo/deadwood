@@ -1,0 +1,7 @@
+# Applied with `--config` for the declared-surface case. Two listings, because
+# there are two ways to be surface and only one of them is inferable:
+# `declared::exported` is `pub` under a `pub mod` and would be a root anyway,
+# while `declared::hidden::plugin` sits behind a private module and is a root
+# only because this file says so.
+[public-api]
+items = ["declared::exported::*", "declared::hidden::plugin"]

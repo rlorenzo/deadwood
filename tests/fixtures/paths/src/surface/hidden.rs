@@ -1,6 +1,8 @@
-// Each of these is named by a `pub use` in the parent module, which counts as
-// a use of the definition: a dead re-export is reported as a re-export, not
-// twice. Removing the re-export is what surfaces the item itself.
+// Each of these is named by a `pub use` in the parent module — on the
+// re-export's behalf, so the definition is alive exactly while the re-export
+// is. `Exposed` is reached through its re-export and stays quiet; the other
+// two are reported alongside theirs, because a dead re-export and the
+// definition under it are two deletions in two places rather than one.
 pub struct Exposed;
 
 pub struct Ignored;
