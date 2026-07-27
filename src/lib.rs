@@ -81,6 +81,10 @@ pub enum FindingKind {
     /// A `#[cfg(...)]` gate that can hold in no build of its package, so the
     /// code behind it is never compiled by anyone.
     UnsatisfiableCfg,
+    /// A `pub` item the workspace reaches only through its test code: not
+    /// dead, but `pub` for nobody. Off by default — see
+    /// [`FindingKind::default_severity`].
+    TestOnlyItem,
 }
 
 impl FindingKind {
@@ -97,18 +101,45 @@ impl FindingKind {
             FindingKind::UnusedDependency => "unused_dependency",
             FindingKind::MisplacedDependency => "misplaced_dependency",
             FindingKind::UnsatisfiableCfg => "unsatisfiable_cfg",
+            FindingKind::TestOnlyItem => "test_only_item",
+        }
+    }
+
+    /// What this kind costs when no `[severity]` entry names it.
+    ///
+    /// `deny` for every kind that reports something to delete, which is what
+    /// makes an absent config file a no-op for all of them. `test_only_item` is
+    /// the one exception, and it is `off`: every `#[cfg(test)]` helper in every
+    /// codebase is a candidate for it, so a `deny` — or even a `warn`, which
+    /// prints — would fire on the first run of every project that installed
+    /// Deadwood for something else. The quiet-default tenet outranks the
+    /// uniformity of the table; a project that wants the answer asks for it
+    /// with `test_only_item = "warn"`.
+    ///
+    /// The match is exhaustive on purpose: a new kind has to state its default
+    /// rather than inherit one.
+    pub fn default_severity(self) -> Severity {
+        match self {
+            FindingKind::DeadFile
+            | FindingKind::UnusedPubItem
+            | FindingKind::UnusedReexport
+            | FindingKind::UnusedDependency
+            | FindingKind::MisplacedDependency
+            | FindingKind::UnsatisfiableCfg => Severity::Deny,
+            FindingKind::TestOnlyItem => Severity::Off,
         }
     }
 
     /// Every kind there is, so a caller that must handle all of them cannot
     /// quietly miss the next one.
-    pub const ALL: [FindingKind; 6] = [
+    pub const ALL: [FindingKind; 7] = [
         FindingKind::DeadFile,
         FindingKind::UnusedPubItem,
         FindingKind::UnusedReexport,
         FindingKind::UnusedDependency,
         FindingKind::MisplacedDependency,
         FindingKind::UnsatisfiableCfg,
+        FindingKind::TestOnlyItem,
     ];
 }
 
@@ -250,6 +281,10 @@ pub fn analyze_with(
             }
             crates.push(resolve::CrateUnit {
                 names,
+                // The same rule the dependency check places a mention by: a
+                // test, example or bench target is code `cargo test` builds and
+                // no consumer of the package runs.
+                test_code: deps::is_dev_target(target),
                 files: resolved.files,
             });
         }
@@ -312,40 +347,61 @@ pub fn analyze_with(
     // resolution hit any problem, files (and the paths inside them) may be
     // missing, and unseen paths would turn into false positives.
     if warnings.is_empty() {
-        findings.extend(
-            unused::find_unused_items(&crates, config.public_api(), &mut warnings)
-                .into_iter()
-                .map(|item| Finding {
-                    kind: if item.reexport {
-                        FindingKind::UnusedReexport
-                    } else {
-                        FindingKind::UnusedPubItem
-                    },
-                    severity: Severity::default(),
-                    file: relative_to(&item.file, &meta.workspace_root),
-                    line: Some(item.line),
-                    message: match (item.reexport, item.only_from_unreached) {
-                        (true, false) => format!(
-                            "`pub use` re-export of `{}` is never referenced through this module",
-                            item.name
-                        ),
-                        (true, true) => format!(
-                            "`pub use` re-export of `{}` is referenced only from items that \
+        let items = unused::find_items(&crates, config.public_api(), &mut warnings);
+        findings.extend(items.unused.into_iter().map(|item| Finding {
+            kind: if item.reexport {
+                FindingKind::UnusedReexport
+            } else {
+                FindingKind::UnusedPubItem
+            },
+            severity: Severity::default(),
+            file: relative_to(&item.file, &meta.workspace_root),
+            line: Some(item.line),
+            message: match (item.reexport, item.only_from_unreached) {
+                (true, false) => format!(
+                    "`pub use` re-export of `{}` is never referenced through this module",
+                    item.name
+                ),
+                (true, true) => format!(
+                    "`pub use` re-export of `{}` is referenced only from items that \
                              nothing reaches",
-                            item.name
-                        ),
-                        (false, false) => format!(
-                            "pub {} `{}` is never referenced by any resolved path in this workspace",
-                            item.kind, item.name
-                        ),
-                        (false, true) => format!(
-                            "pub {} `{}` is referenced only from items that nothing reaches",
-                            item.kind, item.name
-                        ),
-                    },
-                    name: Some(item.name),
-                }),
-        );
+                    item.name
+                ),
+                (false, false) => format!(
+                    "pub {} `{}` is never referenced by any resolved path in this workspace",
+                    item.kind, item.name
+                ),
+                (false, true) => format!(
+                    "pub {} `{}` is referenced only from items that nothing reaches",
+                    item.kind, item.name
+                ),
+            },
+            name: Some(item.name),
+        }));
+        // The narrower claim, from the same pass: reached, but only from test
+        // code. It says what to *do* rather than that the item is dead —
+        // "only tests reach this" is often exactly what the author wants, and
+        // the fix is then a visibility, not a deletion.
+        findings.extend(items.test_only.into_iter().map(|item| Finding {
+            kind: FindingKind::TestOnlyItem,
+            severity: Severity::default(),
+            file: relative_to(&item.file, &meta.workspace_root),
+            line: Some(item.line),
+            message: if item.reexport {
+                format!(
+                    "`pub use` re-export of `{}` is reached only from test code: make it \
+                     `pub(crate) use`, or move it behind `#[cfg(test)]`",
+                    item.name
+                )
+            } else {
+                format!(
+                    "pub {} `{}` is reached only from test code: make it `pub(crate)`, or move \
+                     it behind `#[cfg(test)]`",
+                    item.kind, item.name
+                )
+            },
+            name: Some(item.name),
+        }));
     } else {
         warnings.push(
             "unused-pub check skipped: module resolution was incomplete (see warnings above)"
@@ -649,6 +705,29 @@ mod tests {
         }
     }
 
+    /// Phase 3 promised that a new kind is configurable and baselineable with
+    /// no plumbing of its own, on the strength of `[severity]` defaulting
+    /// uniformly. `test_only_item` is the first kind that cannot take that
+    /// default — it would fire on every codebase with a `#[cfg(test)]` helper
+    /// — so the promise is kept by moving the default onto the kind rather
+    /// than by giving this one a switch of its own. This is what stops a later
+    /// kind picking up `off` by accident, in either direction.
+    #[test]
+    fn test_only_item_is_the_only_kind_that_does_not_default_to_deny() {
+        for kind in FindingKind::ALL {
+            let expected = match kind {
+                FindingKind::TestOnlyItem => Severity::Off,
+                _ => Severity::Deny,
+            };
+            assert_eq!(
+                kind.default_severity(),
+                expected,
+                "`{}` defaults to the wrong severity",
+                kind.label()
+            );
+        }
+    }
+
     /// [`FindingKind::ALL`] is what the report and the tests iterate to prove
     /// they cover every kind, so a kind missing from it would let them all
     /// pass while covering nothing. The match below is exhaustive, so a new
@@ -665,6 +744,7 @@ mod tests {
                 FindingKind::UnusedDependency => 3,
                 FindingKind::MisplacedDependency => 4,
                 FindingKind::UnsatisfiableCfg => 5,
+                FindingKind::TestOnlyItem => 6,
             };
             assert_eq!(FindingKind::ALL[position], kind);
             assert!(seen.insert(kind), "{} is listed twice", kind.label());

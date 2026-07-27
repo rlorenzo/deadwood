@@ -38,6 +38,7 @@ pub fn render_text(analysis: &Analysis) -> String {
         (FindingKind::UnusedReexport, "Unused re-exports"),
         (FindingKind::UnusedDependency, "Unused dependencies"),
         (FindingKind::MisplacedDependency, "Misplaced dependencies"),
+        (FindingKind::TestOnlyItem, "Test-only public items"),
     ] {
         let group: Vec<_> = analysis
             .findings

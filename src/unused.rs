@@ -61,13 +61,43 @@ pub struct UnusedItem {
     pub only_from_unreached: bool,
 }
 
+/// A `pub` item or re-export the analyzed build reaches only through its test
+/// code.
+///
+/// A separate list rather than a flag on [`UnusedItem`], because it is a
+/// separate claim: these items *are* reached, and the actionable answer is a
+/// narrower visibility rather than a deletion. The two lists cannot overlap —
+/// see [`crate::resolve::SymbolTable::test_only_definitions`].
+pub struct TestOnlyItem {
+    pub name: String,
+    /// Item kind for display: "fn", "struct", "re-export", ...
+    pub kind: &'static str,
+    pub file: PathBuf,
+    pub line: usize,
+    /// True for a `pub use` re-export rather than a definition, which changes
+    /// what the reader is being told to narrow.
+    pub reexport: bool,
+}
+
+/// What one pass of usage resolution has to say about a workspace.
+///
+/// Both answers come from one symbol table and one reference walk: building
+/// them twice would double the most expensive part of the run to ask a question
+/// the first pass already has the edges for.
+#[derive(Default)]
+pub struct Items {
+    pub unused: Vec<UnusedItem>,
+    pub test_only: Vec<TestOnlyItem>,
+}
+
 /// Report `pub` items and `pub use` re-exports that nothing refers to,
-/// excluding whatever `public_api` declares to be external surface.
-pub fn find_unused_items(
+/// excluding whatever `public_api` declares to be external surface — and,
+/// separately, the ones only test code reaches.
+pub fn find_items(
     crates: &[CrateUnit],
     public_api: &PublicApi,
     warnings: &mut Vec<String>,
-) -> Vec<UnusedItem> {
+) -> Items {
     // Resolution must see every file: a file that failed to parse hides both
     // definitions and the paths that reach them, and missing paths turn into
     // false positives.
@@ -79,23 +109,36 @@ pub fn find_unused_items(
             "unused-pub check skipped: usage resolution would be unreliable with unparsable files"
                 .to_string(),
         );
-        return Vec::new();
+        return Items::default();
     }
 
     let mut table = SymbolTable::build(crates);
     table.record_references(crates);
-    table
-        .unused_definitions(public_api)
-        .into_iter()
-        .map(|def| UnusedItem {
-            name: def.name,
-            kind: def.kind.label(),
-            file: def.file,
-            line: def.line,
-            reexport: def.kind.is_reexport(),
-            only_from_unreached: def.only_from_unreached,
-        })
-        .collect()
+    Items {
+        unused: table
+            .unused_definitions(public_api)
+            .into_iter()
+            .map(|def| UnusedItem {
+                name: def.name,
+                kind: def.kind.label(),
+                file: def.file,
+                line: def.line,
+                reexport: def.kind.is_reexport(),
+                only_from_unreached: def.only_from_unreached,
+            })
+            .collect(),
+        test_only: table
+            .test_only_definitions(public_api)
+            .into_iter()
+            .map(|def| TestOnlyItem {
+                name: def.name,
+                kind: def.kind.label(),
+                file: def.file,
+                line: def.line,
+                reexport: def.kind.is_reexport(),
+            })
+            .collect(),
+    }
 }
 
 #[cfg(test)]
@@ -108,6 +151,7 @@ mod tests {
     fn crate_of(sources: &[(&str, &str)]) -> CrateUnit {
         CrateUnit {
             names: vec!["fixture".to_string()],
+            test_code: false,
             files: sources
                 .iter()
                 .map(|(module, source)| ParsedFile {
@@ -126,9 +170,9 @@ mod tests {
 
     fn unused_names(crates: &[CrateUnit]) -> Vec<String> {
         let mut warnings = Vec::new();
-        let found = find_unused_items(crates, &PublicApi::default(), &mut warnings);
+        let found = find_items(crates, &PublicApi::default(), &mut warnings);
         assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
-        found.into_iter().map(|item| item.name).collect()
+        found.unused.into_iter().map(|item| item.name).collect()
     }
 
     #[test]
@@ -176,7 +220,7 @@ mod tests {
     fn check_is_skipped_when_a_file_cannot_be_parsed() {
         let unit = crate_of(&[("", "pub fn dead() {}\n"), ("broken", "fn oops( {\n")]);
         let mut warnings = Vec::new();
-        let unused = find_unused_items(&[unit], &PublicApi::default(), &mut warnings);
+        let unused = find_items(&[unit], &PublicApi::default(), &mut warnings).unused;
         assert!(
             unused.is_empty(),
             "incomplete resolution must not report findings"
@@ -206,9 +250,9 @@ mod tests {
         ]);
         let unused = {
             let mut warnings = Vec::new();
-            let found = find_unused_items(&[unit], &PublicApi::default(), &mut warnings);
+            let found = find_items(&[unit], &PublicApi::default(), &mut warnings);
             assert!(warnings.is_empty());
-            found
+            found.unused
         };
         assert_eq!(unused.len(), 1, "only b::helper is dead");
         assert_eq!(unused[0].name, "helper");
@@ -239,7 +283,7 @@ mod tests {
             ("other", "pub fn called() {}\n"),
         ]);
         let mut warnings = Vec::new();
-        let found = find_unused_items(&[unit], &PublicApi::default(), &mut warnings);
+        let found = find_items(&[unit], &PublicApi::default(), &mut warnings).unused;
         assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
 
         // `called` comes out with `Wrapper` because the only thing naming it
@@ -297,9 +341,10 @@ mod tests {
 
     fn unused_reexports(crates: &[CrateUnit]) -> Vec<String> {
         let mut warnings = Vec::new();
-        let found = find_unused_items(crates, &PublicApi::default(), &mut warnings);
+        let found = find_items(crates, &PublicApi::default(), &mut warnings);
         assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
         found
+            .unused
             .into_iter()
             .filter(|item| item.reexport)
             .map(|item| item.name)
@@ -343,6 +388,7 @@ mod tests {
     fn reexport_in_a_non_library_target_is_reported() {
         let binary = CrateUnit {
             names: Vec::new(),
+            test_code: false,
             files: crate_of(&[
                 ("", "pub mod facade;\nfn main() {}\n"),
                 ("facade", "mod inner;\npub use inner::Exported;\n"),
@@ -384,6 +430,7 @@ mod tests {
         let library = crate_of(&[("", "pub fn exported() {}\npub fn unexported() {}\n")]);
         let consumer = CrateUnit {
             names: Vec::new(),
+            test_code: false,
             files: vec![ParsedFile {
                 path: PathBuf::from("/ws/src/main.rs"),
                 ast: syn::parse_file("fn main() { fixture::exported(); }\n").ok(),

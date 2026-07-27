@@ -79,11 +79,19 @@ pub const FILE_NAME: &str = "deadwood.toml";
 ///
 /// The exit code follows this and nothing else: a run fails only when it
 /// produced at least one [`Severity::Deny`] finding.
+///
+/// Which of these a kind gets when the config file does not say is the kind's
+/// own answer ([`FindingKind::default_severity`]), not this type's: `deny` for
+/// every kind that reports something to delete, `off` for `test_only_item`,
+/// which would otherwise fire on every codebase with a `#[cfg(test)]` helper in
+/// it. [`Severity::default`] stays `deny` because it is the placeholder every
+/// finding is built with before the configuration is applied.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Severity {
-    /// Reported, and fails the run (exit 1). The default for every kind, which
-    /// is what makes an absent config file a no-op.
+    /// Reported, and fails the run (exit 1). What an absent `[severity]` entry
+    /// means for every kind but `test_only_item`, and so what makes an absent
+    /// config file a no-op for them.
     #[default]
     Deny,
     /// Reported, but the run still succeeds (exit 0).
@@ -185,9 +193,18 @@ impl Config {
         Ok(Config::default())
     }
 
-    /// The severity configured for `kind`, defaulting to [`Severity::Deny`].
+    /// The severity configured for `kind`, defaulting to the kind's own
+    /// ([`FindingKind::default_severity`]) — `deny` for every kind that reports
+    /// something to delete, `off` for `test_only_item`.
+    ///
+    /// The fallback lives on the kind rather than here so that a kind added
+    /// later cannot get a default by accident, and so that a `[severity]` entry
+    /// naming it works the day it exists with no plumbing of its own.
     pub fn severity(&self, kind: FindingKind) -> Severity {
-        self.severity.get(&kind).copied().unwrap_or_default()
+        self.severity
+            .get(&kind)
+            .copied()
+            .unwrap_or_else(|| kind.default_severity())
     }
 
     /// The compiled `ignore` patterns, for the detectors that need to consult
@@ -460,21 +477,41 @@ mod tests {
     #[test]
     fn the_default_config_changes_nothing() {
         let config = Config::default();
-        for kind in [
-            FindingKind::DeadFile,
-            FindingKind::UnusedPubItem,
-            FindingKind::UnusedReexport,
-            FindingKind::UnusedDependency,
-            FindingKind::UnsatisfiableCfg,
-        ] {
-            assert_eq!(config.severity(kind), Severity::Deny);
+        for kind in FindingKind::ALL {
+            assert_eq!(
+                config.severity(kind),
+                kind.default_severity(),
+                "`{}` without a `[severity]` entry must be its own default",
+                kind.label()
+            );
         }
+        // Spelled out as well as derived, so that a `default_severity` that
+        // regressed to a constant would still have to get past this.
+        assert_eq!(config.severity(FindingKind::DeadFile), Severity::Deny);
+        assert_eq!(config.severity(FindingKind::TestOnlyItem), Severity::Off);
         assert!(!config.ignore().matches(Path::new("/ws/src/lib.rs")));
         assert!(!config.public_api().covers(Some("anything"), "any::path"));
         assert!(!config.dependencies().allows("pkg", "entry"));
         // The `cfg` matrix has the same property, and it is the one setting
         // where "unset" is not "empty": every build is possible until narrowed.
         assert_eq!(config.cfg(), &crate::cfg::Matrix::default());
+    }
+
+    /// A kind that defaults to `off` must still be configurable *up*, or it
+    /// ships unreachable: `[severity]` is the only way to ask for the
+    /// test-only answer at all.
+    #[test]
+    fn a_kind_that_defaults_off_is_still_configurable() {
+        let asked_for = load("[severity]\ntest_only_item = \"warn\"\n").unwrap();
+        assert_eq!(
+            asked_for.severity(FindingKind::TestOnlyItem),
+            Severity::Warn
+        );
+        assert_eq!(
+            asked_for.severity(FindingKind::DeadFile),
+            Severity::Deny,
+            "naming one kind must not disturb the others"
+        );
     }
 
     /// `None` on a `[cfg]` axis is "not narrowed", which is not the same as an

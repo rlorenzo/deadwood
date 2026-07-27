@@ -161,7 +161,73 @@ pub(crate) struct CrateUnit {
     /// Names other crates can use to refer to this one in paths. Empty for
     /// targets nothing can name (bins, tests, examples, benches).
     pub names: Vec<String>,
+    /// Whether the whole target is test code: a `test`, `bench` or `example`
+    /// target is compiled by `cargo test`/`cargo bench` and by nothing a
+    /// consumer runs, so *everything* in one is test code — not only its
+    /// `#[test]` functions. See [`EntryPoint`].
+    pub test_code: bool,
     pub files: Vec<ParsedFile>,
+}
+
+/// Whether something outside the workspace's own paths reaches a definition,
+/// and — the part that needs two answers — whether a build with no tests in it
+/// does.
+///
+/// Splitting this out of a single `bool` is what lets the reachability walk run
+/// twice over one edge set ([`RootSet`]): once from every entry point, which is
+/// the build Deadwood analyzes, and once from the entry points that survive
+/// `[cfg] test = false`, which is the build a consumer of the crate gets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EntryPoint {
+    /// Not an entry point: the definition lives or dies by the walk.
+    None,
+    /// Only a build that compiles the tests reaches it — `#[test]` and
+    /// `#[bench]` functions, plus every entry point written in code that is
+    /// test code by where it sits: a `test`, `bench` or `example` target, or a
+    /// file only `#[cfg(test)] mod` declarations reach
+    /// ([`ParsedFile::test_only`]).
+    Test,
+    /// Every build reaches it: `fn main`, the linker and compiler exports, and
+    /// the `dead_code` opt-outs.
+    NonTest,
+}
+
+impl EntryPoint {
+    /// An entry point written in code that is, or is not, test code.
+    fn of_context(test_context: bool) -> EntryPoint {
+        if test_context {
+            EntryPoint::Test
+        } else {
+            EntryPoint::NonTest
+        }
+    }
+}
+
+/// Which entry points seed a reachability walk.
+///
+/// One walk with a parameter rather than two walks written out: the difference
+/// between the two answers *is* the test-only claim, so they must not be able
+/// to drift apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RootSet {
+    /// Every entry point, which is the build being analyzed and the answer
+    /// every finding before this one was made against.
+    Full,
+    /// The same set with the test entry points removed. Everything else is
+    /// unchanged — a library's public surface, `[public-api]`, and everything
+    /// opaque are roots here too.
+    WithoutTests,
+}
+
+impl RootSet {
+    /// Whether an entry point of this kind seeds this walk.
+    fn admits(self, entry: EntryPoint) -> bool {
+        match entry {
+            EntryPoint::None => false,
+            EntryPoint::NonTest => true,
+            EntryPoint::Test => self == RootSet::Full,
+        }
+    }
 }
 
 /// What a definition is: decides how a path may continue through it and how
@@ -261,9 +327,10 @@ struct Def {
     /// for this: it also excludes `fn main` and the attribute escape hatches,
     /// which are roots for entirely different reasons.
     is_pub: bool,
-    /// Whether something outside the source calls this: an entry point, a
-    /// linker export, or an explicit opt-out. See [`entry_point_attr`].
-    entry_point: bool,
+    /// Whether something outside the source calls this — an entry point, a
+    /// linker export, or an explicit opt-out — and whether a build without
+    /// tests is one of the things that does. See [`entry_point_attr`].
+    entry_point: EntryPoint,
     /// For [`DefKind::Mod`]: the module this name opens into.
     child: Option<usize>,
     /// For alias kinds: the path being imported, to be resolved from
@@ -278,10 +345,16 @@ struct Module {
     /// Name to definitions. Rust's namespaces are merged here: a `mod` and a
     /// `fn` sharing a name both resolve, which can only hide findings.
     items: HashMap<String, Vec<usize>>,
-    /// `use prefix::*` prefixes written in this module, before resolution.
-    globs: Vec<RefPath>,
+    /// `use prefix::*` prefixes written in this module, before resolution,
+    /// each with whether the glob is a `pub use` — which re-exports the names
+    /// it pulls in rather than merely importing them.
+    globs: Vec<(RefPath, bool)>,
     /// Modules whose names this module pulls in through a resolved glob.
     glob_sources: Vec<usize>,
+    /// The subset of those a `pub use` glob pulls in, so their items can be
+    /// named from here by anyone who can name this module. See
+    /// [`SymbolTable::externally_visible_modules`].
+    pub_glob_sources: Vec<usize>,
     /// A glob import that could not be followed into the workspace, so a name
     /// missing from `items` might still refer to a workspace item.
     opaque: bool,
@@ -374,6 +447,18 @@ pub(crate) struct UnusedDef {
     /// inside something nothing reaches. `false` is the older and stronger
     /// claim: no path names it at all.
     pub only_from_unreached: bool,
+}
+
+/// A reportable definition that only test code reaches.
+///
+/// It carries no `only_from_unreached` twin: this claim is made *because* the
+/// item is referenced and reached, so there is only one kind of evidence for
+/// it. See [`SymbolTable::test_only_definitions`].
+pub(crate) struct TestOnlyDef {
+    pub name: String,
+    pub kind: DefKind,
+    pub file: PathBuf,
+    pub line: usize,
 }
 
 /// What a use is attributed to: the definition the naming path is written
@@ -469,7 +554,11 @@ impl SymbolTable {
             for file in &unit.files {
                 let Some(ast) = &file.ast else { continue };
                 let module = table.module_for(krate, &file.module);
-                table.collect_items(&ast.items, module, file, true);
+                // Where the file sits decides what an entry point in it means:
+                // a `fn main` in an example, or in a file only `#[cfg(test)]`
+                // declarations reach, is only ever run by a test build.
+                let test_context = unit.test_code || file.test_only;
+                table.collect_items(&ast.items, module, file, true, test_context);
             }
         }
 
@@ -547,7 +636,7 @@ impl SymbolTable {
         let site = |def: &Def| (def.file.clone(), def.line, def.name.clone());
         let used: HashSet<_> = self.used.iter().map(|&id| site(&self.defs[id])).collect();
         let reached: HashSet<_> = self
-            .reachable(public_api)
+            .reachable(public_api, RootSet::Full)
             .iter()
             .map(|&id| site(&self.defs[id]))
             .collect();
@@ -574,6 +663,75 @@ impl SymbolTable {
         out
     }
 
+    /// Reportable definitions the analyzed build reaches and a build without
+    /// its tests does not.
+    ///
+    /// The claim is the difference between two walks over one edge set, and it
+    /// is narrower than "this is dead" on purpose. Three conditions, and the
+    /// first two are exactly what makes an item *quiet* in
+    /// [`SymbolTable::unused_definitions`]:
+    ///
+    /// 1. **Something names it**, and 2. **something live names it** — so a
+    ///    test-only finding and an unused-pub finding can never be made about
+    ///    the same definition. An item nothing names is dead, which is the
+    ///    stronger claim and the one already reported; saying "only tests reach
+    ///    this" about it as well would be two findings for one deletion.
+    /// 3. **Nothing reaches it once the test entry points are gone**
+    ///    ([`RootSet::WithoutTests`]).
+    ///
+    /// What this cannot say is as important as what it can. Anything a
+    /// consumer could name is out: a library's public surface is a root in
+    /// *both* walks, so a `pub fn` on it is never test-only however plainly
+    /// only the tests call it here — we cannot see the consumers, and claiming
+    /// otherwise is the false positive this whole check is shaped to avoid. So
+    /// is anything a `pub use` glob re-exports, which the root set does not
+    /// cover ([`SymbolTable::externally_visible_modules`]). And everything
+    /// opaque is a root in both walks too ([`Referrer::Root`]): one mention in
+    /// macro input — an `assert_eq!` naming the item is the common one — keeps
+    /// an item out of this kind entirely. Every one of those costs findings,
+    /// and none of them invents one.
+    pub(crate) fn test_only_definitions(&self, public_api: &PublicApi) -> Vec<TestOnlyDef> {
+        let site = |def: &Def| (def.file.clone(), def.line, def.name.clone());
+        let visible = self.externally_visible_modules();
+        let used: HashSet<_> = self.used.iter().map(|&id| site(&self.defs[id])).collect();
+        let sites = |roots| -> HashSet<_> {
+            self.reachable(public_api, roots)
+                .iter()
+                .map(|&id| site(&self.defs[id]))
+                .collect()
+        };
+        let reached = sites(RootSet::Full);
+        let without_tests = sites(RootSet::WithoutTests);
+
+        let mut seen = HashSet::new();
+        let mut out: Vec<TestOnlyDef> = self
+            .defs
+            .iter()
+            .filter(|def| def.reportable && self.is_worth_reporting(def))
+            // No `is_declared_api` filter beside this one: a declared item is
+            // a root in *both* walks, so it cannot reach the conditions below.
+            // `unused_definitions` needs the filter because an item nothing
+            // names is reported however rooted it is; this claim is only ever
+            // made about items something does name.
+            .filter(|def| !visible.contains(&def.module))
+            .filter(|def| {
+                let site = site(def);
+                used.contains(&site)
+                    && reached.contains(&site)
+                    && !without_tests.contains(&site)
+                    && seen.insert(site)
+            })
+            .map(|def| TestOnlyDef {
+                name: def.name.clone(),
+                kind: def.kind,
+                file: def.file.clone(),
+                line: def.line,
+            })
+            .collect();
+        out.sort_by(|a, b| (&a.file, a.line, &a.name).cmp(&(&b.file, b.line, &b.name)));
+        out
+    }
+
     /// Every definition reached from a root by following the edges the
     /// reference walk recorded.
     ///
@@ -583,9 +741,11 @@ impl SymbolTable {
     /// - **everything opaque** — [`SymbolTable::rooted`], filled by every use
     ///   whose referrer we could not name and by every conservative
     ///   by-name fallback (see [`Referrer::Root`]);
-    /// - **every entry point** — `fn main`, `#[test]`, `#[bench]`, the linker
-    ///   and compiler exports, and the `dead_code` opt-outs
-    ///   ([`entry_point_attr`]);
+    /// - **every entry point `roots` admits** — `fn main`, `#[test]`,
+    ///   `#[bench]`, the linker and compiler exports, and the `dead_code`
+    ///   opt-outs ([`entry_point_attr`]). [`RootSet::WithoutTests`] drops the
+    ///   test ones, and that difference is the whole of
+    ///   [`SymbolTable::test_only_definitions`];
     /// - **a library's public surface** — every `pub` definition under `pub`
     ///   modules all the way to the crate root of a crate something outside
     ///   the workspace can name. Consumers we cannot see call these, so a use
@@ -605,9 +765,9 @@ impl SymbolTable {
     /// this check exists for. And containment is not reference: an item in a
     /// dead module is judged on the paths that name *it*, because a module
     /// being unnamed says nothing about who reaches inside it.
-    fn reachable(&self, public_api: &PublicApi) -> HashSet<usize> {
+    fn reachable(&self, public_api: &PublicApi, roots: RootSet) -> HashSet<usize> {
         let mut stack: Vec<usize> = self.rooted.iter().copied().collect();
-        stack.extend((0..self.defs.len()).filter(|&id| self.is_root(id, public_api)));
+        stack.extend((0..self.defs.len()).filter(|&id| self.is_root(id, public_api, roots)));
         let mut seen: HashSet<usize> = stack.iter().copied().collect();
         while let Some(id) = stack.pop() {
             for &next in self.edges.get(&id).into_iter().flatten() {
@@ -621,9 +781,14 @@ impl SymbolTable {
 
     /// Whether this definition is alive before any edge is followed. See
     /// [`SymbolTable::reachable`] for why each clause is here.
-    fn is_root(&self, id: usize, public_api: &PublicApi) -> bool {
+    ///
+    /// `roots` changes exactly one clause: whether the test entry points are in
+    /// it. A library's public surface stays a root in both walks, because a
+    /// consumer we cannot see reaches it in a build with no tests at all —
+    /// which is why nothing on a library's surface is ever test-only.
+    fn is_root(&self, id: usize, public_api: &PublicApi, roots: RootSet) -> bool {
         let def = &self.defs[id];
-        def.entry_point
+        roots.admits(def.entry_point)
             || (def.is_pub && self.is_externally_reachable(def.module))
             || self.is_declared_api(def, public_api)
     }
@@ -664,6 +829,41 @@ impl SymbolTable {
         public_api.covers(krate, &path)
     }
 
+    /// Every module whose items code outside the workspace could name.
+    ///
+    /// [`SymbolTable::is_externally_reachable`] answers most of this — `pub`
+    /// modules all the way to a library's crate root — and misses one form:
+    /// `mod inner; pub use inner::*;` puts `inner`'s items on the surface under
+    /// the re-exporting module's path without `inner` being `pub` at all.
+    /// `winnow`'s `combinator::iterator` is that shape, and calling it
+    /// test-only because the crate's own tests are the only callers *here*
+    /// would be a finding about documented public API.
+    ///
+    /// A named `pub use` needs no such treatment: it is a definition of its
+    /// own, it is a root when its module is externally reachable, and reaching
+    /// it reaches what it names. A glob binds no name and so records no edge,
+    /// which is exactly the hole this fills.
+    ///
+    /// This is deliberately *not* folded into the root set. Rooting these items
+    /// would change what `unused_pub_item` says about the code that names them,
+    /// which is a phase of its own
+    /// ([#25](https://github.com/rlorenzo/deadwood/issues/25)); consulted here
+    /// it can only remove a finding.
+    fn externally_visible_modules(&self) -> HashSet<usize> {
+        let mut seen: HashSet<usize> = (0..self.modules.len())
+            .filter(|&module| self.is_externally_reachable(module))
+            .collect();
+        let mut stack: Vec<usize> = seen.iter().copied().collect();
+        while let Some(module) = stack.pop() {
+            for &source in &self.modules[module].pub_glob_sources {
+                if seen.insert(source) {
+                    stack.push(source);
+                }
+            }
+        }
+        seen
+    }
+
     /// Whether code outside the workspace could name items in this module:
     /// it belongs to a library, and every `mod` on the way in is `pub`.
     fn is_externally_reachable(&self, module: usize) -> bool {
@@ -691,6 +891,7 @@ impl SymbolTable {
             items: HashMap::new(),
             globs: Vec::new(),
             glob_sources: Vec::new(),
+            pub_glob_sources: Vec::new(),
             opaque: false,
             declared_pub: parent.is_none(),
         });
@@ -753,13 +954,16 @@ impl SymbolTable {
     /// Record the module-level items of `items` into `module`.
     ///
     /// `top_level` is false inside a function body, where a `pub use` binds a
-    /// name locally but re-exports nothing.
+    /// name locally but re-exports nothing. `test_context` is true where the
+    /// code itself is test code, which is what an entry point written here
+    /// means ([`EntryPoint`]).
     fn collect_items(
         &mut self,
         items: &[syn::Item],
         module: usize,
         file: &ParsedFile,
         top_level: bool,
+        test_context: bool,
     ) {
         for item in items {
             match item {
@@ -782,15 +986,15 @@ impl SymbolTable {
                         // is reached decides nothing, and neither flag needs
                         // to claim anything.
                         is_pub: false,
-                        entry_point: false,
+                        entry_point: EntryPoint::None,
                         child: Some(child),
                         target: None,
                     });
                     if let Some((_, inner)) = &m.content {
-                        self.collect_items(inner, child, file, true);
+                        self.collect_items(inner, child, file, true, test_context);
                     }
                 }
-                syn::Item::Use(u) => self.add_use(u, module, file, top_level),
+                syn::Item::Use(u) => self.add_use(u, module, file, top_level, test_context),
                 syn::Item::ExternCrate(e) => {
                     // `extern crate foo as bar;` binds `bar` to a crate root.
                     let name = e
@@ -806,7 +1010,7 @@ impl SymbolTable {
                             module,
                             reportable: false,
                             is_pub: false,
-                            entry_point: false,
+                            entry_point: EntryPoint::None,
                             child: Some(root),
                             target: None,
                         });
@@ -820,7 +1024,11 @@ impl SymbolTable {
                         // and has been exempt from reporting since v0.1; being
                         // a root is the same fact stated for the cascade.
                         let is_main = kind == DefKind::Fn && name == "main";
-                        let entry_point = is_main || entry_point_attr(attrs);
+                        let entry_point = if is_main {
+                            EntryPoint::of_context(test_context)
+                        } else {
+                            entry_point_attr(attrs, test_context)
+                        };
                         self.add_def(Def {
                             name,
                             kind,
@@ -842,6 +1050,7 @@ impl SymbolTable {
                         table: self,
                         module,
                         file,
+                        test_context,
                     };
                     nested.visit_item(other);
                 }
@@ -849,7 +1058,14 @@ impl SymbolTable {
         }
     }
 
-    fn add_use(&mut self, item: &syn::ItemUse, module: usize, file: &ParsedFile, top_level: bool) {
+    fn add_use(
+        &mut self,
+        item: &syn::ItemUse,
+        module: usize,
+        file: &ParsedFile,
+        top_level: bool,
+        test_context: bool,
+    ) {
         let is_pub = matches!(item.vis, syn::Visibility::Public(_));
         let absolute = item.leading_colon.is_some();
         let mut leaves = Vec::new();
@@ -861,7 +1077,9 @@ impl SymbolTable {
                 segments: leaf.segments,
             };
             if leaf.glob {
-                self.modules[module].globs.push(path);
+                // A `pub use` inside a function body re-exports nothing, which
+                // is the same reason `top_level` decides the kind below.
+                self.modules[module].globs.push((path, is_pub && top_level));
                 continue;
             }
             // `use x as _;` imports a trait's methods without binding a name;
@@ -884,7 +1102,7 @@ impl SymbolTable {
                 // reachable only from whatever goes through it, which is what
                 // lets a dead import stop keeping its target alive.
                 is_pub: kind == DefKind::Reexport,
-                entry_point: entry_point_attr(&item.attrs),
+                entry_point: entry_point_attr(&item.attrs, test_context),
                 child: None,
                 target: Some(path),
             });
@@ -897,24 +1115,34 @@ impl SymbolTable {
     /// this repeats until nothing new resolves; whatever is left over refers
     /// outside the workspace and makes its module opaque.
     fn resolve_globs(&mut self) {
-        let mut pending: Vec<(usize, RefPath)> = self
+        let mut pending: Vec<(usize, RefPath, bool)> = self
             .modules
             .iter()
             .enumerate()
-            .flat_map(|(id, m)| m.globs.iter().cloned().map(move |glob| (id, glob)))
+            .flat_map(|(id, m)| {
+                m.globs
+                    .iter()
+                    .cloned()
+                    .map(move |(glob, exported)| (id, glob, exported))
+            })
             .collect();
 
         loop {
             let before = pending.len();
             let mut still_pending = Vec::new();
-            for (module, glob) in pending {
+            for (module, glob, exported) in pending {
                 match self.walk_path(module, &glob, true, 0, &mut Vec::new()) {
-                    Outcome::Module(target) => self.modules[module].glob_sources.push(target),
-                    _ => still_pending.push((module, glob)),
+                    Outcome::Module(target) => {
+                        self.modules[module].glob_sources.push(target);
+                        if exported {
+                            self.modules[module].pub_glob_sources.push(target);
+                        }
+                    }
+                    _ => still_pending.push((module, glob, exported)),
                 }
             }
             if still_pending.len() == before {
-                for (module, _) in still_pending {
+                for (module, ..) in still_pending {
                     self.modules[module].opaque = true;
                 }
                 return;
@@ -1941,11 +2169,13 @@ struct NestedUses<'a> {
     table: &'a mut SymbolTable,
     module: usize,
     file: &'a ParsedFile,
+    test_context: bool,
 }
 
 impl<'ast> Visit<'ast> for NestedUses<'_> {
     fn visit_item_use(&mut self, node: &'ast syn::ItemUse) {
-        self.table.add_use(node, self.module, self.file, false);
+        self.table
+            .add_use(node, self.module, self.file, false, self.test_context);
     }
 }
 
@@ -2084,10 +2314,16 @@ fn has_skip_attr(attrs: &[syn::Attribute]) -> bool {
 /// everything it reaches, as dead. The list is deliberately generous —
 /// including one an unresolved attribute macro merely *might* honour costs a
 /// finding, and leaving one out costs precision.
+/// The entry points a test harness calls, and nothing else does.
+///
+/// These are the whole of the difference between the two root sets: a build
+/// with `[cfg] test = false` compiles neither, so anything only these reach is
+/// reached only by test code. `#[bench]` is here with `#[test]` because
+/// `cargo bench` is no more a consumer of the crate than `cargo test` is.
+const TEST_ENTRY_POINT_ATTRS: &[&str] = &["test", "bench"];
+
+/// Entry points every build has, whatever it does with the tests.
 const ENTRY_POINT_ATTRS: &[&str] = &[
-    // Harness entry points.
-    "test",
-    "bench",
     // Named by the linker rather than by any path.
     "no_mangle",
     "export_name",
@@ -2108,7 +2344,8 @@ const ENTRY_POINT_ATTRS: &[&str] = &[
     "dtor",
 ];
 
-/// Whether an item's attributes make it a root.
+/// Whether an item's attributes make it a root, and whether a build without
+/// tests is one of the things that reaches it.
 ///
 /// The `dead_code` opt-outs count, because `#[allow(dead_code)]` is the author
 /// saying the item is kept on purpose and an item kept on purpose keeps what
@@ -2118,10 +2355,26 @@ const ENTRY_POINT_ATTRS: &[&str] = &[
 /// this item — and much too broad for rooting. `#[allow(unused_variables)]`
 /// says nothing about whether the function is reached, and rooting on it would
 /// silence a whole cascade under one of the most common attributes in Rust.
-fn entry_point_attr(attrs: &[syn::Attribute]) -> bool {
-    attrs
+///
+/// `test_context` is what the *target* and the file say, and it only ever
+/// moves an entry point from [`EntryPoint::NonTest`] to [`EntryPoint::Test`]:
+/// a `#[no_mangle]` in an example is exported into a binary `cargo test`
+/// builds and nothing else runs. A `#[test]` is a test entry point wherever it
+/// is written, which is the other half of that agreement.
+fn entry_point_attr(attrs: &[syn::Attribute], test_context: bool) -> EntryPoint {
+    if attrs
+        .iter()
+        .any(|attr| attr_is(attr, TEST_ENTRY_POINT_ATTRS))
+    {
+        return EntryPoint::Test;
+    }
+    if attrs
         .iter()
         .any(|attr| attr_is(attr, ENTRY_POINT_ATTRS) || allows_lint(attr, &["dead_code", "unused"]))
+    {
+        return EntryPoint::of_context(test_context);
+    }
+    EntryPoint::None
 }
 
 /// Whether `attr` is an `allow` or `expect` listing one of `lints`.
@@ -2151,6 +2404,7 @@ mod tests {
     fn unit(sources: &[(&str, &str)]) -> CrateUnit {
         CrateUnit {
             names: vec!["fixture".to_string()],
+            test_code: false,
             files: sources
                 .iter()
                 .map(|(module, source)| ParsedFile {
@@ -2192,6 +2446,7 @@ mod tests {
     fn unused_in_binary(sources: &[(&str, &str)]) -> Vec<String> {
         let crates = [CrateUnit {
             names: Vec::new(),
+            test_code: false,
             files: unit(sources).files,
         }];
         let mut table = SymbolTable::build(&crates);
@@ -2206,6 +2461,23 @@ mod tests {
     /// The single-file case, which most reachability cases are.
     fn unused_in_binary_root(source: &str) -> Vec<String> {
         unused_in_binary(&[("", source)])
+    }
+
+    /// The definitions in `crates` only test code reaches, by name.
+    fn test_only_in(crates: &[CrateUnit]) -> Vec<String> {
+        let mut table = SymbolTable::build(crates);
+        table.record_references(crates);
+        table
+            .test_only_definitions(&PublicApi::default())
+            .into_iter()
+            .map(|def| def.name)
+            .collect()
+    }
+
+    /// The same for one library crate, where the public surface is a root —
+    /// which is why every case below puts the item in a *private* module.
+    fn test_only_in_library(sources: &[(&str, &str)]) -> Vec<String> {
+        test_only_in(&[unit(sources)])
     }
 
     fn module_at(table: &SymbolTable, path: &[&str]) -> usize {
@@ -2227,6 +2499,7 @@ mod tests {
         right.names = vec!["right".to_string(), "shared".to_string()];
         let caller = CrateUnit {
             names: Vec::new(),
+            test_code: false,
             files: unit(&[("", "fn go() { shared::contested(); }\n")]).files,
         };
 
@@ -2887,6 +3160,257 @@ mod tests {
                 "pub fn thing() -> u32 { 1 }\npub fn caller() -> u32 { let thing = 2; take::<{ thing!() }>() }\n"
             ),
             vec!["caller"]
+        );
+    }
+
+    // -- test-only items ---------------------------------------------------
+    //
+    // Every case below is a claim about the *difference* between two walks
+    // over one edge set, so each pins one clause of `is_root` under
+    // `RootSet::WithoutTests`. Inverting that clause is what has to turn the
+    // assertion red.
+
+    /// The claim itself: a `pub` item a private module holds, referenced from
+    /// a `#[test]` function and nowhere else, is reached — so it is not an
+    /// unused-pub finding — and is reached only by dropping the test roots.
+    #[test]
+    fn an_item_only_a_test_function_reaches_is_test_only() {
+        let sources = &[
+            (
+                "",
+                "mod inner;\n#[test]\nfn covered() { inner::helper(); }\n",
+            ),
+            ("inner", "pub fn helper() {}\n"),
+        ];
+        assert_eq!(test_only_in_library(sources), vec!["helper"]);
+        // ...and it is *not* also an unused-pub finding: the two lists
+        // describe different deletions and must never describe one item.
+        assert!(
+            unused_in(sources).is_empty(),
+            "a test-only item is referenced and reached, so nothing calls it dead"
+        );
+    }
+
+    /// The other half of that claim. `fn main` is an entry point of every
+    /// build, so an item it reaches is reached without the tests too.
+    #[test]
+    fn an_item_a_non_test_entry_point_also_reaches_is_not_test_only() {
+        assert!(
+            test_only_in_library(&[
+                (
+                    "",
+                    "mod inner;\nfn main() { inner::helper(); }\n\
+                     #[test]\nfn covered() { inner::helper(); }\n",
+                ),
+                ("inner", "pub fn helper() {}\n"),
+            ])
+            .is_empty()
+        );
+    }
+
+    /// A test, bench or example target is test code in its entirety, so an
+    /// entry point in one — a `harness = false` test's `fn main`, a bench
+    /// runner — is a test root exactly as a `#[test]` function is. Without
+    /// the target half of the split this `fn main` would root `helper` in
+    /// both walks and the finding would vanish.
+    #[test]
+    fn an_entry_point_in_a_test_target_is_a_test_root_by_the_target_alone() {
+        let target = CrateUnit {
+            names: Vec::new(),
+            test_code: true,
+            files: unit(&[("", "mod support;\nfn main() { support::from_target(); }\n")])
+                .files
+                .into_iter()
+                .chain(unit(&[("support", "pub fn from_target() {}\n")]).files)
+                .collect(),
+        };
+        assert_eq!(test_only_in(&[target]), vec!["from_target"]);
+    }
+
+    /// The same `fn main` in an ordinary target roots what it reaches in both
+    /// walks. This is the assertion the case above is measured against: the
+    /// only difference between them is `CrateUnit::test_code`.
+    #[test]
+    fn an_entry_point_in_an_ordinary_target_is_not_a_test_root() {
+        let target = CrateUnit {
+            names: Vec::new(),
+            test_code: false,
+            files: unit(&[("", "mod support;\nfn main() { support::from_target(); }\n")])
+                .files
+                .into_iter()
+                .chain(unit(&[("support", "pub fn from_target() {}\n")]).files)
+                .collect(),
+        };
+        assert!(test_only_in(&[target]).is_empty());
+    }
+
+    /// A file only `#[cfg(test)] mod` declarations reach is test code however
+    /// ordinary its own attributes look (phase 7's flag), so an entry point
+    /// written in one — here the `dead_code` opt-out — is a test root too.
+    #[test]
+    fn an_entry_point_in_a_test_only_file_is_a_test_root() {
+        let mut crate_unit = unit(&[
+            ("", "mod inner;\nmod tests;\n"),
+            ("inner", "pub fn helper() {}\n"),
+            (
+                "tests",
+                "#[allow(dead_code)]\nfn kept() { crate::inner::helper(); }\n",
+            ),
+        ]);
+        crate_unit.files[2].test_only = true;
+        assert_eq!(test_only_in(&[crate_unit]), vec!["helper"]);
+    }
+
+    /// An opaque mention is a root in *both* walks, so an item one names can
+    /// never be test-only however test-only it looks. This is the conservative
+    /// direction and it is expensive: an `assert_eq!` naming the item is
+    /// enough, which is most of the recall this kind gives up.
+    #[test]
+    fn an_opaque_mention_keeps_an_item_out_of_the_kind() {
+        assert!(
+            test_only_in_library(&[
+                (
+                    "",
+                    "mod inner;\n#[test]\nfn covered() { assert_eq!(inner::helper(), 1); }\n",
+                ),
+                ("inner", "pub fn helper() -> u32 { 1 }\n"),
+            ])
+            .is_empty()
+        );
+    }
+
+    /// A library's public surface is a root in both walks: consumers Deadwood
+    /// cannot see reach it in a build with no tests at all, so "only tests
+    /// reach this" is not a claim we are entitled to make about it.
+    #[test]
+    fn a_librarys_public_surface_is_never_test_only() {
+        assert!(
+            test_only_in_library(&[
+                (
+                    "",
+                    "pub mod exposed;\n#[test]\nfn covered() { exposed::helper(); }\n"
+                ),
+                ("exposed", "pub fn helper() {}\n"),
+            ])
+            .is_empty()
+        );
+    }
+
+    /// `mod inner; pub use inner::*;` puts a private module's items on the
+    /// surface without making the module `pub`, and a glob binds no name, so
+    /// the root set does not see it. `winnow`'s `combinator::iterator` is that
+    /// shape: documented public API whose only in-crate callers are tests.
+    #[test]
+    fn an_item_a_pub_use_glob_re_exports_is_never_test_only() {
+        assert!(
+            test_only_in_library(&[
+                ("", "pub mod facade;\n"),
+                (
+                    "facade",
+                    "mod inner;\npub use inner::*;\n#[test]\nfn covered() { helper(); }\n",
+                ),
+                ("facade/inner", "pub fn helper() {}\n"),
+            ])
+            .is_empty()
+        );
+    }
+
+    /// ...and a plain `use inner::*;` re-exports nothing, so it must not buy
+    /// the same silence. Without the `pub` half of that rule this case would
+    /// go quiet too, and the kind would be silent wherever a module imports a
+    /// glob for its own use.
+    #[test]
+    fn a_private_glob_import_does_not_make_its_source_externally_visible() {
+        assert_eq!(
+            test_only_in_library(&[
+                ("", "pub mod facade;\n"),
+                (
+                    "facade",
+                    "mod inner;\nuse inner::*;\n#[test]\nfn covered() { helper(); }\n",
+                ),
+                ("facade/inner", "pub fn helper() {}\n"),
+            ]),
+            vec!["helper"]
+        );
+    }
+
+    /// An item nothing names at all is dead, which is the stronger claim and
+    /// already reported. Saying "only tests reach this" about it as well would
+    /// be two findings for one deletion.
+    #[test]
+    fn an_item_nothing_names_is_an_unused_finding_and_not_a_test_only_one() {
+        let sources = &[
+            ("", "mod inner;\n#[test]\nfn covered() {}\n"),
+            ("inner", "pub fn orphan() {}\n"),
+        ];
+        assert_eq!(unused_in(sources), vec!["orphan"]);
+        assert!(test_only_in_library(sources).is_empty());
+    }
+
+    /// An item only a *dead* test helper reaches is dead, not test-only: the
+    /// second walk is not the only one that has to reach it.
+    #[test]
+    fn an_item_only_unreached_test_code_names_is_an_unused_finding() {
+        let sources = &[
+            ("", "mod inner;\n"),
+            (
+                "inner",
+                "pub fn helper() {}\nfn never_run() { helper(); }\n",
+            ),
+        ];
+        assert_eq!(unused_in(sources), vec!["helper"]);
+        assert!(test_only_in_library(sources).is_empty());
+    }
+
+    /// The surface is a root in the second walk, not merely excluded from the
+    /// report: what a surface item *reaches* is reached without the tests too.
+    /// `helper` here is `pub` in a private module — the shape this kind exists
+    /// for — and it is quiet because the one thing naming it is on the
+    /// surface, which a consumer we cannot see can call.
+    #[test]
+    fn an_item_a_surface_item_reaches_is_not_test_only() {
+        assert!(
+            test_only_in_library(&[
+                ("", "pub mod exposed;\nmod inner;\n"),
+                (
+                    "exposed",
+                    "pub fn entry() -> u32 { crate::inner::helper() }\n"
+                ),
+                ("inner", "pub fn helper() -> u32 { 1 }\n"),
+            ])
+            .is_empty()
+        );
+    }
+
+    /// A root nothing names is an unused finding — the stronger claim, and
+    /// already reported — so it must not be a test-only finding as well. Only
+    /// items something *names* can reach this kind at all.
+    #[test]
+    fn a_test_root_nothing_names_is_one_finding_and_not_two() {
+        let sources = &[
+            ("", "mod inner;\n"),
+            ("inner", "#[test]\npub fn covered() {}\n"),
+        ];
+        assert_eq!(unused_in(sources), vec!["covered"]);
+        assert!(
+            test_only_in_library(sources).is_empty(),
+            "an item nothing names is dead, not test-only"
+        );
+    }
+
+    /// A definition that is not `pub` is nobody's visibility mistake, and the
+    /// advice this kind gives — narrow it — has nothing to say about one.
+    #[test]
+    fn a_private_item_is_not_reported_as_test_only() {
+        assert!(
+            test_only_in_library(&[
+                (
+                    "",
+                    "mod inner;\n#[test]\nfn covered() { inner::helper(); }\n"
+                ),
+                ("inner", "pub(crate) fn helper() {}\n"),
+            ])
+            .is_empty()
         );
     }
 }
