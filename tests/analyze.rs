@@ -303,6 +303,150 @@ fn unresolvable_paths_keep_their_targets_alive() {
     );
 }
 
+/// A dead subsystem comes out in one run, not one layer per run: `orphan` is
+/// named by nothing, so `helper` — which only `orphan` calls — is dead too,
+/// and so is `deeper` below that.
+#[test]
+fn a_dead_chain_is_reported_to_its_end_in_one_run() {
+    let analysis = analyze_fixture("reach");
+
+    assert_eq!(
+        reported(&analysis, FindingKind::UnusedPubItem)
+            .into_iter()
+            .filter(|(file, _)| file == "app/src/cascade.rs")
+            .map(|(_, name)| name)
+            .collect::<Vec<_>>(),
+        vec!["orphan", "helper", "deeper"]
+    );
+    // Only the head of the chain is unreferenced; the two below it are
+    // referenced by something that is itself unreachable, which is the claim
+    // reference counting could not make.
+    assert_finding_message(
+        &analysis,
+        "orphan",
+        "is never referenced by any resolved path",
+    );
+    for name in ["helper", "deeper"] {
+        assert_finding_message(
+            &analysis,
+            name,
+            "is referenced only from items that nothing reaches",
+        );
+    }
+}
+
+/// The case no number of reruns ever finds: `ping` and `pong` name each other
+/// and nothing names either, so both are referenced and both are dead. Each is
+/// reported separately, because each is separately deletable and a group
+/// finding would need a name the baseline could key on.
+#[test]
+fn a_mutually_recursive_dead_pair_is_reported_in_full() {
+    let analysis = analyze_fixture("reach");
+
+    assert_eq!(
+        reported(&analysis, FindingKind::UnusedPubItem)
+            .into_iter()
+            .filter(|(file, _)| file == "app/src/cycle.rs")
+            .collect::<Vec<_>>(),
+        vec![
+            ("app/src/cycle.rs".to_string(), "ping"),
+            ("app/src/cycle.rs".to_string(), "pong"),
+        ]
+    );
+}
+
+/// The finding reachability must not invent: `main` reaches `start`, `start`
+/// reaches `middle`, `middle` reaches `leaf`, and every one of them stays
+/// quiet.
+#[test]
+fn a_live_chain_from_an_entry_point_stays_quiet() {
+    let analysis = analyze_fixture("reach");
+
+    assert!(
+        !analysis
+            .findings
+            .iter()
+            .any(|f| f.file == Path::new("app/src/live.rs")),
+        "an entry point carries all the way down: {:?}",
+        analysis.findings
+    );
+}
+
+/// An opaque mention is a root rather than an edge. `mentioned` is named only
+/// from inside macro input, and that input sits in a function nothing reaches
+/// — the one case where reading the mention as an ordinary reference would
+/// build a false positive out of something we had already admitted we could
+/// not read.
+#[test]
+fn an_opaque_mention_keeps_its_target_alive_when_every_referrer_is_dead() {
+    let analysis = analyze_fixture("reach");
+
+    assert_eq!(
+        reported(&analysis, FindingKind::UnusedPubItem)
+            .into_iter()
+            .filter(|(file, _)| file == "app/src/opaque.rs")
+            .map(|(_, name)| name)
+            .collect::<Vec<_>>(),
+        vec!["dead_caller"],
+        "the caller is dead; what it mentions through a macro is not"
+    );
+}
+
+/// A library's public surface is a root, because consumers Deadwood cannot see
+/// call it — declared outright by `[public-api]`, or by being `pub` under
+/// `pub` modules from the crate root. Either way what the surface calls stays
+/// quiet, which is the difference between a usable report on a library and a
+/// page of noise.
+#[test]
+fn a_librarys_public_surface_keeps_what_it_calls_alive() {
+    let analysis = analyze_fixture("reach");
+
+    // `entry` is on the surface and nothing in the workspace names it, which
+    // is the advisory finding Deadwood has always made. Being a root does not
+    // exempt it — it exempts what it *calls*.
+    assert_finding_message(
+        &analysis,
+        "entry",
+        "is never referenced by any resolved path",
+    );
+    for name in ["worker", "detail"] {
+        assert!(
+            !analysis
+                .findings
+                .iter()
+                .any(|f| f.name.as_deref() == Some(name)),
+            "`{name}` is reached through the surface: {:?}",
+            analysis.findings
+        );
+    }
+
+    // `hidden` is the half the surface rule cannot infer: a private module, so
+    // `plugin` is an ordinary node and `support` falls with it.
+    assert_finding_message(
+        &analysis,
+        "plugin",
+        "is never referenced by any resolved path",
+    );
+    assert_finding_message(
+        &analysis,
+        "support",
+        "is referenced only from items that nothing reaches",
+    );
+
+    // Declaring both surfaces silences the items themselves and everything
+    // they call — including `support`, whose only claim to being reached is
+    // the `[public-api]` listing on `plugin`.
+    let declared = analyze_configured("reach", "public-api.toml");
+    assert!(
+        !declared
+            .findings
+            .iter()
+            .any(|f| f.file.starts_with("declared/")),
+        "a declared API and its callees are quiet: {:?}",
+        declared.findings
+    );
+}
+
 /// Paths that cross workspace members resolve by crate name, with cargo's
 /// dash-to-underscore normalization (`engine-core` is `engine_core` in a
 /// path). Items the other member never reaches are still reported.
