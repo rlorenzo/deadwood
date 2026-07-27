@@ -51,6 +51,10 @@ pub struct UnusedItem {
     pub kind: &'static str,
     pub file: PathBuf,
     pub line: usize,
+    /// The module the item is written in, `crate`-rooted: `crate::alpha`. It is
+    /// what tells two same-named items in one file apart, which is the whole of
+    /// what the baseline key does with it — see [`crate::baseline`].
+    pub module: String,
     /// True for a `pub use` re-export rather than a definition.
     pub reexport: bool,
     /// Whether paths do resolve to this item and every one of them is written
@@ -74,6 +78,8 @@ pub struct TestOnlyItem {
     pub kind: &'static str,
     pub file: PathBuf,
     pub line: usize,
+    /// The module the item is written in, `crate`-rooted: `crate::alpha`.
+    pub module: String,
     /// True for a `pub use` re-export rather than a definition, which changes
     /// what the reader is being told to narrow.
     pub reexport: bool,
@@ -124,6 +130,7 @@ pub fn find_items(
                 kind: def.kind.label(),
                 file: def.file,
                 line: def.line,
+                module: def.module,
                 reexport: def.kind.is_reexport(),
                 only_from_unreached: def.only_from_unreached,
             })
@@ -136,6 +143,7 @@ pub fn find_items(
                 kind: def.kind.label(),
                 file: def.file,
                 line: def.line,
+                module: def.module,
                 reexport: def.kind.is_reexport(),
             })
             .collect(),
@@ -258,6 +266,45 @@ mod tests {
         assert_eq!(unused.len(), 1, "only b::helper is dead");
         assert_eq!(unused[0].name, "helper");
         assert_eq!(unused[0].file, PathBuf::from("/ws/src/b.rs"));
+    }
+
+    /// The module path is what tells two same-named items in one file apart, so
+    /// it has to follow inline `mod` blocks and not merely the file's own
+    /// position in the tree. Both spellings are here, and the crate root has a
+    /// spelling of its own rather than an empty one.
+    #[test]
+    fn each_reported_item_carries_the_module_it_is_written_in() {
+        let unit = crate_of(&[
+            (
+                "",
+                "mod nested;\npub fn root() {}\n\
+                 pub mod alpha { pub fn twin() {} }\n\
+                 pub mod beta { pub fn twin() {} }\n",
+            ),
+            ("nested", "pub mod deeper { pub fn buried() {} }\n"),
+        ]);
+
+        let mut warnings = Vec::new();
+        let found = find_items(&[unit], &PublicApi::default(), &mut warnings);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let mut located: Vec<(String, String)> = found
+            .unused
+            .into_iter()
+            .map(|item| (item.name, item.module))
+            .collect();
+        located.sort();
+        assert_eq!(
+            located,
+            vec![
+                // A `mod` declaration is not itself reportable, so the modules
+                // holding these do not appear; only what is written in them.
+                ("buried".to_string(), "crate::nested::deeper".to_string()),
+                ("root".to_string(), "crate".to_string()),
+                ("twin".to_string(), "crate::alpha".to_string()),
+                ("twin".to_string(), "crate::beta".to_string()),
+            ],
+            "the two `twin`s differ in exactly the field the baseline key gained"
+        );
     }
 
     #[test]

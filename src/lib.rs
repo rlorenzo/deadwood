@@ -157,6 +157,23 @@ pub struct Finding {
     pub line: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// The module the named item is written in, `crate`-rooted:
+    /// `crate::alpha`. Present for the three item kinds and absent for the four
+    /// that have no module to name — a dead file has no item at all, the two
+    /// dependency kinds name a manifest entry, and an unsatisfiable gate names
+    /// a site rather than a definition.
+    ///
+    /// It is here rather than on a baseline entry alone, and that placement was
+    /// the decision of the phase that added it. The baseline's format *is* this
+    /// struct's serialization ([`crate::baseline`]), so a field only the entry
+    /// carried would be a second format and a value no `--json` output could
+    /// produce. The cost is that `--json` grows a key: a consumer that ignores
+    /// unknown fields sees nothing change — every field it reads is present,
+    /// unchanged, in the same order, and the finding list, its order, the counts
+    /// and the exit code are all identical — while one that rejects unknown
+    /// fields, or constructs this struct with a literal, has to learn about it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub module: Option<String>,
     pub message: String,
 }
 
@@ -331,6 +348,10 @@ pub fn analyze_with(
                         file: relative_to(&file, &meta.workspace_root),
                         line: None,
                         name: None,
+                        // A dead file is not an item: there is no module
+                        // inside it to name, and the file path is already the
+                        // whole of the finding's identity.
+                        module: None,
                         message: format!(
                             "not reachable from any target of package `{}` via `mod` declarations",
                             package.name
@@ -377,6 +398,7 @@ pub fn analyze_with(
                 ),
             },
             name: Some(item.name),
+            module: Some(item.module),
         }));
         // The narrower claim, from the same pass: reached, but only from test
         // code. It says what to *do* rather than that the item is dead —
@@ -401,6 +423,7 @@ pub fn analyze_with(
                 )
             },
             name: Some(item.name),
+            module: Some(item.module),
         }));
     } else {
         // Both kinds, because both come out of the one resolution pass: a
@@ -439,6 +462,8 @@ pub fn analyze_with(
                     package.name
                 ),
                 name: Some(entry.name),
+                // A manifest entry is in no module.
+                module: None,
             }),
         );
         findings.extend(
@@ -464,6 +489,7 @@ pub fn analyze_with(
                     dependency_table(entry.declared),
                 ),
                 name: Some(entry.name),
+                module: None,
             }),
         );
     }
@@ -550,6 +576,9 @@ impl GateSites {
                     ),
                 },
                 name: site.name,
+                // A gate site, not a definition: the name is whatever the gate
+                // sits on, and nothing here tracks which module that is.
+                module: None,
             })
             .collect()
     }

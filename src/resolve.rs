@@ -443,6 +443,9 @@ pub(crate) struct UnusedDef {
     pub kind: DefKind,
     pub file: PathBuf,
     pub line: usize,
+    /// The module the definition is written in, as
+    /// [`SymbolTable::module_path`] spells it.
+    pub module: String,
     /// Whether paths do name this definition and every one of them is written
     /// inside something nothing reaches. `false` is the older and stronger
     /// claim: no path names it at all.
@@ -459,6 +462,9 @@ pub(crate) struct TestOnlyDef {
     pub kind: DefKind,
     pub file: PathBuf,
     pub line: usize,
+    /// The module the definition is written in, as
+    /// [`SymbolTable::module_path`] spells it.
+    pub module: String,
 }
 
 /// What a use is attributed to: the definition the naming path is written
@@ -657,6 +663,7 @@ impl SymbolTable {
                 kind: def.kind,
                 file: def.file.clone(),
                 line: def.line,
+                module: self.module_path(def),
                 only_from_unreached: used.contains(&site(def)),
             })
             .collect();
@@ -730,6 +737,7 @@ impl SymbolTable {
                 kind: def.kind,
                 file: def.file.clone(),
                 line: def.line,
+                module: self.module_path(def),
             })
             .collect();
         out.sort_by(|a, b| (&a.file, a.line, &a.name).cmp(&(&b.file, b.line, &b.name)));
@@ -857,6 +865,34 @@ impl SymbolTable {
         }
         path.push_str(&def.name);
         public_api.covers(krate, &path)
+    }
+
+    /// The module a definition is written in, as a path a reader can navigate
+    /// by: `crate`, `crate::alpha`, `crate::lexical::math::small`.
+    ///
+    /// Crate-*relative* on purpose, and the crate name is deliberately not the
+    /// head segment the way [`SymbolTable::is_declared_api`] spells one. One
+    /// file can belong to several crates — a `#[path]` share, or a target root
+    /// read once per target — and a finding about it is deduplicated across
+    /// them by site, so keying anything on the crate name would make the answer
+    /// depend on which copy the deduplication happened to keep. The module path
+    /// itself is a property of the source: where the item is written inside its
+    /// file's own module tree.
+    ///
+    /// `crate` rather than an empty string for the root, because this value
+    /// ends up in [`crate::Finding::module`] and from there in a baseline
+    /// entry, where "the crate root" and "no module recorded" have to be
+    /// different values — the first is a module a key can be compared on and
+    /// the second is an entry that predates the field. `crate` is not a legal
+    /// module name, so the two can never be confused.
+    fn module_path(&self, def: &Def) -> String {
+        let module = &self.modules[def.module];
+        let mut path = String::from("crate");
+        for segment in &module.path {
+            path.push_str("::");
+            path.push_str(segment);
+        }
+        path
     }
 
     /// Every module whose items code outside the workspace could name: a
