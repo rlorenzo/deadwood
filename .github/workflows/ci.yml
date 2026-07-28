@@ -5,6 +5,14 @@ on:
     branches: [main]
   pull_request:
 
+# Stated rather than inherited. Without this block the job runs with whatever
+# the repository's default workflow permissions happen to be — a setting that
+# lives outside this file and can be widened to read/write without any change
+# here. Nothing below writes to the repository: it checks out, builds, and
+# reports, so read access to the contents is the whole need.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
