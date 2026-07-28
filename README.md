@@ -616,22 +616,23 @@ toolchain is pinned to `stable` with `clippy` and `rustfmt` via
   finding. It may be a `test_only_item` one, which is `off` by default; `[cfg]
   test = false` asks the same question a blunter way, and the paragraph on it
   under [Configuration](#configuration) is why both exist.
-- The test-only claim is narrower than it sounds, in three directions that all
+- The test-only claim is narrower than it sounds, in two directions that both
   cost findings rather than invent them. **Anything a consumer could name is
   out**: a library's public surface, whatever a surface item reaches, and
   anything `[public-api]` declares. That still covers everything a `pub use
   inner::*;` re-exports, but by the ordinary route rather than a rule of its
   own — a glob re-export *is* public surface, so it is a root in both walks
-  like the rest of it. **An
-  opaque mention keeps an item out entirely** — a name in macro input is a
-  root, and `assert_eq!(thing(), 1)` is how most tests name what they test, so
-  one assertion is enough. And **an entry point inside an inline `#[cfg(test)]
-  mod`** that is not itself `#[test]`/`#[bench]` — a `#[no_mangle]`, an
-  `#[allow(dead_code)]` — reads as a non-test root, so what it reaches is not
-  test-only either. Out-of-line `#[cfg(test)] mod tests;` files do not have
-  that gap ([#27](https://github.com/rlorenzo/deadwood/issues/27); simulating
-  the fix changed no finding on any fixture, on the 34 crates in a local
-  registry, or on Deadwood itself).
+  like the rest of it. And **an opaque mention keeps an item out entirely** —
+  a name in macro input is a root, and `assert_eq!(thing(), 1)` is how most
+  tests name what they test, so one assertion is enough.
+- What a `#[cfg(test)] mod` confines is test code whichever way the module is
+  written: an entry point inside an inline `#[cfg(test)] mod tests { ... }`
+  that is not itself `#[test]`/`#[bench]` — a `#[no_mangle]`, an
+  `#[allow(dead_code)]`, an `#[allow(unused)] use` — is a test root exactly as
+  the same code in a `#[cfg(test)] mod tests;` file is. The gate is read in
+  full, so `all(test, feature = "x")` confines a module, `any(test, unix)` does
+  not, and a module nested inside a confined one is confined whatever its own
+  gate says.
 - Much of what `test_only_item` reports about a package's own `src/` is also
   reported by rustc, as `dead_code`, in any build that leaves the tests out —
   `cargo build`, and `cargo clippy --all-targets`, which compiles the crate
@@ -698,7 +699,9 @@ toolchain is pinned to `stable` with `clippy` and `rustfmt` via
 - A file that both a `#[cfg(test)]` `mod` declaration and an ungated one
   reach is attributed to the ungated one, so what it names is judged as
   library code. One file gets one answer, and this is the direction that
-  misses findings rather than inventing them.
+  misses findings rather than inventing them. An inline `mod` two declarations
+  in one file reach — `cfg`-alternatives of each other — is answered the same
+  way, for the same reason.
 - A `[target.'...'.dependencies]` table keyed by a bare target triple rather
   than a `cfg(...)` expression is not modelled, so narrowing `target-os` does
   not reach its entries; they are judged as if always built.
