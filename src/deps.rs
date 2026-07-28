@@ -1013,6 +1013,7 @@ mod tests {
                 ast,
                 module: Vec::new(),
                 test_only,
+                test_only_mods: Vec::new(),
             }],
             &target(kind),
             &gates,

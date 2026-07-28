@@ -9,6 +9,15 @@
 
 mod deeper;
 
+/// An *inline* module in a file three declarations reach, which is the case
+/// the inline list has to be replaced rather than added to. Whichever gated
+/// declaration is read first records this module as confined, because the file
+/// it sits in was; the ungated declaration then lifts the file, and the list
+/// is recomputed from the module's own gate — which is no gate at all.
+mod inline_view {
+    fn describe() {}
+}
+
 fn view() -> shared_view_crate::View {
     deeper::describe();
     shared_view_crate::View
