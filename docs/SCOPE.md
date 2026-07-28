@@ -308,7 +308,8 @@ named went unreported. Module resolution now carries the answer with the file
 - **Confinement accumulates downward and never lifts.** A module inside
   `#[cfg(test)] mod tests` is test code whatever its own gate says, so a
   declaration only ever adds to what it inherited.
-- **Any ungated declaration clears it, however late it arrives.** A file two
+- **Any declaration no gate confines to a test build clears it, however late it
+  arrives.** A file two
   declarations of one crate root disagree about — `#[path]` naming one file
   from two modules — is loaded once, by whichever the queue reaches first, so
   without a rule the answer would be decided by queue order. (Two *targets*
@@ -613,7 +614,9 @@ copy of a rule `src/cfg.rs` already owns. Simulating the fix with a
 deliberately over-broad predicate changed **not one finding** across the
 fixtures, the registry crates and Deadwood itself, so it is filed with that
 number in it rather than built on a hunch
-([#27](https://github.com/rlorenzo/deadwood/issues/27)).
+([#27](https://github.com/rlorenzo/deadwood/issues/27)). Phase 14 closed it,
+and on a different number: that one measures the *output*, which for a
+missed-finding gap is exactly what cannot see the cost.
 
 Closes [#23](https://github.com/rlorenzo/deadwood/issues/23), and files the two
 gaps it leaves: [#25](https://github.com/rlorenzo/deadwood/issues/25), a glob
@@ -963,24 +966,125 @@ Closes [#17](https://github.com/rlorenzo/deadwood/issues/17), and files the
 residual it leaves: [#32](https://github.com/rlorenzo/deadwood/issues/32), the
 kinds with no item identity, and a package directory that moves.
 
+## Phase 14 — the two spellings of a `#[cfg(test)] mod` agree (shipped)
+
+`#[cfg(test)] mod tests { ... }` and `#[cfg(test)] mod tests;` are one
+construct written two ways, and the entry-point split could only see the
+second. `collect_items` recursed into an inline module with the parent's
+`test_context` and never read the `mod`'s own attributes, so an entry point in
+one that is neither `#[test]` nor `#[bench]` was an `EntryPoint::NonTest` root
+— a root in *both* walks — and what it reached could never be
+`test_only_item`. Phase 7 closed exactly this asymmetry for the dependency
+check.
+
+- **The decision was whether to build it, and the number that decided it is not
+  the one the issue quotes.** Phase 10 simulated the fix with an over-broad
+  predicate and no finding changed anywhere. That is an *output* measurement,
+  and for a missed-finding defect the output is the one thing that cannot see
+  the cost. The measurement that can is the input population: how many
+  non-`#[test]`, non-`#[bench]` entry points sit inside an inline
+  `#[cfg(test)] mod` in code Deadwood would otherwise treat as non-test.
+  Counted on the AST with `syn` and `cfg::Gates::test_only` over the 34 crates
+  in the local registry, the fixtures and Deadwood itself — 1101 files — there
+  are **113** inline `mod` blocks a gate confines to a test build, **103** of
+  them in lib or bin source, and **8** such entry points inside them, of which
+  **0** are in a non-dev target. All eight are one shape,
+  `#[allow(dead_code)] type Error = ...` inside `mod test` in `winnow`'s
+  `examples/`, and an example is a dev target, so `CrateUnit::test_code`
+  already calls everything in it test code. A `grep` for the same thing returns
+  27, most of them inside the string literals in `src/resolve.rs`'s own unit
+  tests.
+- **It was built anyway, and not on the finding count.** Zero in 103 blocks is
+  a real answer and closing the issue with it would have been a legitimate
+  outcome. What decided the other way is that two spellings of one construct
+  gave two answers, which is a correctness defect whether or not a 34-crate
+  registry happens to trip it; that phase 7 already paid this bill for `deps`
+  and left the two checks disagreeing with each other; and — the part that
+  actually changed since phase 10 — that the route below costs neither a
+  lifetime nor a second copy of the predicate, so the cost that argued against
+  building it in phase 10 is gone.
+- **The flag comes from where it was already computed, which is the third route
+  and the one the issue does not name.** `collect_mod_decls` evaluates
+  `Gates::test_only` for every `mod` it walks, inline ones included,
+  accumulating downward — and kept the answer only for the file-backed
+  children. It now records the module paths it confined on
+  `ParsedFile::test_only_mods`, beside the `test_only` flag phase 7 added for
+  the out-of-line spelling. `src/resolve.rs` reads a list of paths: it still
+  does not know what a `cfg` is, phase 4's "pruning, not plumbing" stands, and
+  the predicate keeps one copy. Two routes were rejected. Threading a `Gates`
+  onto `CrateUnit` is what `src/deps.rs` does for its own walk
+  (`Origin::gates`), so it is not unprecedented — it costs a lifetime on
+  `CrateUnit` and a `Gates` in every unit-test helper that builds one, for an
+  answer something else has already worked out. Matching `#[cfg(test)]`
+  syntactically inside `resolve.rs` is a second, weaker copy of a rule
+  `src/cfg.rs` owns, and it gets the gate shapes wrong by construction.
+- **What the gate shapes buy, since reusing the predicate made them free.**
+  `all(test, feature = "x")` confines a module — it holds in no build without
+  the tests. `any(test, unix)` does not — it holds in a build that has none.
+  `not(test)` is the opposite gate and is left alone. And an ungated module
+  inside a confined one is confined, because confinement accumulates downward
+  and never lifts. All four are fixture cases; the last two are what a
+  syntactic match gets wrong, and inverting the predicate to either rejected
+  form fails a named test.
+- **One expression supplies the flag, which is what keeps the two spellings
+  from drifting one level down.** Four things read `test_context` —
+  `entry_point_attr`, the `fn main` exemption, `add_use`, and the visitor that
+  collects `use` declarations nested in item bodies — and all four are
+  downstream of the single recursive call into an inline module's items, so a
+  fix that reaches three of them is not expressible here. That claim is a test
+  with four bodies rather than a paragraph, and each of the four is a mutation
+  caught by it.
+- **Two inline declarations can share a module path**, when disjoint `cfg`s
+  make them alternatives, and the symbol table merges them into one module. Any
+  one of them no gate confines to a test build clears the path — the same
+  direction `test_only` takes for a file two declarations disagree about, and
+  for the same reason: an entry point wrongly read as test code is a false
+  positive, where the other direction is a missed finding. "Not confined" is
+  wider than "ungated" and the fixture pins the difference: `#[cfg(all(not(
+  test), unix))] mod alt` carries a gate of its own and clears the path
+  anyway, because what it contributes to the merged module is production code.
+- **What it found, which is the population number holding.** With
+  `test_only_item` on, the change adds **no finding** on the 34 registry crates
+  or on Deadwood itself; the only difference anywhere is the five new findings
+  in the fixture written for this phase. Default output — the kind is `off` as
+  it ships — is byte-identical across the 19 fixtures, the 34 registry crates
+  and Deadwood itself, exit codes included, against a binary built from `main`
+  in a detached worktree. That is the "only `test_only_item` can move" argument
+  run as an experiment rather than asserted: `RootSet::Full` admits both kinds
+  of entry point, so reclassifying one leaves the full walk bit-identical and
+  can only shrink the `WithoutTests` one.
+
+Recall was checked by mutation: fourteen inversions — the flag ignored
+entirely, the flag withheld from each of the four readers of `test_context` in
+turn, any test-only module in a file taken to confine every module in it,
+confinement stopped from accumulating downward, a `mod`'s own gate dropped,
+inline modules not recorded at all, the list added to rather than replaced when
+a file is lifted, an unconfined alternative stopped from clearing a shared path,
+every inline module recorded gated or not, and the honest predicate replaced by
+each of the two rejected ones. **All fourteen were caught by a named test.**
+One further mutation was written and discarded as an equivalent mutant rather
+than reported as a catch: dropping the `test_only` filter from
+`confined_inline_mods` while leaving the unconfined subtraction in place
+removes exactly the entries it removes.
+
+Closes [#27](https://github.com/rlorenzo/deadwood/issues/27).
+
 ## Next (sequenced, one slice at a time)
 
-1. **Make an inline `#[cfg(test)] mod` test code for the entry-point split**
-   ([#27](https://github.com/rlorenzo/deadwood/issues/27)) — the out-of-line
-   spelling is handled and the inline one is not, so the two disagree about an
-   entry point that is neither `#[test]` nor `#[bench]`. Below the baseline
-   entry because it was measured before it was filed: simulating the fix
-   changed no finding anywhere. It wants `cfg::Gates` reachable from
-   `src/resolve.rs`, which phase 4 deliberately kept out of it.
-2. **Follow a named `pub use` of a module onto the public surface**
+1. **Follow a named `pub use` of a module onto the public surface**
    ([#28](https://github.com/rlorenzo/deadwood/issues/28)) — phase 11 follows
    a `pub use inner::*;` glob and the `pub` modules under it, and `pub use
    inner::sub;` reaches the same place by a third route the closure does not
    take, so an item under it whose only referrer is dead is reported though a
-   consumer can name it. Same shape and same risk as phase 11, and low for the
-   same reason as the one above it: simulating the fix changed no finding on any
-   fixture, on the registry crates, or on Deadwood itself.
-3. **Separate two definitions that share a file, a name and a module**
+   consumer can name it. Same shape and same risk as phase 11. Its "changed no
+   finding anywhere" is phase 11's *simulation* — an output measurement, which
+   is what phase 14 found could not decide #27 — so what it is owed before it
+   is judged is a population count of its own: how many named `pub use`
+   re-exports of a module sit in a module the surface closure already covers.
+   Note that the direction differs from #27's and that changes what a zero
+   would mean: this gap produces a *wrong* finding rather than losing one, so
+   even a small population is worth more than a large one there.
+2. **Separate two definitions that share a file, a name and a module**
    ([#30](https://github.com/rlorenzo/deadwood/issues/30)) — phase 12's
    residual. `pub struct Group` beside `#[allow(non_snake_case)] pub fn
    Group(..)` differ by Rust's namespaces, which the key does not model; two
@@ -990,7 +1094,7 @@ kinds with no item identity, and a package directory that moves.
    the second pass compares a *relocation* built from the same fields, so a key
    two definitions share is a relocation they share, and the argument there is
    unchanged.
-4. **Match a moved dead file, and a moved package's manifest entries**
+3. **Match a moved dead file, and a moved package's manifest entries**
    ([#32](https://github.com/rlorenzo/deadwood/issues/32)) — phase 13's
    residual, and last of the filed entries because its failure mode is noise
    and it has a workaround. 86 of the corpus's 213 findings name no module and
@@ -1002,7 +1106,7 @@ kinds with no item identity, and a package directory that moves.
    which is the same bill #30 is weighing. `dead_file` and `unsatisfiable_cfg`
    have nothing but a path and want a content signal, which is a different phase
    with its own argument.
-5. **Report a `[dev-dependencies]` entry the library itself names.** The
+4. **Report a `[dev-dependencies]` entry the library itself names.** The
    check has never made that claim, because the likeliest explanation used to
    be a mis-attribution of ours rather than a manifest that cannot compile.
    The largest of those, an out-of-line `#[cfg(test)] mod tests;`, is closed

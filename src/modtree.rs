@@ -72,10 +72,28 @@ pub struct ParsedFile {
     /// this to attribute what it names to `[dev-dependencies]`, the same way
     /// it already attributes an inline `#[cfg(test)] mod tests { ... }`.
     ///
-    /// False for the crate root, and false for any file *some* ungated
-    /// declaration also reaches — see [`resolve`] for why that direction is
-    /// the safe one.
+    /// False for the crate root, and false for any file *some* declaration no
+    /// gate confines to a test build also reaches — see [`resolve`] for why
+    /// that direction is the safe one.
     pub test_only: bool,
+    /// Module paths, on the same basis as [`ParsedFile::module`], of the
+    /// *inline* `mod` blocks in this file that a gate confines to a test
+    /// build.
+    ///
+    /// The out-of-line spelling of a `#[cfg(test)] mod` gets its answer from
+    /// `test_only` above; this is the same answer for the inline spelling, and
+    /// it is recorded here rather than recomputed downstream so that
+    /// [`Gates::test_only`] stays the only copy of the predicate — the walk
+    /// below already evaluates it for every `mod` it passes, inline ones
+    /// included, and used to throw the inline results away.
+    ///
+    /// Confinement accumulates, so a module nested inside a test-only one is
+    /// listed too. Two declarations in one file can share a module path when
+    /// disjoint `cfg`s make them alternatives of each other, and [`resolve`]
+    /// applies the same rule it applies to a file two declarations reach: any
+    /// one of them no gate confines to a test build clears the path, whether
+    /// it carries a gate of its own or none at all.
+    pub test_only_mods: Vec<Vec<String>>,
 }
 
 /// A file waiting to be loaded, with the context needed to place its items.
@@ -107,8 +125,8 @@ struct Seen {
 /// A file two declarations in this walk reach is loaded once, by whichever
 /// popped first. That is a real choice for [`ParsedFile::test_only`], because
 /// the two declarations can disagree: `#[path]` naming one file from two
-/// modules is the way it happens. The rule is that any ungated declaration
-/// clears the flag, however
+/// modules is the way it happens. The rule is that any declaration no gate
+/// confines to a test build clears the flag, however
 /// late it arrives: a file wrongly marked test-only would move the crates it
 /// names into the dev context and could have a `[dependencies]` entry reported
 /// as belonging in `[dev-dependencies]` when the library genuinely uses it.
@@ -155,8 +173,9 @@ pub fn resolve(
         let path = normalize(&path);
         if !visited.insert(path.clone()) {
             // Reached again. Nothing about the file changes — it is the same
-            // file — except that an ungated declaration overrides a test-only
-            // one recorded earlier, and its children with it. A path that
+            // file — except that a declaration no gate confines to a test
+            // build overrides a test-only one recorded earlier, and its
+            // children with it. A path that
             // never became a file has nothing to override.
             let Some(&Seen { index, is_mod_root }) = seen.get(&path) else {
                 continue;
@@ -165,6 +184,7 @@ pub fn resolve(
                 continue;
             }
             resolved.files[index].test_only = false;
+            let mut inline_mods = Vec::new();
             let file = &resolved.files[index];
             if let Some(ast) = &file.ast {
                 let declaring = Declaring {
@@ -187,9 +207,15 @@ pub fn resolve(
                         queue: &mut queue,
                         excluded: &mut Vec::new(),
                         warnings: &mut Vec::new(),
+                        inline_mods: &mut inline_mods,
                     },
                 );
             }
+            // The inline list, unlike the two above, is *replaced*: the first
+            // walk recorded every inline module under a file that was itself
+            // confined, and lifting the file leaves only the ones their own
+            // gate confines.
+            resolved.files[index].test_only_mods = confined_inline_mods(inline_mods);
             continue;
         }
         let source = match fs::read_to_string(&path) {
@@ -207,6 +233,7 @@ pub fn resolve(
             }
         };
 
+        let mut inline_mods = Vec::new();
         if let Some(ast) = &mut ast {
             let file_dir = path.parent().unwrap_or(Path::new(""));
             let child_base = child_base(&path, is_mod_root);
@@ -237,6 +264,7 @@ pub fn resolve(
                     queue: &mut queue,
                     excluded: &mut resolved.excluded,
                     warnings,
+                    inline_mods: &mut inline_mods,
                 },
             );
             // After the walk: the declarations above are read from the file as
@@ -256,6 +284,7 @@ pub fn resolve(
             ast,
             module,
             test_only,
+            test_only_mods: confined_inline_mods(inline_mods),
         });
     }
 
@@ -303,6 +332,39 @@ struct Walk<'a> {
     queue: &'a mut Vec<Pending>,
     excluded: &'a mut Vec<PathBuf>,
     warnings: &'a mut Vec<String>,
+    /// Every inline `mod` the walk passed, by module path, and whether it was
+    /// confined to a test build. Reduced to [`ParsedFile::test_only_mods`] by
+    /// [`confined_inline_mods`].
+    inline_mods: &'a mut Vec<(Vec<String>, bool)>,
+}
+
+/// The inline modules a gate confines to a test build, with the alternatives
+/// rule applied.
+///
+/// One file can declare `mod imp` twice under disjoint `cfg`s, and the symbol
+/// table merges the two into one module, so a path both spellings reach cannot
+/// be answered two ways. Any declaration *no gate confines to a test build*
+/// clears it — the same direction [`resolve`] takes for a file two
+/// declarations disagree about, and for the same reason: an entry point
+/// wrongly read as test code is a false positive, where the other direction is
+/// a missed finding.
+///
+/// "Not confined" is wider than "ungated", and deliberately: a declaration can
+/// carry a gate of its own and still be compiled by a build with no tests in
+/// it — `#[cfg(all(not(test), unix))]`, or the `any(test, ...)` shape
+/// [`Gates::test_only`] already answers `false` for. Those clear the path too,
+/// because what they contribute to the merged module is production code.
+fn confined_inline_mods(inline_mods: Vec<(Vec<String>, bool)>) -> Vec<Vec<String>> {
+    let unconfined: HashSet<&[String]> = inline_mods
+        .iter()
+        .filter(|(_, test_only)| !test_only)
+        .map(|(path, _)| path.as_slice())
+        .collect();
+    inline_mods
+        .iter()
+        .filter(|(path, test_only)| *test_only && !unconfined.contains(path.as_slice()))
+        .map(|(path, _)| path.clone())
+        .collect()
 }
 
 fn collect_mod_decls(
@@ -332,6 +394,7 @@ fn collect_mod_decls(
             // level deeper (`mod a { mod b; }` in lib.rs -> src/a/b.rs).
             Some((_, inner)) => {
                 let nested_base = under.base.join(&name);
+                walk.inline_mods.push((child_module.clone(), test_only));
                 collect_mod_decls(
                     inner,
                     declaring,
@@ -538,10 +601,10 @@ mod tests {
     /// Which files a build reaches only through test-confined declarations,
     /// against a fixture that puts every case in one crate: a `#[cfg(test)]
     /// mod` with its body in its own file, and a file three declarations reach
-    /// — a gated one either side of an ungated one, so no pop order can be the
-    /// thing that answers it.
+    /// — a confining one either side of one that does not confine, so no pop
+    /// order can be the thing that answers it.
     #[test]
-    fn test_confinement_follows_declarations_and_any_ungated_one_clears_it() {
+    fn test_confinement_follows_declarations_and_an_unconfined_one_clears_it() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/depkinds/src/lib.rs");
         let config = crate::config::Config::default();
         let package = crate::cfg::tests_support::bare_package();
@@ -570,12 +633,112 @@ mod tests {
                 ("lib.rs".to_string(), false),
                 // Its only declaration is `#[cfg(test)] mod outline_tests;`.
                 ("outline_tests.rs".to_string(), true),
-                // Reached by an ungated declaration among the gated ones.
+                // Reached by a declaration that does not confine it, among
+                // ones that do.
                 ("shared_view.rs".to_string(), false),
                 // And so is its child, which carries no gate of its own.
                 ("shared_view/deeper.rs".to_string(), false),
             ]
         );
+
+        // The inline list is *replaced* when a file is lifted, not added to.
+        // `shared_view.rs` is walked once under a gated declaration — which
+        // records every inline module in it as confined, because the file was
+        // — and again when the unconfined one clears it.
+        let shared = resolved
+            .files
+            .iter()
+            .find(|file| file.path.ends_with("shared_view.rs"))
+            .expect("the fixture declares the file three times");
+        assert!(
+            shared.test_only_mods.is_empty(),
+            "`inline_view` sits in a file no gate confines: {:?}",
+            shared.test_only_mods,
+        );
+    }
+
+    /// The inline half of the same question, and the four gate shapes that
+    /// make [`Gates::test_only`] worth reusing rather than matching
+    /// `#[cfg(test)]` by shape: `test` alone confines a module, `any(test,
+    /// ...)` does not because the gate holds without the tests, `not(test)` is
+    /// the opposite gate, and an ungated module inside a confined one is
+    /// confined because confinement accumulates downward.
+    #[test]
+    fn an_inline_mods_gate_is_recorded_for_the_module_paths_it_confines() {
+        let root =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/testonly/app/src/main.rs");
+        let config = crate::config::Config::default();
+        // `extra` is declared by the fixture's own manifest, and it has to be
+        // declared here too: a feature no build can turn on makes `all(test,
+        // feature = "extra")` a gate that holds nowhere at all, which is a
+        // different question with a different answer.
+        let mut package = crate::cfg::tests_support::bare_package();
+        package.features.insert("extra".to_string(), Vec::new());
+        let gates = crate::cfg::Gates::new(config.cfg(), &package);
+        let mut warnings = Vec::new();
+        let resolved = resolve(&root, config.ignore(), &gates, &mut warnings);
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+
+        let inline = resolved
+            .files
+            .iter()
+            .find(|file| file.module == ["inline"])
+            .expect("the fixture declares `mod inline;`");
+        let mut confined = inline.test_only_mods.clone();
+        confined.sort();
+        assert_eq!(
+            confined,
+            vec![
+                // `#[cfg(test)] mod gated { ... }`.
+                vec!["inline".to_string(), "gated".to_string()],
+                // Ungated, and inside `gated`.
+                vec![
+                    "inline".to_string(),
+                    "gated".to_string(),
+                    "deeper".to_string()
+                ],
+                // `#[cfg(all(test, feature = "extra"))] mod narrow { ... }`:
+                // a gate that narrows a test build is still confined to one.
+                vec!["inline".to_string(), "narrow".to_string()],
+                // `#[cfg(test)] mod tests { ... }`.
+                vec!["inline".to_string(), "tests".to_string()],
+            ],
+            "`either_way` is `any(test, unix)` and `never_in_tests` is \
+             `not(test)`; neither is confined to a test build. `alt` is \
+             declared twice — `#[cfg(test)]` and `#[cfg(all(not(test), \
+             unix))]` — and the second is gated rather than ungated, so a \
+             rule that cleared the path only for an *ungated* alternative \
+             would list it here",
+        );
+
+        // And the out-of-line spelling of `gated`, which is the same answer
+        // carried by the other field.
+        let outline = resolved
+            .files
+            .iter()
+            .find(|file| file.module == ["inline", "outline"])
+            .expect("the fixture declares `#[cfg(test)] mod outline;`");
+        assert!(outline.test_only, "the two spellings have to agree");
+    }
+
+    /// One file can declare `mod imp` twice under disjoint `cfg`s, and the
+    /// symbol table merges the two into one module — so a module path a
+    /// confined and an unconfined declaration both reach cannot be answered
+    /// two ways. The unconfined one clears it, which is the direction that
+    /// loses a finding rather than inventing one.
+    ///
+    /// Unconfined is not the same as ungated, and the fixture case in
+    /// [`an_inline_mods_gate_is_recorded_for_the_module_paths_it_confines`]
+    /// is the half that tells them apart: this function is downstream of
+    /// [`Gates::test_only`] and sees only its answer.
+    #[test]
+    fn a_declaration_no_gate_confines_clears_a_path_a_confined_one_also_reaches() {
+        let confined = confined_inline_mods(vec![
+            (vec!["alt".to_string()], true),
+            (vec!["alt".to_string()], false),
+            (vec!["gated".to_string()], true),
+        ]);
+        assert_eq!(confined, vec![vec!["gated".to_string()]]);
     }
 
     /// A path is popped once whatever becomes of it, which the two paths that

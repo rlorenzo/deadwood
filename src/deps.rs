@@ -205,7 +205,7 @@
 //!   34 crates in the local registry it is the reason every entry declared in
 //!   the wrong table would have to be found by hand.
 //! - A file two `mod` declarations reach, one confining it to a test build and
-//!   one not, is attributed to the ungated one — all of it, including the
+//!   one not, is attributed to the one that is not — all of it, including the
 //!   parts only the test-confined declaration compiles. There is one file and
 //!   one answer, and this is the direction that misses findings instead of
 //!   inventing them ([`crate::modtree::resolve`]).
@@ -1013,6 +1013,7 @@ mod tests {
                 ast,
                 module: Vec::new(),
                 test_only,
+                test_only_mods: Vec::new(),
             }],
             &target(kind),
             &gates,

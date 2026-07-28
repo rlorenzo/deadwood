@@ -172,6 +172,7 @@ mod tests {
                         .map(str::to_string)
                         .collect(),
                     test_only: false,
+                    test_only_mods: Vec::new(),
                 })
                 .collect(),
         }
@@ -484,6 +485,7 @@ mod tests {
                 ast: syn::parse_file("fn main() { fixture::exported(); }\n").ok(),
                 module: Vec::new(),
                 test_only: false,
+                test_only_mods: Vec::new(),
             }],
         };
         assert_eq!(unused_names(&[library, consumer]), vec!["unexported"]);

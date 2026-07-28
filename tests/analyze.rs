@@ -2484,10 +2484,86 @@ fn a_test_target_and_an_inline_test_module_are_classified_alike() {
         test_only(&analysis),
         vec![
             ("app/src/inline.rs".to_string(), "only_tests"),
+            ("app/src/inline.rs".to_string(), "only_an_inline_gate"),
+            ("app/src/inline.rs".to_string(), "only_an_outline_gate"),
+            ("app/src/inline.rs".to_string(), "only_a_nested_inline_gate"),
+            ("app/src/inline.rs".to_string(), "only_an_inline_gate_use"),
+            ("app/src/inline.rs".to_string(), "behind_an_all_gate"),
             ("app/tests/support/mod.rs".to_string(), "from_target"),
             ("probe/src/hidden.rs".to_string(), "declared"),
             ("probe/src/hidden.rs".to_string(), "undeclared"),
         ],
+    );
+}
+
+/// The claim phase 14 exists for. `#[cfg(test)] mod gated { ... }` and
+/// `#[cfg(test)] mod outline;` are one construct written two ways, and the
+/// entry point inside each is an `#[allow(dead_code)]` function — neither
+/// `#[test]` nor `#[bench]`, so the attribute cannot answer and the gate on
+/// the `mod` is the only thing that can. Asserting them together is what makes
+/// a fix that moves one and forgets the other fail here.
+#[test]
+fn the_inline_and_out_of_line_spellings_of_a_cfg_test_mod_agree() {
+    let analysis = analyze_configured("testonly", "warn.toml");
+    let names: Vec<&str> = test_only(&analysis).into_iter().map(|(_, n)| n).collect();
+    assert!(names.contains(&"only_an_inline_gate"), "{names:?}");
+    assert!(names.contains(&"only_an_outline_gate"), "{names:?}");
+}
+
+/// Confinement accumulates downward and never lifts, so an *ungated* `mod`
+/// inside a test-only one is test code too — the rule phase 7 wrote down for
+/// files, holding for blocks.
+#[test]
+fn a_module_nested_inside_a_test_only_inline_module_is_test_code_too() {
+    let analysis = analyze_configured("testonly", "warn.toml");
+    let names: Vec<&str> = test_only(&analysis).into_iter().map(|(_, n)| n).collect();
+    assert!(names.contains(&"only_a_nested_inline_gate"), "{names:?}");
+}
+
+/// The consumer of `test_context` that is easiest to forget: `add_use` reads
+/// it too, so a `#[allow(unused)] use` inside an inline `#[cfg(test)] mod` is
+/// a test entry point and what it imports is reached only from test code. A
+/// fix that moves `collect_items` and leaves `add_use` behind gives two
+/// spellings that disagree one level down, and fails here.
+#[test]
+fn an_unused_use_inside_an_inline_test_module_is_a_test_entry_point() {
+    let analysis = analyze_configured("testonly", "warn.toml");
+    let names: Vec<&str> = test_only(&analysis).into_iter().map(|(_, n)| n).collect();
+    assert!(names.contains(&"only_an_inline_gate_use"), "{names:?}");
+}
+
+/// The negative half, which is what reusing `cfg::Gates::test_only` buys over
+/// matching `#[cfg(test)]` by shape. `any(test, unix)` holds in a build with
+/// no tests in it, so the module is not confined to one; `not(test)` is the
+/// gate that holds only outside a test build. Both root what is under them
+/// normally, and what they reach stays out of the kind.
+#[test]
+fn only_a_gate_that_holds_nowhere_but_a_test_build_makes_its_module_test_code() {
+    let analysis = analyze_configured("testonly", "warn.toml");
+    let names: Vec<&str> = test_only(&analysis).into_iter().map(|(_, n)| n).collect();
+    assert!(!names.contains(&"behind_an_any_gate"), "{names:?}");
+    assert!(!names.contains(&"behind_a_not_test_gate"), "{names:?}");
+    // The comparison that gives those two their teeth, and the shape a
+    // syntactic `#[cfg(test)]` match would miss in the other direction:
+    // `all(test, feature = "extra")` narrows a test build and is still one.
+    assert!(names.contains(&"behind_an_all_gate"), "{names:?}");
+    assert!(names.contains(&"only_an_inline_gate"), "{names:?}");
+}
+
+/// Reporting *more* is the direction of this fix, so the other direction needs
+/// pinning: a `pub(crate)` item reached from one of the new test entry points
+/// is not suddenly a finding of some other kind. It is already the fix a
+/// reported item is told to make.
+#[test]
+fn a_crate_private_item_behind_a_test_gated_entry_point_is_not_reported() {
+    let analysis = analyze_configured("testonly", "warn.toml");
+    assert!(
+        !analysis
+            .findings
+            .iter()
+            .any(|f| f.name.as_deref() == Some("already_crate_private")),
+        "{:?}",
+        analysis.findings
     );
 }
 
@@ -2577,19 +2653,19 @@ fn a_test_only_finding_is_baselineable_like_any_other() {
 
     let (code, stdout) = run_binary(&dir, &["--config", config.to_str().unwrap()]);
     assert_eq!(code, Some(0), "warn findings do not fail a run: {stdout}");
-    assert!(stdout.contains("4 finding(s)"), "{stdout}");
+    assert!(stdout.contains("9 finding(s)"), "{stdout}");
 
     let (code, stdout) = run_binary(
         &dir,
         &["--config", config.to_str().unwrap(), "--write-baseline"],
     );
     assert_eq!(code, Some(0), "{stdout}");
-    assert!(stdout.contains("Wrote 4 finding(s)"), "{stdout}");
+    assert!(stdout.contains("Wrote 9 finding(s)"), "{stdout}");
     let recorded = std::fs::read_to_string(dir.join("deadwood-baseline.json")).unwrap();
     assert!(recorded.contains("\"test_only_item\""), "{recorded}");
 
     let (code, stdout) = run_binary(&dir, &["--config", config.to_str().unwrap()]);
     assert_eq!(code, Some(0), "{stdout}");
     assert!(stdout.contains("No issues found."), "{stdout}");
-    assert!(stdout.contains("4 finding(s) suppressed"), "{stdout}");
+    assert!(stdout.contains("9 finding(s) suppressed"), "{stdout}");
 }

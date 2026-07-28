@@ -1097,7 +1097,15 @@ impl SymbolTable {
                         target: None,
                     });
                     if let Some((_, inner)) = &m.content {
-                        self.collect_items(inner, child, file, true, test_context);
+                        // An inline `#[cfg(test)] mod tests { ... }` is test
+                        // code, exactly as the out-of-line `#[cfg(test)] mod
+                        // tests;` spelling of it is. Both answers come from
+                        // one evaluation of `cfg::Gates::test_only` in
+                        // `crate::modtree`, which walks these declarations
+                        // anyway: this module still does not know what a `cfg`
+                        // is, and the predicate still has one copy.
+                        let inner_context = test_context || file.test_only_mods.contains(&path);
+                        self.collect_items(inner, child, file, true, inner_context);
                     }
                 }
                 syn::Item::Use(u) => self.add_use(u, module, file, top_level, test_context),
@@ -2522,6 +2530,7 @@ mod tests {
                         .map(str::to_string)
                         .collect(),
                     test_only: false,
+                    test_only_mods: Vec::new(),
                 })
                 .collect(),
         }
@@ -3622,6 +3631,112 @@ mod tests {
         ]);
         crate_unit.files[2].test_only = true;
         assert_eq!(test_only_in(&[crate_unit]), vec!["helper"]);
+    }
+
+    /// And the inline spelling of the same code says the same thing, which is
+    /// what this phase is: `crate::modtree` evaluates one gate for both and
+    /// hands the inline answer over as [`ParsedFile::test_only_mods`].
+    ///
+    /// Asserted against the same sources with the flag absent, because that
+    /// difference *is* the defect — and because with the flag absent the entry
+    /// point is a root in both walks, which is why the gap could only ever
+    /// lose a finding.
+    #[test]
+    fn an_entry_point_in_a_test_only_inline_module_is_a_test_root() {
+        let sources = [
+            ("", "mod inner;\nmod outer;\n"),
+            ("inner", "pub fn helper() {}\n"),
+            (
+                "outer",
+                "#[cfg(test)]\nmod gated {\n\
+                 #[allow(dead_code)]\nfn kept() { crate::inner::helper(); }\n}\n",
+            ),
+        ];
+
+        let unflagged = unit(&sources);
+        assert!(
+            test_only_in(&[unflagged]).is_empty(),
+            "without the flag the entry point is an ordinary root",
+        );
+
+        let mut gated = unit(&sources);
+        gated.files[2].test_only_mods = vec![vec!["outer".to_string(), "gated".to_string()]];
+        assert_eq!(test_only_in(&[gated]), vec!["helper"]);
+    }
+
+    /// Four things read `test_context`, and a fix that reaches three of them
+    /// produces two spellings that disagree one level down. Each body below is
+    /// an entry point of a different kind written in the same gated module:
+    /// the `dead_code` opt-out, `fn main`, a module-level `use`, and a `use`
+    /// inside a function body, which is collected by a visitor of its own.
+    #[test]
+    fn every_consumer_of_the_test_context_reads_the_inline_module_flag() {
+        let bodies = [
+            "#[allow(dead_code)]\nfn kept() { crate::inner::helper(); }\n",
+            "fn main() { crate::inner::helper(); }\n",
+            "#[allow(unused)]\nuse crate::inner::helper;\n",
+            "#[allow(dead_code)]\nfn kept() {\n#[allow(unused)]\nuse crate::inner::helper;\n}\n",
+        ];
+        for body in bodies {
+            let source = format!("#[cfg(test)]\nmod gated {{\n{body}}}\n");
+            let mut crate_unit = unit(&[
+                ("", "mod inner;\nmod outer;\n"),
+                ("inner", "pub fn helper() {}\n"),
+                ("outer", &source),
+            ]);
+            crate_unit.files[2].test_only_mods =
+                vec![vec!["outer".to_string(), "gated".to_string()]];
+            assert_eq!(
+                test_only_in(&[crate_unit]),
+                vec!["helper"],
+                "entry point not read as test code: {body}",
+            );
+        }
+    }
+
+    /// Confinement accumulates downward, so the flag on an outer module has to
+    /// carry into a `mod` written inside it — `crate::modtree` lists the
+    /// nested path too, and the recursion passes the context on either way.
+    #[test]
+    fn a_module_nested_in_a_test_only_inline_module_is_test_code() {
+        let mut crate_unit = unit(&[
+            ("", "mod inner;\nmod outer;\n"),
+            ("inner", "pub fn helper() {}\n"),
+            (
+                "outer",
+                "#[cfg(test)]\nmod gated {\nmod deeper {\n\
+                 #[allow(dead_code)]\nfn kept() { crate::inner::helper(); }\n}\n}\n",
+            ),
+        ]);
+        crate_unit.files[2].test_only_mods = vec![
+            vec!["outer".to_string(), "gated".to_string()],
+            vec![
+                "outer".to_string(),
+                "gated".to_string(),
+                "deeper".to_string(),
+            ],
+        ];
+        assert_eq!(test_only_in(&[crate_unit]), vec!["helper"]);
+    }
+
+    /// A `#[test]` function is a test entry point wherever it is written, so
+    /// the flag changes nothing for one — the attribute answers first. Pinning
+    /// it says the new input widens the kind in exactly one place.
+    #[test]
+    fn a_test_function_is_a_test_root_with_or_without_the_inline_flag() {
+        let sources = [
+            ("", "mod inner;\nmod outer;\n"),
+            ("inner", "pub fn helper() {}\n"),
+            (
+                "outer",
+                "#[cfg(test)]\nmod gated {\n#[test]\nfn covered() { crate::inner::helper(); }\n}\n",
+            ),
+        ];
+        assert_eq!(test_only_in(&[unit(&sources)]), vec!["helper"]);
+
+        let mut gated = unit(&sources);
+        gated.files[2].test_only_mods = vec![vec!["outer".to_string(), "gated".to_string()]];
+        assert_eq!(test_only_in(&[gated]), vec!["helper"]);
     }
 
     /// An opaque mention is a root in *both* walks, so an item one names can

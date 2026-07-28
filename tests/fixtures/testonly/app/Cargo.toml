@@ -10,3 +10,9 @@ edition = "2021"
 name = "it"
 path = "tests/it.rs"
 harness = false
+
+# Declared so that `#[cfg(all(test, feature = "extra"))]` is a gate that *can*
+# hold: an undeclared feature can hold in no build at all, which is a different
+# question and a different answer.
+[features]
+extra = []
