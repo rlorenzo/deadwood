@@ -373,6 +373,13 @@ impl Key {
     /// dead file records neither, a manifest entry and a gate site record no
     /// module. The package comes from the file, and a file belonging to no
     /// package of this workspace answers `None` as well.
+    ///
+    /// The name is the one condition here no test can catch on its own, and
+    /// that is worth stating rather than leaving as an apparent gap in the
+    /// coverage: every finding Deadwood produces that carries a module also
+    /// carries a name, so an entry that lost the name requirement still has
+    /// nothing to pair with. It stays because an identity without a name is not
+    /// one, not because it is load bearing today.
     fn relocation(&self, packages: &Packages) -> Option<Relocation> {
         Some(Relocation {
             kind: self.kind,

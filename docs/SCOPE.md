@@ -849,27 +849,116 @@ Closes [#16](https://github.com/rlorenzo/deadwood/issues/16), and files the
 residual it leaves: [#30](https://github.com/rlorenzo/deadwood/issues/30), two
 definitions that share a file, a name *and* a module.
 
+## Phase 13 — a baseline entry that survives a moved file (shipped)
+
+`git mv src/legacy.rs src/legacy/mod.rs` changes no code and no item, and the
+match key included the file path, so it turned every finding in the file into a
+new one and every entry recording them into a stale one. Matching now runs in
+two passes: the key exactly as it was, and then — over what that pass left
+unmatched **on both sides** — the identity a move preserves.
+
+The issue said the fix needed "a similarity signal Deadwood does not currently
+compute". That is true of `dead_file` and false of the item kinds, and the
+number that separates them is what the phase turns on.
+
+- **What has an identity, measured.** Across the 34 crates in the local
+  registry, the 18 fixtures that predate this phase and Deadwood itself there
+  are 213 findings. **127 of them — 60% — carry a module**: 123
+  `unused_pub_item` and 4 `unused_reexport`. Zero are ambiguous by
+  (kind, name, module), per workspace or corpus-wide — the `moved` fixture this
+  phase adds is the only such group in the corpus now, and it exists to
+  demonstrate the collision, exactly as phase 12's `twin` does for the key. So
+  for most of the corpus an identity that survives a path change already existed
+  and needed no similarity signal, no content hash and no format change. The
+  other 86 split into `dead_file` (39), which has no name and no module and
+  genuinely needs a signal nothing computes, and the manifest kinds (43), whose
+  path moves only when a whole package does.
+- **The file is to the module path what the line is to the file, and that is the
+  whole idea.** For an *item*, the file is a second name for a place the key
+  already records: `crate::legacy::gone` in package `alpha` names one definition
+  and the file is where you go to read it. So the second pass compares
+  identities rather than similarity, and it is not rename detection — nothing
+  here looks at content.
+- **The file is still in the key, and dropping it was tested rather than
+  assumed.** Phase 6 rejected dropping it for being too broad, phase 12's module
+  path narrowed it, and whether it narrowed it *enough to stand alone* is a
+  claim the corpus can answer. Over **2659 reportable `pub` definitions**,
+  exactly **one** group shares a module path and a name across two files of one
+  workspace: `clap`'s `pub const CLAP_STYLING`, defined at `crate` in two of its
+  examples. One counterexample in 2659 is enough — the module path is
+  `crate`-*relative*, so it identifies neither the package nor the target, and
+  the "zero collisions among findings" number would have hidden that. The file
+  stays, compared first, and is read a second time for the one thing the module
+  path cannot say: which **package** the entry was recorded in, by containment
+  against the workspace's manifest directories.
+- **The failure direction runs the other way from every phase since 9, and that
+  is what the refusals are for.** Today a move produces noise; a matcher that
+  gets a move wrong produces silence. Four things hold the second pass back, and
+  each is a mutation caught by a named test. It cannot reach a finding with no
+  module, so `dead_file` is out of range *by construction* rather than by a kind
+  list someone could extend. It runs second, so a finding the exact key matched
+  is never available to it — which is why two items sharing a name and a module
+  in two files are still two findings, and baselining one still leaves the other
+  reported. It refuses when the pairing is ambiguous: exactly one leftover entry
+  and exactly one leftover finding, or nothing. And it will not cross a package.
+  Deliberately *not* the set semantics the exact key uses — there the unanswerable
+  question is which occurrence is new, so all are covered; here it is whether a
+  move happened at all, so none is.
+- **No format change, which is most of what made the phase cheap.** `module` was
+  already on `Finding` and on the entry, `--json` gains nothing, and the package
+  comes from `cargo metadata` rather than from the file. Phase 12 predicted this
+  and it held: no second one-way door, and every baseline already committed to
+  somebody's repository reads exactly as it did.
+- **What it found.** Default output — no baseline file — is byte-identical across
+  all 54 targets, the 19 fixtures included, text report, `--json`, stderr and
+  exit codes alike, against a binary built from `main` in a detached worktree
+  (`--json` too: the phase adds no key). Against that same binary, four
+  of the `moved` fixture's six configs are byte-identical *with* their baselines
+  too: the refusals are not new behaviour, they are the old behaviour left
+  alone. Only the two configs about a move differ, and only by suppressing what
+  the move preserved.
+- **What is left, and it is a decision rather than an oversight.**
+  `tests/fixtures/moved/unmoved.toml` pins that a moved `dead_file` and a
+  dependency entry recorded against another manifest behave exactly as they did
+  before this phase. The residual is filed
+  ([#32](https://github.com/rlorenzo/deadwood/issues/32)), including the half of
+  it that is cheap — a package that moves keeps its name, and only the entry not
+  recording that name stops it being matchable — and the half that is not, which
+  is `dead_file` and wants a content signal and its own argument. One more
+  limitation is stated rather than glossed: the second pass is scoped to the
+  package but not to the *target*, because no finding carries one and one file
+  can belong to several, so `clap`'s two-example shape is one identity to it.
+
+Recall was checked the other way, by mutation: eighteen inversions — the second
+pass removed outright, the module and the name each dropped from the identity
+requirement, the package dropped from the identity and from the lookup, a file in
+no package given one anyway, the kind and the module each dropped from the
+relocation, each half of the ambiguity guard loosened, the entry side and the
+finding side each fed the whole set instead of the leftovers, suppression and
+staleness each left un-relocated, the package directories sorted shallowest
+first, keyed by manifest file rather than directory, and given one shared name,
+pruning inverted to keep what it drops, and the file dropped from the exact key
+so the module path stands alone. **Seventeen were caught by a named test.** The
+eighteenth — the name requirement — is unreachable and is documented as such
+rather than left looking like a coverage gap: every finding Deadwood produces
+that carries a module also carries a name, so an entry that lost the requirement
+still has nothing to pair with. That is the trap phase 10 hit, reported instead
+of hidden.
+
+Closes [#17](https://github.com/rlorenzo/deadwood/issues/17), and files the
+residual it leaves: [#32](https://github.com/rlorenzo/deadwood/issues/32), the
+kinds with no item identity, and a package directory that moves.
+
 ## Next (sequenced, one slice at a time)
 
-1. **Survive a moved file**
-   ([#17](https://github.com/rlorenzo/deadwood/issues/17)) — the path is in
-   the key, so `git mv` un-baselines everything in the file. Rename detection
-   needs a similarity signal we do not compute, and the honest answer may be
-   to document the `--prune-baseline` + `--write-baseline` workaround instead
-   of guessing; weigh that before building anything. Phase 12 changed what this
-   has to work with rather than what it costs: the module path is a second
-   location signal, exactly invariant across the `foo.rs` → `foo/mod.rs`
-   conversion (measured) and moving in lockstep with the path for every other
-   shape of move, and it needs no format change of its own. The issue carries
-   both halves of that.
-2. **Make an inline `#[cfg(test)] mod` test code for the entry-point split**
+1. **Make an inline `#[cfg(test)] mod` test code for the entry-point split**
    ([#27](https://github.com/rlorenzo/deadwood/issues/27)) — the out-of-line
    spelling is handled and the inline one is not, so the two disagree about an
    entry point that is neither `#[test]` nor `#[bench]`. Below the baseline
    entry because it was measured before it was filed: simulating the fix
    changed no finding anywhere. It wants `cfg::Gates` reachable from
    `src/resolve.rs`, which phase 4 deliberately kept out of it.
-3. **Follow a named `pub use` of a module onto the public surface**
+2. **Follow a named `pub use` of a module onto the public surface**
    ([#28](https://github.com/rlorenzo/deadwood/issues/28)) — phase 11 follows
    a `pub use inner::*;` glob and the `pub` modules under it, and `pub use
    inner::sub;` reaches the same place by a third route the closure does not
@@ -877,14 +966,26 @@ definitions that share a file, a name *and* a module.
    consumer can name it. Same shape and same risk as phase 11, and low for the
    same reason as the one above it: simulating the fix changed no finding on any
    fixture, on the registry crates, or on Deadwood itself.
-4. **Separate two definitions that share a file, a name and a module**
+3. **Separate two definitions that share a file, a name and a module**
    ([#30](https://github.com/rlorenzo/deadwood/issues/30)) — phase 12's
-   residual, and last of the filed entries because it is the smallest and the
-   least reachable. `pub struct Group` beside `#[allow(non_snake_case)] pub fn
+   residual. `pub struct Group` beside `#[allow(non_snake_case)] pub fn
    Group(..)` differ by Rust's namespaces, which the key does not model; two
    `cfg`-alternative definitions of one item differ by nothing at all, and
    suppressing those together is correct. Ten groups in the corpus are at risk
-   this way and none of them produces a finding today.
+   this way and none of them produces a finding today. Phase 13 did not move it:
+   the second pass compares a *relocation* built from the same fields, so a key
+   two definitions share is a relocation they share, and the argument there is
+   unchanged.
+4. **Match a moved dead file, and a moved package's manifest entries**
+   ([#32](https://github.com/rlorenzo/deadwood/issues/32)) — phase 13's
+   residual, and last of the filed entries because its failure mode is noise
+   and it has a workaround. 86 of the corpus's 213 findings name no module and
+   so have no identity a move preserves. Two halves with different prices: a
+   package that moves keeps its *name*, so recording that name on the entry
+   would close the manifest kinds and extend the item kinds across a package
+   move — at the cost of a second additive field and a second one-way door,
+   which is the same bill #30 is weighing. `dead_file` has nothing but its path
+   and wants a content signal, which is a different phase with its own argument.
 5. **Report a `[dev-dependencies]` entry the library itself names.** The
    check has never made that claim, because the likeliest explanation used to
    be a mis-attribution of ours rather than a manifest that cannot compile.
