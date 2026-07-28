@@ -1,0 +1,6 @@
+# A module path is `crate`-relative, so it says nothing about which crate it is
+# in. `migrated` is recorded against a file in `alpha` and occurs in `beta`, at
+# the same module path, with exactly one candidate on each side — every signal
+# the second pass compares agrees except the package, and the package is what
+# refuses. Without it, one entry would cover both members' `crate::legacy`.
+baseline = "crosspackage-baseline.json"

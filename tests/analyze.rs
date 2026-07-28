@@ -1698,6 +1698,239 @@ fn an_entry_naming_a_module_leaves_its_same_named_neighbour_reported() {
     );
 }
 
+// -- a moved file ----------------------------------------------------------
+//
+// The `moved` fixture is a two-member workspace producing six findings, and
+// every `*.toml` beside it records them at files they are no longer in. Two
+// members, because the question is whether a `crate`-relative module path can
+// stand in for the file, and one package cannot ask it.
+
+/// The unconfigured run every case below is measured against.
+#[test]
+fn the_moved_fixture_reports_one_finding_of_each_shape_it_needs() {
+    let analysis = analyze_fixture("moved");
+    assert_eq!(
+        all_reported(&analysis),
+        vec![
+            (
+                FindingKind::UnusedDependency,
+                "alpha/Cargo.toml".to_string(),
+                "unused_crate".to_string()
+            ),
+            (
+                FindingKind::DeadFile,
+                "alpha/src/attic/dropped.rs".to_string(),
+                String::new()
+            ),
+            (
+                FindingKind::UnusedPubItem,
+                "alpha/src/bin/one.rs".to_string(),
+                "shared".to_string()
+            ),
+            (
+                FindingKind::UnusedPubItem,
+                "alpha/src/bin/two.rs".to_string(),
+                "shared".to_string()
+            ),
+            (
+                FindingKind::UnusedPubItem,
+                "alpha/src/legacy/mod.rs".to_string(),
+                "gone".to_string()
+            ),
+            (
+                FindingKind::UnusedPubItem,
+                "beta/src/lib.rs".to_string(),
+                "migrated".to_string()
+            ),
+        ]
+    );
+    assert!(
+        analysis.baseline.is_none(),
+        "no `baseline` key and no file at the default location is no baseline"
+    );
+}
+
+/// The headline case of #17: `git mv` changes no item, so a baseline written
+/// before the move still covers everything and the run is silent. Two shapes of
+/// move at once — a file module become a directory module, and an out-of-line
+/// module become an inline one — and both leave the item where it was in its
+/// crate's module tree.
+#[test]
+fn a_finding_whose_file_moved_is_still_baselined() {
+    let analysis = analyze_configured("moved", "moved.toml");
+    assert!(
+        analysis.findings.is_empty(),
+        "a pure rename must not fail the run: {:?}",
+        all_reported(&analysis)
+    );
+    assert!(!analysis.has_denied());
+    assert_eq!(suppressed(&analysis), 6);
+    assert!(
+        stale_keys(&analysis).is_empty(),
+        "and the entries that recorded them are not stale either: {:?}",
+        stale_keys(&analysis)
+    );
+}
+
+/// The case the cheap fix gets wrong. `one.rs` and `two.rs` each define a
+/// `pub fn shared` at `crate` in one package, so they differ in nothing but the
+/// file; baselining one must not cover the other. This is the test that goes
+/// red the moment the matcher stops consulting the file first.
+#[test]
+fn two_items_sharing_a_name_and_a_module_in_two_files_are_still_two_findings() {
+    let analysis = analyze_configured("moved", "neighbour.toml");
+    assert_eq!(
+        all_reported(&analysis),
+        vec![(
+            FindingKind::UnusedPubItem,
+            "alpha/src/bin/two.rs".to_string(),
+            "shared".to_string()
+        )],
+        "the neighbour of a baselined item is news"
+    );
+    assert!(analysis.has_denied(), "so it fails the run");
+    assert_eq!(suppressed(&analysis), 5);
+    assert!(
+        stale_keys(&analysis).is_empty(),
+        "and nothing went stale: {:?}",
+        stale_keys(&analysis)
+    );
+}
+
+/// One entry and two candidates is not a move, it is two readings of the same
+/// evidence. The run reports both findings and names the entry stale —
+/// declining is what keeps the failure mode noise rather than silence.
+#[test]
+fn an_entry_with_two_candidates_relocates_to_neither() {
+    let analysis = analyze_configured("moved", "ambiguous.toml");
+    assert_eq!(
+        all_reported(&analysis),
+        vec![
+            (
+                FindingKind::UnusedPubItem,
+                "alpha/src/bin/one.rs".to_string(),
+                "shared".to_string()
+            ),
+            (
+                FindingKind::UnusedPubItem,
+                "alpha/src/bin/two.rs".to_string(),
+                "shared".to_string()
+            ),
+        ]
+    );
+    assert_eq!(
+        stale_keys(&analysis),
+        vec!["alpha/src/bin/three.rs: unused_pub_item `shared` in `crate`".to_string()]
+    );
+}
+
+/// The same refusal the other way round: two entries competing for one finding
+/// leaves the finding reported and both entries stale.
+#[test]
+fn two_entries_competing_for_one_finding_relocate_to_neither() {
+    let analysis = analyze_configured("moved", "crowded.toml");
+    assert_eq!(
+        all_reported(&analysis),
+        vec![(
+            FindingKind::UnusedPubItem,
+            "alpha/src/legacy/mod.rs".to_string(),
+            "gone".to_string()
+        )]
+    );
+    assert_eq!(
+        stale_keys(&analysis),
+        vec![
+            "alpha/src/legacy.rs: unused_pub_item `gone` in `crate::legacy`".to_string(),
+            "alpha/src/attic/legacy.rs: unused_pub_item `gone` in `crate::legacy`".to_string(),
+        ]
+    );
+}
+
+/// A module path is `crate`-relative and says nothing about which crate. Every
+/// other signal agrees here — kind, name, module, one candidate on each side —
+/// and the entry still does not travel, because the packages differ.
+#[test]
+fn a_moved_finding_is_not_matched_across_two_packages() {
+    let analysis = analyze_configured("moved", "crosspackage.toml");
+    assert_eq!(
+        all_reported(&analysis),
+        vec![(
+            FindingKind::UnusedPubItem,
+            "beta/src/lib.rs".to_string(),
+            "migrated".to_string()
+        )],
+        "`beta`'s `crate::legacy::migrated` is not `alpha`'s"
+    );
+    assert_eq!(
+        stale_keys(&analysis),
+        vec!["alpha/src/migrated.rs: unused_pub_item `migrated` in `crate::legacy`".to_string()]
+    );
+}
+
+/// The boundary of the phase, pinned rather than assumed. A `dead_file` carries
+/// no name and no module, and a dependency entry names a crate in a manifest —
+/// neither has an item identity a move could preserve, so both behave exactly as
+/// they did before the second pass existed.
+#[test]
+fn a_finding_with_no_module_is_never_relocated() {
+    let analysis = analyze_configured("moved", "unmoved.toml");
+    assert_eq!(
+        all_reported(&analysis),
+        vec![
+            (
+                FindingKind::UnusedDependency,
+                "alpha/Cargo.toml".to_string(),
+                "unused_crate".to_string()
+            ),
+            (
+                FindingKind::DeadFile,
+                "alpha/src/attic/dropped.rs".to_string(),
+                String::new()
+            ),
+        ],
+        "both are reported again at their new locations"
+    );
+    assert_eq!(
+        stale_keys(&analysis),
+        vec![
+            "beta/Cargo.toml: unused_dependency `unused_crate`".to_string(),
+            "alpha/src/dropped.rs: dead_file".to_string(),
+        ],
+        "and both entries are stale, which is the whole of today's behaviour"
+    );
+}
+
+/// Pruning removes exactly the entries the run named stale, and leaves a
+/// relocated one in place — with the path it was written with, exactly as a
+/// matched entry keeps its drifted line. `--write-baseline` is what re-records
+/// either.
+#[test]
+fn pruning_keeps_a_relocated_entry_with_the_path_it_was_written_with() {
+    let dir = scratch_copy("moved", "prune-relocated");
+    let config = dir.join("moved.toml");
+    let (code, out) = run_binary(
+        dir.as_path(),
+        &["--config", config.to_str().unwrap(), "--prune-baseline"],
+    );
+    assert_eq!(code, Some(0), "{out}");
+
+    let file: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("moved-baseline.json")).unwrap())
+            .unwrap();
+    let entries = file["findings"].as_array().unwrap();
+    assert_eq!(
+        entries.len(),
+        6,
+        "nothing was stale, so nothing was dropped"
+    );
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry["file"] == "alpha/src/legacy.rs" && entry["line"] == 902),
+        "the relocated entry is untouched, path and line alike: {entries:#?}"
+    );
+}
+
 /// A baseline path that is written down and not there must never read as
 /// "nothing is baselined": the run would be green for the wrong reason, and a
 /// typo would silently disarm a CI gate.

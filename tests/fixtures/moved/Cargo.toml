@@ -1,0 +1,15 @@
+# Test fixture: a baseline entry whose file moved.
+#
+# Two members, because the question this fixture exists to ask cannot be asked
+# inside one. A baseline entry's `module` is `crate`-relative, so `alpha`'s
+# `crate::legacy::gone` and `beta`'s are the same module path written in two
+# different packages, and only the recorded file says which is which.
+#
+# The tree is fixed and the `*.toml` files beside it each name a
+# `*-baseline.json` that disagrees with it in one controlled way — a file the
+# findings are no longer in. There is deliberately no `deadwood.toml` and no
+# `deadwood-baseline.json` here: the unconfigured run is what every case is
+# measured against.
+[workspace]
+members = ["alpha", "beta"]
+resolver = "2"

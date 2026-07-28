@@ -1,0 +1,5 @@
+# The same refusal read the other way round: two entries competing for one
+# finding. `gone` is recorded at two files that are not there, and it occurs
+# once. Whichever entry moved, the other one is stale, and nothing here says
+# which — so both are named stale and the finding is reported.
+baseline = "crowded-baseline.json"

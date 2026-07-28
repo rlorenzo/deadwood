@@ -1,0 +1,9 @@
+# The case the cheap fix gets wrong, and the one that must go red the moment
+# the matcher stops looking at the file first.
+#
+# `one.rs` and `two.rs` each define `pub fn shared` at `crate`, in one package.
+# Everything here is recorded except `two.rs`'s, so a matcher keyed on
+# (kind, name, module) alone would suppress it — one entry covering both. It is
+# not suppressed: both items occur, the exact key claims both sides, and the
+# second pass sees nothing left over to pair.
+baseline = "neighbour-baseline.json"

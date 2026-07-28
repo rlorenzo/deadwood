@@ -1,0 +1,14 @@
+# What this phase deliberately does not do, pinned so the boundary is a decision
+# rather than an accident. Two entries are recorded at files their findings are
+# no longer in, and both are still stale and both findings are still reported:
+#
+# - a `dead_file`, which carries no name and no module. There is nothing about a
+#   dead file that survives a move, and two unrelated dead files are
+#   indistinguishable without a content signal Deadwood does not compute. Any
+#   rule that appeared to handle this kind would be guessing.
+# - an `unused_dependency`, which names a crate in a manifest and no module. A
+#   manifest path moves only when a whole package moves, which is a different
+#   and rarer event with no signal here either.
+#
+# Both behave exactly as they did before the second pass existed.
+baseline = "unmoved-baseline.json"
