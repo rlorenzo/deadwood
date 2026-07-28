@@ -1069,22 +1069,128 @@ removes exactly the entries it removes.
 
 Closes [#27](https://github.com/rlorenzo/deadwood/issues/27).
 
+## Phase 15 — a named `pub use` of a module is public surface (shipped)
+
+Phase 11 made `SymbolTable::externally_reachable_modules` the surface rule and
+followed two edges: a `pub use` **glob** to the module it names, and a surface
+module to its own `pub` children. A third route reaches the same place and was
+not followed — a named `pub use` whose target is a **module**. A named `pub
+use` of an *item* needs no help, which is what made this easy to miss: it is a
+definition of its own, a root when its module is on the surface, and reaching
+it records an edge to the item it names. A module target has no item to record
+an edge to, and what became nameable is everything *inside* it — a surface
+question rather than an edge question.
+
+- **The decision was whether to build it, and the direction is the opposite of
+  phase 14's.** #27 lost findings; this one *invents* them, which is the
+  direction this project cares about most, so a small population is worth more
+  here than a large one was there. But the zero this issue quotes is a
+  different animal from #27's: for a false-positive gap the **output**
+  measurement is the right instrument, because the over-broad simulation
+  removes at least everything the honest rule can, so "no finding changed" is
+  an upper bound of zero rather than a proxy for one. That is a stronger zero
+  than #27's, and closing #28 on it would have been legitimate. What decided
+  the other way is the same argument phase 14 turned on: three spellings of one
+  construct, two of them already handled, and the asymmetry is a correctness
+  defect whether or not a 34-crate registry trips it.
+- **The population, measured against `SymbolTable` rather than by a `syn`
+  walk**, since the question is what a path *resolves* to. Across the 35
+  library crates in the corpus — the 34 in `~/.cargo/registry/src/*/*/` plus
+  Deadwood, which contributes none — there are **930** non-glob `pub use`
+  leaves. 391 name an item, 458 lead outside the workspace, 20 are unresolvable,
+  and **61** resolve to a module, every one of them in the same crate. **54 of
+  those name a module already `pub` to its crate root**, where the closure's
+  first rule covers it and the missing edge changed nothing. The at-risk
+  population is the remaining **7**, in two crates: `syn` 2.0.119 and 3.0.3's
+  `pub use crate::gen::{fold, visit, visit_mut};`, where `mod gen` is a private
+  inline module (6 in total), and `clap_builder` 4.6.2's `pub use
+  value_parser::impl_prelude;`, under a non-`pub` ancestor. (The issue's draft
+  numbers were 889/60/53; the 7 agree exactly, and the 7 are what the decision
+  turns on. The extra module target is `anyhow`'s `pub use anyhow as
+  format_err;`, a crate naming itself, which resolves to its own crate root and
+  is on the surface already.)
+- **The intersection, which is the number that explains why the 7 do not
+  convert.** `unused_definitions` reports when `!(used && reached)`. Surface
+  membership feeds `is_root`, which feeds `reached`; it does not feed `used`.
+  So the edge can only ever change a finding whose message is *"referenced only
+  from items that nothing reaches"* — the second condition. Instrumenting the
+  built rule, those 7 modules are exactly the 7 the closure newly reaches, and
+  they hold **1138 reportable `pub` items**. Of those, **one** is reported
+  today: `pub fn visit_span_mut` in `syn` 2.0.119's `src/gen/visit_mut.rs`,
+  which is a *first*-condition finding ("never referenced by any resolved
+  path") and which no surface rule can touch. Second-condition findings under
+  the seven: **zero**. So the at-risk population for #28 is not "items under
+  such a re-export" but the intersection of that with "whose only referrer is
+  itself unreached", and on this corpus the intersection is empty.
+- **Where the edge goes, and how wide.** A third edge in
+  `externally_reachable_modules`, beside the other two: for every `pub use` in
+  a module the closure already covers, resolve the target and follow it where
+  `walk_path` answers `Outcome::Module`, which is the shape `resolve_globs`
+  uses for the glob form. The `pub` children descent then applies underneath it
+  unchanged. This is deliberately *narrower* than the simulation, which
+  followed re-exports from anywhere: a `pub use` written in a module outside
+  the surface roots nothing, because outside code cannot name the re-export to
+  go through it. The closure reaches a **fixed point** rather than making one
+  pass — the worklist follows the edge from every module it reaches, including
+  ones the edge itself put there — and the two-hop fixture is what proves it:
+  `lib.rs` re-exports `chain::first`, `first` re-exports `super::second`, and
+  `second` is nameable only if both hops are taken.
+- **The second consumer of the same set, which the issue does not mention.**
+  `is_worth_reporting` reads `externally_reachable_modules` too: a `pub use` in
+  a surface module is doing its job by existing and is not reported. Widening
+  the set widens that as well — the same direction, reporting less, but a
+  second behaviour change, and phase 11's whole point was that these two must
+  not drift apart. It gets its own fixture case and its own named test, and
+  two mutations pin the drift in both directions: widening the root set without
+  the filter, and narrowing the root set while the filter stays wide.
+- **Conservatism, and the halves that do not move.** A `pub(crate) use sub;`
+  re-exports nothing outward and is not a `DefKind::Reexport` at all, so it
+  roots nothing. A binary seeds the closure with no module, so none of this
+  reaches one — and the `pub use` in its crate root is still reported in its
+  own right. A named `pub use` of an *item* is unchanged: it is an edge, and
+  reading it as a surface fact would root every item in the target's module,
+  which is a fixture case and a mutation of its own. A re-export leading
+  outside the workspace, or one resolution cannot follow, puts nothing
+  anywhere.
+- **The reproducer in #28 does not compile, and the fixtures say so.** `mod
+  sub; pub use sub as api;` is E0365 — "`sub` is only public within the crate,
+  and cannot be re-exported outside". The shape that compiles is a `pub` module
+  under a *private ancestor*, which is what `syn` and `clap_builder` both
+  carry; the two spellings are then the presence or absence of a rename, not of
+  a path. Every fixture package compiles.
+- **What it found.** Default output is byte-identical across the 34 registry
+  crates, the 19 pre-existing fixtures and Deadwood itself, exit codes
+  included, against a binary built from `main` in a detached worktree with both
+  binaries pointed at the same trees. The only difference anywhere is inside
+  the `reexport` package this phase added: five findings gone, three
+  `unused_pub_item` (one per spelling, one two hops in) and two
+  `unused_reexport` (the filter half). The over-broad simulation was re-run on
+  the same corpus and is byte-identical too, on a `main` three phases newer
+  than the one phase 11 measured — so its claim still holds.
+
+Recall was checked by mutation: eleven inversions — the edge dropped entirely;
+the edge followed from any module regardless of surface (the simulation); the
+re-export's visibility ignored, so a `pub(crate) use` roots; a named `pub use`
+of an *item* rooting the module holding it; one pass instead of a fixed point;
+the target resolved from the crate root rather than from the module the
+re-export is written in; the closure seeded from a binary too; the re-export
+filter reverted to the narrow `pub`-chain question; the root set widened
+without the filter and the filter widened without the root set; and the surface
+exempted from "nothing names it" as well as from the cascade. **All eleven were
+caught by a named test.** Two of them are honestly not this phase's catch and
+are reported as such: seeding the closure from a binary is phase 11's shared
+rule and is caught by ten tests including phase 11's own, and exempting the
+surface from condition 1 is caught by thirty-three — those are rules several
+mechanisms already cover, which is the trap phases 10 and 14 both hit. The
+mutation that isolates this phase's half of the second one is "widen the root
+set but not the re-export filter", and that is caught by this phase's tests
+alone.
+
+Closes [#28](https://github.com/rlorenzo/deadwood/issues/28).
+
 ## Next (sequenced, one slice at a time)
 
-1. **Follow a named `pub use` of a module onto the public surface**
-   ([#28](https://github.com/rlorenzo/deadwood/issues/28)) — phase 11 follows
-   a `pub use inner::*;` glob and the `pub` modules under it, and `pub use
-   inner::sub;` reaches the same place by a third route the closure does not
-   take, so an item under it whose only referrer is dead is reported though a
-   consumer can name it. Same shape and same risk as phase 11. Its "changed no
-   finding anywhere" is phase 11's *simulation* — an output measurement, which
-   is what phase 14 found could not decide #27 — so what it is owed before it
-   is judged is a population count of its own: how many named `pub use`
-   re-exports of a module sit in a module the surface closure already covers.
-   Note that the direction differs from #27's and that changes what a zero
-   would mean: this gap produces a *wrong* finding rather than losing one, so
-   even a small population is worth more than a large one there.
-2. **Separate two definitions that share a file, a name and a module**
+1. **Separate two definitions that share a file, a name and a module**
    ([#30](https://github.com/rlorenzo/deadwood/issues/30)) — phase 12's
    residual. `pub struct Group` beside `#[allow(non_snake_case)] pub fn
    Group(..)` differ by Rust's namespaces, which the key does not model; two
@@ -1093,20 +1199,29 @@ Closes [#27](https://github.com/rlorenzo/deadwood/issues/27).
    this way and none of them produces a finding today. Phase 13 did not move it:
    the second pass compares a *relocation* built from the same fields, so a key
    two definitions share is a relocation they share, and the argument there is
-   unchanged.
-3. **Match a moved dead file, and a moved package's manifest entries**
+   unchanged. Phase 15 re-measured the population against `SymbolTable`, since
+   phase 14 changed what counts as test code and the entry is owed a number
+   that is current: **27** groups of `pub` items share a file and a name, the
+   module path separates **17**, and the same **10** it cannot are the six
+   `cfg`-alternative pairs and the four type-and-value pairs the issue lists.
+   None produces a finding. Phase 14 could not have moved any of it —
+   `reportable` and `is_pub` do not read the test context — and the measurement
+   says so rather than the reasoning alone.
+2. **Match a moved dead file, and a moved package's manifest entries**
    ([#32](https://github.com/rlorenzo/deadwood/issues/32)) — phase 13's
    residual, and last of the filed entries because its failure mode is noise
-   and it has a workaround. 86 of the corpus's 213 findings name no module and
-   so have no identity a move preserves — `dead_file` (39), the manifest kinds
-   (43) and `unsatisfiable_cfg` (4). Two halves with different prices: a
+   and it has a workaround. 88 of the corpus's 219 findings name no module and
+   so have no identity a move preserves — `dead_file` (40), the manifest kinds
+   (44) and `unsatisfiable_cfg` (4); the issue's 86 of 213 was counted before
+   phases 14 and 15 added fixtures, and the fraction is unchanged at 40%. Two
+   halves with different prices: a
    package that moves keeps its *name*, so recording that name on the entry
    would close the manifest kinds and extend the item kinds across a package
    move — at the cost of a second additive field and a second one-way door,
    which is the same bill #30 is weighing. `dead_file` and `unsatisfiable_cfg`
    have nothing but a path and want a content signal, which is a different phase
    with its own argument.
-4. **Report a `[dev-dependencies]` entry the library itself names.** The
+3. **Report a `[dev-dependencies]` entry the library itself names.** The
    check has never made that claim, because the likeliest explanation used to
    be a mis-attribution of ours rather than a manifest that cannot compile.
    The largest of those, an out-of-line `#[cfg(test)] mod tests;`, is closed

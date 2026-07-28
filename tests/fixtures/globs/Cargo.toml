@@ -1,4 +1,5 @@
-# Test fixture: `pub use inner::*;` and the public surface.
+# Test fixture: a `pub use` and the public surface, in both of the forms that
+# put a whole module on it.
 #
 # `mod inner; pub use inner::*;` makes `inner`'s items nameable as
 # `facade::*` to any consumer, and a glob binds no name — so it creates no
@@ -6,10 +7,17 @@
 # follows the glob anyway, and every claim that rule makes is here in code that
 # compiles.
 #
-# Three members, because the rule has three answers. `facade` is a library,
-# where a `pub use` glob is public API; `tool` is a binary, which has no public
-# surface for a glob to put anything on; and `hub` re-exports `facade` across
-# the workspace, which roots nothing the surface rule did not already cover.
+# `pub use nook::plain;` reaches the same place by a third route
+# ([#28](https://github.com/rlorenzo/deadwood/issues/28)): the re-export *is* a
+# definition, but there is no item behind it to record an edge to, so what
+# became nameable is everything inside the module. `reexport` carries that form
+# and the four shapes that must not move with it.
+#
+# Four members, because the rules have four answers. `facade` is a library,
+# where a `pub use` glob is public API; `reexport` is a library carrying the
+# named form; `tool` is a binary, which has no public surface for either form
+# to put anything on; and `hub` re-exports `facade` across the workspace, which
+# roots nothing the surface rule did not already cover.
 [workspace]
 resolver = "2"
-members = ["facade", "hub", "tool"]
+members = ["facade", "hub", "reexport", "tool"]

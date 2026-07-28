@@ -59,6 +59,17 @@ fn assert_finding_message(analysis: &Analysis, name: &str, expected: &str) {
 
 /// Findings of one kind, as `(file, name)` pairs in report order.
 fn reported(analysis: &Analysis, kind: FindingKind) -> Vec<(String, &str)> {
+    reported_under(analysis, kind, "")
+}
+
+/// The same, restricted to one package of a multi-member fixture, so two
+/// phases sharing a workspace can each pin their own member exactly rather
+/// than one of them owning the whole list.
+fn reported_under<'a>(
+    analysis: &'a Analysis,
+    kind: FindingKind,
+    prefix: &str,
+) -> Vec<(String, &'a str)> {
     analysis
         .findings
         .iter()
@@ -69,6 +80,7 @@ fn reported(analysis: &Analysis, kind: FindingKind) -> Vec<(String, &str)> {
                 f.name.as_deref().unwrap_or_default(),
             )
         })
+        .filter(|(file, _)| file.starts_with(prefix))
         .collect()
 }
 
@@ -460,7 +472,7 @@ fn a_pub_use_glob_puts_what_it_re_exports_on_the_public_surface() {
     let analysis = analyze_fixture("globs");
 
     assert_eq!(
-        reported(&analysis, FindingKind::UnusedPubItem),
+        reported_under(&analysis, FindingKind::UnusedPubItem, "facade/"),
         vec![
             // Under a module no glob exports: the plain `use crate::imported::*;`
             // in `other` is an import, and an import re-exports nothing.
@@ -473,11 +485,23 @@ fn a_pub_use_glob_puts_what_it_re_exports_on_the_public_surface() {
             // can name it, and reported anyway because nothing does.
             ("facade/src/inner.rs".to_string(), "never_named"),
             ("facade/src/other.rs".to_string(), "helper"),
-            // A binary has no surface for the glob in `main.rs` to reach.
-            ("tool/src/dead_end.rs".to_string(), "caller"),
-            ("tool/src/hidden.rs".to_string(), "from_glob"),
         ],
     );
+
+    // A binary has no surface for the glob in `main.rs` to reach. `tool`'s
+    // whole list belongs to
+    // `a_named_pub_use_of_a_module_in_a_binary_puts_nothing_on_a_surface_it_does_not_have`,
+    // which pins the same claim for the other spelling.
+    for name in ["caller", "from_glob"] {
+        assert!(
+            analysis
+                .findings
+                .iter()
+                .any(|f| f.name.as_deref() == Some(name)),
+            "`{name}` is in a binary, where no glob roots anything: {:?}",
+            analysis.findings
+        );
+    }
 
     // The four findings this phase removed, and every one of them was a claim
     // about something a consumer can write: `facade::thing`,
@@ -500,13 +524,187 @@ fn a_pub_use_glob_puts_what_it_re_exports_on_the_public_surface() {
     // member's own crate root, which the surface rule already covered — so
     // `imported` and `inner::deep` keep the findings above.
     assert_eq!(
-        reported(&analysis, FindingKind::UnusedReexport),
+        reported_under(&analysis, FindingKind::UnusedReexport, "facade/"),
         vec![("facade/src/imported.rs".to_string(), "Stale")],
     );
     assert_finding_message(
         &analysis,
         "from_import",
         "is referenced only from items that nothing reaches",
+    );
+}
+
+/// `mod nook; pub use nook::sub;` puts `sub`'s items on a library's public
+/// surface by a third route, beside the glob one
+/// ([#28](https://github.com/rlorenzo/deadwood/issues/28)). This reports
+/// *less*, so the assertions that matter most are again the ones that must
+/// still be made — and the whole of `reexport`'s report is here, since no
+/// registry crate produces a finding this rule can move.
+#[test]
+fn a_named_pub_use_of_a_module_puts_what_it_re_exports_on_the_public_surface() {
+    let analysis = analyze_fixture("globs");
+
+    assert_eq!(
+        reported_under(&analysis, FindingKind::UnusedPubItem, "reexport/"),
+        vec![
+            // The dead referrer every other claim in the package is measured
+            // against: nothing names it, and no consumer can name it either.
+            ("reexport/src/dead.rs".to_string(), "unreached_referrer"),
+            // `pub(crate) use guarded::locked;` re-exports nothing outward.
+            (
+                "reexport/src/guarded/locked.rs".to_string(),
+                "still_reported"
+            ),
+            // A named `pub use` of an *item* carries that item and nothing
+            // beside it. `Lifted` is quiet; its neighbour is not.
+            ("reexport/src/item.rs".to_string(), "beside_the_lifted_one"),
+            // The half rooting must not move: behind the re-export, so a
+            // consumer can name it, and reported anyway because nothing does.
+            ("reexport/src/nook/plain.rs".to_string(), "nothing_names_it"),
+        ],
+    );
+
+    // The three items this phase silenced, one per spelling and one two hops
+    // in. Each is something a consumer writes: `reexport::plain::…`,
+    // `reexport::api::…`, `reexport::first::second::…`.
+    for name in [
+        "only_dead_names_it",
+        "only_dead_names_it_too",
+        "two_hops_from_the_root",
+        "Lifted",
+    ] {
+        assert!(
+            !analysis
+                .findings
+                .iter()
+                .any(|f| f.name.as_deref() == Some(name)),
+            "`{name}` is nameable from outside: {:?}",
+            analysis.findings
+        );
+    }
+
+    assert_finding_message(
+        &analysis,
+        "nothing_names_it",
+        "is never referenced by any resolved path",
+    );
+    assert_finding_message(
+        &analysis,
+        "still_reported",
+        "is referenced only from items that nothing reaches",
+    );
+}
+
+/// The half that must not move, stated on its own because it is most of the
+/// behaviour: an item behind such a re-export that *nothing* names is reported
+/// exactly as before. `unused_definitions` reports when `!(used && reached)`,
+/// and the surface set feeds `reached` alone — so no surface rule can touch a
+/// first-condition finding. That is why `syn`'s one finding, which sits inside
+/// a module this phase newly reaches, does not move.
+#[test]
+fn an_item_behind_a_named_pub_use_of_a_module_that_nothing_names_is_still_reported() {
+    let analysis = analyze_fixture("globs");
+
+    assert!(
+        reported_under(&analysis, FindingKind::UnusedPubItem, "reexport/")
+            .contains(&("reexport/src/nook/plain.rs".to_string(), "nothing_names_it")),
+        "rooting changes what an item's referrers prove, never whether it is \
+         reported: {:?}",
+        analysis.findings
+    );
+}
+
+/// The conservatism half. `pub(crate) use` re-exports nothing outside the
+/// crate, so it roots nothing however much it reads like the `pub use` above
+/// it — the edge is the re-export's *visibility*, not merely that it names a
+/// module.
+#[test]
+fn a_pub_crate_use_of_a_module_roots_nothing() {
+    let analysis = analyze_fixture("globs");
+
+    assert!(
+        reported_under(&analysis, FindingKind::UnusedPubItem, "reexport/").contains(&(
+            "reexport/src/guarded/locked.rs".to_string(),
+            "still_reported"
+        )),
+        "no consumer can go through a crate-visible re-export: {:?}",
+        analysis.findings
+    );
+}
+
+/// The route that needed no fixing, and the one a wider rule would break. A
+/// named `pub use` of an *item* is an edge to that item; reading it as a
+/// surface fact would root everything in the module holding it.
+#[test]
+fn a_named_pub_use_of_an_item_carries_that_item_and_not_the_module_holding_it() {
+    let analysis = analyze_fixture("globs");
+
+    assert!(
+        reported_under(&analysis, FindingKind::UnusedPubItem, "reexport/")
+            .contains(&("reexport/src/item.rs".to_string(), "beside_the_lifted_one")),
+        "`Lifted` is reached through the re-export and its neighbour is not: {:?}",
+        analysis.findings
+    );
+}
+
+/// A binary has no public surface for either spelling to reach: no module of a
+/// non-library crate seeds the closure, so nothing in one is ever put on it.
+/// The whole of `tool`'s report is here, both forms together.
+#[test]
+fn a_named_pub_use_of_a_module_in_a_binary_puts_nothing_on_a_surface_it_does_not_have() {
+    let analysis = analyze_fixture("globs");
+
+    assert_eq!(
+        reported_under(&analysis, FindingKind::UnusedPubItem, "tool/"),
+        vec![
+            ("tool/src/dead_end.rs".to_string(), "caller"),
+            ("tool/src/hidden.rs".to_string(), "from_glob"),
+            (
+                "tool/src/tucked/inner.rs".to_string(),
+                "from_named_reexport"
+            ),
+        ],
+    );
+    assert_eq!(
+        reported_under(&analysis, FindingKind::UnusedReexport, "tool/"),
+        vec![("tool/src/main.rs".to_string(), "inner")],
+        "the crate root of a binary is not on any surface, so the re-export \
+         itself has nothing to excuse it either",
+    );
+}
+
+/// The rule is a closure and not a pass: `first` is on the surface only
+/// because the crate root re-exports it, and the `pub use` written *inside*
+/// `first` is then an edge from a module the new edge itself put in the set.
+#[test]
+fn the_surface_closure_follows_a_named_pub_use_two_hops_from_the_crate_root() {
+    let analysis = analyze_fixture("globs");
+
+    assert!(
+        !analysis
+            .findings
+            .iter()
+            .any(|f| f.name.as_deref() == Some("two_hops_from_the_root")),
+        "`reexport::first::second::two_hops_from_the_root` needs both hops: {:?}",
+        analysis.findings
+    );
+}
+
+/// The second consumer of the same set. `is_worth_reporting` asks the surface
+/// question about a `pub use` too, so widening the set for the root set widens
+/// it here — a `pub use` in a module a named `pub use` reaches is doing its job
+/// by existing. Phase 11 existed to stop these two from drifting apart, and a
+/// phase that widened one and not the other would have reintroduced the drift.
+#[test]
+fn a_pub_use_inside_a_module_a_named_pub_use_reaches_is_not_reported() {
+    let analysis = analyze_fixture("globs");
+
+    assert_eq!(
+        reported_under(&analysis, FindingKind::UnusedReexport, "reexport/"),
+        Vec::new(),
+        "`Alias` sits in a module the new edge reaches, and `second` in one it \
+         reaches two hops in: {:?}",
+        analysis.findings
     );
 }
 
