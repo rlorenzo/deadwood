@@ -1468,6 +1468,59 @@ mod tests {
         assert_eq!(stale_of(&report).len(), 1, "{:?}", stale_of(&report));
     }
 
+    /// The kind is as load bearing in a relocation as it is in the key. An item
+    /// and a re-export of it are different claims, and a file move is not a
+    /// licence to swap one for the other.
+    #[test]
+    fn a_relocation_does_not_cross_two_kinds() {
+        let before = item("src/legacy.rs", "gone", "crate::legacy");
+        let after = in_module(
+            finding(
+                FindingKind::UnusedReexport,
+                "src/legacy/mod.rs",
+                Some(1),
+                Some("gone"),
+            ),
+            "crate::legacy",
+        );
+
+        let (kept, report) = applied(&baseline(&[before]), vec![after]);
+        assert_eq!(reported(&kept), ["src/legacy/mod.rs"]);
+        assert_eq!(stale_of(&report).len(), 1, "{:?}", stale_of(&report));
+    }
+
+    /// And the module is what makes the identity an identity. An item that
+    /// changed module changed its position in the crate's tree, which is a
+    /// different item as far as anything here can tell.
+    #[test]
+    fn a_relocation_does_not_cross_two_modules() {
+        let before = item("src/legacy.rs", "gone", "crate::legacy");
+        let after = item("src/legacy/mod.rs", "gone", "crate::compat::legacy");
+
+        let (kept, report) = applied(&baseline(&[before]), vec![after]);
+        assert_eq!(reported(&kept), ["src/legacy/mod.rs"]);
+        assert_eq!(stale_of(&report).len(), 1, "{:?}", stale_of(&report));
+    }
+
+    /// The exact key claims its matches first, and what it claims is out of the
+    /// second pass entirely — on *both* sides. So a baselined `shared` that is
+    /// still where it was does not make its neighbour's move ambiguous: the
+    /// matched pair is gone from the leftovers before anything is counted.
+    #[test]
+    fn what_the_exact_key_matched_does_not_crowd_out_a_move_beside_it() {
+        let staying = item("src/bin/one.rs", "shared", "crate");
+        let recorded = item("src/bin/three.rs", "shared", "crate");
+        let arrived = item("src/bin/two.rs", "shared", "crate");
+
+        let (kept, report) = applied(
+            &baseline(&[staying.clone(), recorded]),
+            vec![staying, arrived],
+        );
+        assert!(kept.is_empty(), "{:?}", reported(&kept));
+        assert!(report.stale.is_empty(), "{:?}", stale_of(&report));
+        assert_eq!(report.suppressed, 2);
+    }
+
     /// A hand-written entry that names a module and no name identifies no item,
     /// so it relocates onto nothing.
     #[test]
@@ -1490,7 +1543,17 @@ mod tests {
         let recorded = item("crates/alpha/src/legacy.rs", "gone", "crate::legacy");
         let now = item("vendor/alpha/src/legacy.rs", "gone", "crate::legacy");
 
-        let (kept, report) = applied_in(&baseline(&[recorded]), vec![now], &packages);
+        let (kept, report) = applied_in(
+            &baseline(std::slice::from_ref(&recorded)),
+            vec![now.clone()],
+            &packages,
+        );
+        assert_eq!(reported(&kept), ["vendor/alpha/src/legacy.rs"]);
+        assert_eq!(stale_of(&report).len(), 1, "{:?}", stale_of(&report));
+
+        // "No package" is not a package the two sides can agree on: with
+        // nothing resolving, nothing relocates either.
+        let (kept, report) = applied_in(&baseline(&[recorded]), vec![now], &Packages::default());
         assert_eq!(reported(&kept), ["vendor/alpha/src/legacy.rs"]);
         assert_eq!(stale_of(&report).len(), 1, "{:?}", stale_of(&report));
     }
