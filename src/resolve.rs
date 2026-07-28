@@ -3653,9 +3653,9 @@ mod tests {
             ),
         ];
 
-        let ungated = unit(&sources);
+        let unflagged = unit(&sources);
         assert!(
-            test_only_in(&[ungated]).is_empty(),
+            test_only_in(&[unflagged]).is_empty(),
             "without the flag the entry point is an ordinary root",
         );
 

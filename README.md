@@ -696,12 +696,14 @@ toolchain is pinned to `stable` with `clippy` and `rustfmt` via
   make an entry unplaceable, so the misplaced-dependency check is much quieter
   than the unused one. Across the 34 crates in a local registry it reports
   nothing at all.
-- A file that both a `#[cfg(test)]` `mod` declaration and an ungated one
-  reach is attributed to the ungated one, so what it names is judged as
-  library code. One file gets one answer, and this is the direction that
+- A file that both a `#[cfg(test)]` `mod` declaration and one no gate confines
+  to a test build reach is attributed to the second, so what it names is judged
+  as library code. One file gets one answer, and this is the direction that
   misses findings rather than inventing them. An inline `mod` two declarations
   in one file reach — `cfg`-alternatives of each other — is answered the same
-  way, for the same reason.
+  way, for the same reason. The declaration that decides it need not be
+  ungated: `#[cfg(all(not(test), unix))]` carries a gate and is still compiled
+  by a build with no tests in it.
 - A `[target.'...'.dependencies]` table keyed by a bare target triple rather
   than a `cfg(...)` expression is not modelled, so narrowing `target-os` does
   not reach its entries; they are judged as if always built.

@@ -308,7 +308,8 @@ named went unreported. Module resolution now carries the answer with the file
 - **Confinement accumulates downward and never lifts.** A module inside
   `#[cfg(test)] mod tests` is test code whatever its own gate says, so a
   declaration only ever adds to what it inherited.
-- **Any ungated declaration clears it, however late it arrives.** A file two
+- **Any declaration no gate confines to a test build clears it, however late it
+  arrives.** A file two
   declarations of one crate root disagree about — `#[path]` naming one file
   from two modules — is loaded once, by whichever the queue reaches first, so
   without a rule the answer would be decided by queue order. (Two *targets*
@@ -1035,10 +1036,13 @@ check.
   caught by it.
 - **Two inline declarations can share a module path**, when disjoint `cfg`s
   make them alternatives, and the symbol table merges them into one module. Any
-  ungated one clears the path — the same direction `test_only` takes for a file
-  two declarations disagree about, and for the same reason: an entry point
-  wrongly read as test code is a false positive, where the other direction is a
-  missed finding.
+  one of them no gate confines to a test build clears the path — the same
+  direction `test_only` takes for a file two declarations disagree about, and
+  for the same reason: an entry point wrongly read as test code is a false
+  positive, where the other direction is a missed finding. "Not confined" is
+  wider than "ungated" and the fixture pins the difference: `#[cfg(all(not(
+  test), unix))] mod alt` carries a gate of its own and clears the path
+  anyway, because what it contributes to the merged module is production code.
 - **What it found, which is the population number holding.** With
   `test_only_item` on, the change adds **no finding** on the 34 registry crates
   or on Deadwood itself; the only difference anywhere is the five new findings
@@ -1055,13 +1059,13 @@ entirely, the flag withheld from each of the four readers of `test_context` in
 turn, any test-only module in a file taken to confine every module in it,
 confinement stopped from accumulating downward, a `mod`'s own gate dropped,
 inline modules not recorded at all, the list added to rather than replaced when
-a file is lifted, an ungated alternative stopped from clearing a shared path,
+a file is lifted, an unconfined alternative stopped from clearing a shared path,
 every inline module recorded gated or not, and the honest predicate replaced by
 each of the two rejected ones. **All fourteen were caught by a named test.**
 One further mutation was written and discarded as an equivalent mutant rather
 than reported as a catch: dropping the `test_only` filter from
-`confined_inline_mods` while leaving the ungated subtraction in place removes
-exactly the entries it removes.
+`confined_inline_mods` while leaving the unconfined subtraction in place
+removes exactly the entries it removes.
 
 Closes [#27](https://github.com/rlorenzo/deadwood/issues/27).
 

@@ -77,6 +77,18 @@ pub fn behind_a_not_test_gate() -> u32 {
     16
 }
 
+/// Not reported, and this is the alternatives rule rather than a gate shape:
+/// `alt` below is declared twice under disjoint gates, one confining it to a
+/// test build and one — `all(not(test), unix)` — carrying a gate of its own
+/// and compiled without the tests. The symbol table merges the two into one
+/// module, so the path cannot be answered two ways, and the declaration that
+/// is not confined clears it. A rule that cleared the path only for an
+/// *ungated* alternative would call this module test code and report this
+/// function.
+pub fn behind_one_of_two_alternatives() -> u32 {
+    19
+}
+
 #[cfg(test)]
 mod tests {
     /// Written without `assert_eq!` on purpose. A name in macro input is a
@@ -144,5 +156,25 @@ mod never_in_tests {
     #[allow(dead_code)]
     fn kept() -> u32 {
         super::behind_a_not_test_gate()
+    }
+}
+
+/// Two declarations of one module path under disjoint gates. This half is
+/// confined to a test build.
+#[cfg(test)]
+mod alt {
+    #[allow(dead_code)]
+    fn kept() -> u32 {
+        super::behind_one_of_two_alternatives()
+    }
+}
+
+/// And this half is *gated* — it is not the ungated spelling — and compiled by
+/// a build with no tests in it, so it clears the path for both.
+#[cfg(all(not(test), unix))]
+mod alt {
+    #[allow(dead_code)]
+    fn kept() -> u32 {
+        super::behind_one_of_two_alternatives()
     }
 }
