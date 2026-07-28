@@ -1754,9 +1754,9 @@ fn the_moved_fixture_reports_one_finding_of_each_shape_it_needs() {
 
 /// The headline case of #17: `git mv` changes no item, so a baseline written
 /// before the move still covers everything and the run is silent. Two shapes of
-/// move at once — a file module become a directory module, and an out-of-line
-/// module become an inline one — and both leave the item where it was in its
-/// crate's module tree.
+/// move at once — a file module that became a directory module, and an
+/// out-of-line module that became an inline one — and both leave the item where
+/// it was in its crate's module tree.
 #[test]
 fn a_finding_whose_file_moved_is_still_baselined() {
     let analysis = analyze_configured("moved", "moved.toml");

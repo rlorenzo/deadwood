@@ -907,6 +907,16 @@ number that separates them is what the phase turns on.
   Deliberately *not* the set semantics the exact key uses — there the unanswerable
   question is which occurrence is new, so all are covered; here it is whether a
   move happened at all, so none is.
+- **One public type narrowed, which is worth saying out loud.** `Baseline` and
+  its `load`/`write`/`apply` were `pub` in a `pub mod` and are now
+  `pub(crate)`: `apply` needs the `Packages` index built from `cargo metadata`,
+  and publishing the reader would have published that with it. Nothing outside
+  the crate used them — `src/main.rs` names only `baseline::Mode` — and what a
+  consumer of the library actually needs is untouched and still public:
+  `Report`, the `Key`s in it, `Mode`, `FILE_NAME`. The module's surface is the
+  answer a run produces, and now nothing else. Raised by Copilot in review,
+  which was right that a public module holding a crate-private main type is
+  incoherent; the coherent direction was down rather than up.
 - **No format change, which is most of what made the phase cheap.** `module` was
   already on `Finding` and on the entry, `--json` gains nothing, and the package
   comes from `cargo metadata` rather than from the file. Phase 12 predicted this

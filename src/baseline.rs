@@ -618,6 +618,16 @@ struct File {
 }
 
 /// A parsed baseline file, in the order its entries are written.
+///
+/// Crate-private, unlike the module around it. What a consumer of the library
+/// needs is what a run *did* — [`Report`], the [`Key`]s in it, [`Mode`] to ask
+/// for a mode, [`FILE_NAME`] to find the default location — and
+/// [`crate::analyze_with`] is the entry point that does it. The file reader
+/// itself is machinery: [`Baseline::apply`] needs a [`Packages`] index built
+/// from `cargo metadata`, so publishing it would publish that too, and an
+/// index of manifest directories is not something to promise anybody. Phase 13
+/// narrowed it for that reason; before then it was `pub` with no caller
+/// outside this crate.
 #[derive(Debug, Default)]
 pub(crate) struct Baseline {
     entries: Vec<Entry>,
