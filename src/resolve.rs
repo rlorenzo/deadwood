@@ -907,16 +907,26 @@ impl SymbolTable {
     /// because the crate's own tests are the only callers *here* would be a
     /// finding about documented public API.
     ///
-    /// A named `pub use` needs no such treatment: it is a definition of its
-    /// own, it is a root when its module is on the surface, and reaching it
-    /// reaches what it names. A glob binds no name and so records no edge,
-    /// which is exactly the hole this fills.
+    /// A named `pub use` of an *item* needs no such treatment: it is a
+    /// definition of its own, it is a root when its module is on the surface,
+    /// and reaching it reaches what it names. A named `pub use` of a **module**
+    /// is a different fact and is the third edge below: there is no item to
+    /// record an edge to, and what became nameable is everything *inside* the
+    /// module ([#28](https://github.com/rlorenzo/deadwood/issues/28)).
     ///
-    /// The closure follows two edges, and needs both. A `pub use` glob reaches
-    /// the module it names, and a surface module reaches its own `pub`
+    /// The closure follows three edges, and needs all three. A `pub use` glob
+    /// reaches the module it names; a named `pub use` reaches the module it
+    /// names, when it names one; and a surface module reaches its own `pub`
     /// children — `pub use inner::*;` re-exports `inner::nested` as well as
     /// `inner`'s functions, so `facade::nested::item` is nameable and stopping
-    /// at `inner` would leave the same false positive one level down.
+    /// at `inner` would leave the same false positive one level down. The same
+    /// descent applies under the named form, for the same reason.
+    ///
+    /// It is a closure rather than a pass because the edges compose: `pub use
+    /// a;` in the crate root puts `a` on the surface, and a `pub use b;`
+    /// written *inside* `a` is then a re-export from a surface module and puts
+    /// `b` there too. The worklist below reaches that fixed point; walking the
+    /// modules once in any order would not.
     ///
     /// Three callers, one answer, and that is the point of the shape. The root
     /// set ([`SymbolTable::is_root`]) roots what a consumer could call, the
@@ -934,7 +944,16 @@ impl SymbolTable {
     /// already a root in every walk. A cross-crate glob within the workspace
     /// (`pub use other_member::*;`) adds nothing either: the only modules of
     /// another member a path can name are `pub` from that member's own crate
-    /// root, so this rule already covers them.
+    /// root, so this rule already covers them. Both readings carry over to the
+    /// named form unchanged.
+    ///
+    /// Three things this deliberately does not reach. A `pub(crate) use sub;`
+    /// re-exports nothing outward, and is not a [`DefKind::Reexport`] at all,
+    /// so it roots nothing. A binary has no surface for any of it to start
+    /// from: no module of a non-library crate seeds the closure, so nothing in
+    /// one is ever popped. And a `pub use` of a module written in a module that
+    /// is *not* itself on the surface adds nothing, because outside code cannot
+    /// name the re-export to go through it.
     fn externally_reachable_modules(&self) -> HashSet<usize> {
         // Only `pub` children: a private `mod` inside a glob-exported module is
         // no more nameable from outside than a private `mod` anywhere else.
@@ -946,6 +965,15 @@ impl SymbolTable {
                 pub_children[parent].push(id);
             }
         }
+        // The `pub use` definitions written in each module, whatever they name.
+        // Which of them name a *module* is resolution's answer, asked below
+        // only for the modules the closure actually reaches.
+        let mut named_pub_uses: Vec<Vec<usize>> = vec![Vec::new(); self.modules.len()];
+        for (id, def) in self.defs.iter().enumerate() {
+            if def.kind.is_reexport() {
+                named_pub_uses[def.module].push(id);
+            }
+        }
 
         let mut seen: HashSet<usize> = (0..self.modules.len())
             .filter(|&module| self.is_pub_to_the_crate_root(module))
@@ -955,14 +983,37 @@ impl SymbolTable {
             let reached = self.modules[module]
                 .pub_glob_sources
                 .iter()
-                .chain(&pub_children[module]);
-            for &source in reached {
+                .copied()
+                .chain(pub_children[module].iter().copied())
+                .chain(
+                    named_pub_uses[module]
+                        .iter()
+                        .filter_map(|&def| self.module_a_reexport_names(def)),
+                );
+            for source in reached {
                 if seen.insert(source) {
                     stack.push(source);
                 }
             }
         }
         seen
+    }
+
+    /// The module a named `pub use` re-exports, where it names one at all.
+    ///
+    /// `None` for the ordinary case — `pub use inner::Thing;` names an item, an
+    /// edge to which the reference walk already records — and for anything that
+    /// leads outside the workspace or that resolution cannot follow. An
+    /// unfollowable `use` makes nothing reachable here for the same reason an
+    /// unfollowable glob does not: it is its module's *opacity* that answers
+    /// for it, and opaque is already a root in every walk.
+    fn module_a_reexport_names(&self, def: usize) -> Option<usize> {
+        let def = &self.defs[def];
+        let target = def.target.as_ref()?;
+        match self.walk_path(def.module, target, true, 0, &mut Vec::new()) {
+            Outcome::Module(id) => Some(id),
+            Outcome::Item | Outcome::Foreign | Outcome::Opaque(_) => None,
+        }
     }
 
     /// Whether this module belongs to a library and every `mod` on the way in
@@ -3381,6 +3432,235 @@ mod tests {
             ]),
             vec!["Thing", "Renamed"],
             "outside code cannot reach either, and they are two deletions"
+        );
+    }
+
+    // -- the public surface, through a named `pub use` of a module ----------
+    //
+    // The third edge ([#28](https://github.com/rlorenzo/deadwood/issues/28)).
+    // A named `pub use` of an *item* is an edge the reference walk already
+    // records; a named `pub use` of a **module** has no item to record an edge
+    // to, and what became nameable is everything inside it. Every case below
+    // is written in the shape rustc accepts: a `pub` module under a private
+    // ancestor, since `mod sub; pub use sub as api;` is E0365.
+
+    /// The reproducer from
+    /// [#28](https://github.com/rlorenzo/deadwood/issues/28): a consumer can
+    /// write `fixture::sub::thing`, so the fact that its only in-workspace
+    /// referrer is dead is not evidence about it.
+    #[test]
+    fn an_item_a_named_pub_use_of_a_module_re_exports_is_a_surface_root() {
+        assert_eq!(
+            unused_in(&[
+                ("", "mod nook;\nmod other;\npub use nook::sub;\n"),
+                ("nook", "pub mod sub;\n"),
+                ("nook/sub", "pub fn thing() -> u32 { 1 }\n"),
+                (
+                    "other",
+                    "pub fn helper() -> u32 { crate::nook::sub::thing() }\n"
+                ),
+            ]),
+            vec!["helper"],
+            "`fixture::sub::thing` is what a consumer writes; only `helper` is dead"
+        );
+    }
+
+    /// The two spellings are one construct. A rename changes the name a
+    /// consumer writes and nothing else, so the answer has to be identical to
+    /// the case above.
+    #[test]
+    fn a_renamed_pub_use_of_a_module_re_exports_it_exactly_as_the_plain_spelling_does() {
+        assert_eq!(
+            unused_in(&[
+                ("", "mod nook;\nmod other;\npub use nook::sub as api;\n"),
+                ("nook", "pub mod sub;\n"),
+                ("nook/sub", "pub fn thing() -> u32 { 1 }\n"),
+                (
+                    "other",
+                    "pub fn helper() -> u32 { crate::nook::sub::thing() }\n"
+                ),
+            ]),
+            vec!["helper"],
+            "`fixture::api::thing` is what a consumer writes"
+        );
+    }
+
+    /// The half that must not move, and it is the same half phase 11 guarded
+    /// for the glob form: a root is not exempt from condition 1 of
+    /// [`SymbolTable::unused_definitions`]. This is also the shape `syn`
+    /// carries, and why the corpus measurement for this phase is a zero.
+    #[test]
+    fn an_item_behind_a_named_pub_use_of_a_module_that_nothing_names_is_still_reported() {
+        assert_eq!(
+            unused_in(&[
+                ("", "mod nook;\npub use nook::sub;\n"),
+                ("nook", "pub mod sub;\n"),
+                ("nook/sub", "pub fn never_named() -> u32 { 1 }\n"),
+            ]),
+            vec!["never_named"],
+            "rooting changes what an item's referrers prove, never whether it is reported"
+        );
+    }
+
+    /// `pub(crate) use` re-exports nothing outward, so it roots nothing. The
+    /// edge has to read the re-export's *visibility* and not merely that it
+    /// names a module — which [`DefKind::Reexport`] already encodes, and this
+    /// is what pins that it is the kind being read.
+    #[test]
+    fn a_pub_crate_use_of_a_module_puts_nothing_on_the_public_surface() {
+        assert_eq!(
+            unused_in(&[
+                ("", "mod nook;\nmod other;\npub(crate) use nook::sub;\n"),
+                ("nook", "pub mod sub;\n"),
+                ("nook/sub", "pub fn thing() -> u32 { 1 }\n"),
+                (
+                    "other",
+                    "pub fn helper() -> u32 { crate::nook::sub::thing() }\n"
+                ),
+            ]),
+            vec!["thing", "helper"],
+            "no consumer can go through a crate-visible re-export, so the cascade runs"
+        );
+    }
+
+    /// A binary has no public surface for the edge to start from: no module of
+    /// one seeds the closure, so nothing in one is ever reached by it.
+    #[test]
+    fn a_named_pub_use_of_a_module_in_a_binary_puts_nothing_on_a_surface_it_does_not_have() {
+        assert_eq!(
+            unused_in_binary(&[
+                ("", "mod nook;\nmod other;\npub use nook::sub;\n"),
+                ("nook", "pub mod sub;\n"),
+                ("nook/sub", "pub fn thing() -> u32 { 1 }\n"),
+                (
+                    "other",
+                    "pub fn helper() -> u32 { crate::nook::sub::thing() }\n"
+                ),
+            ]),
+            vec!["sub", "thing", "helper"],
+            "nothing outside a binary can name any of it, re-export or no re-export — \
+             and the re-export itself has no surface to excuse it either"
+        );
+    }
+
+    /// A named `pub use` of an *item* is an edge to that item and not a fact
+    /// about the module holding it. Reading it as a surface fact would root
+    /// everything beside the item — which is the whole reason this edge asks
+    /// `walk_path` what the target *is* rather than assuming.
+    #[test]
+    fn a_named_pub_use_of_an_item_carries_that_item_and_not_the_module_holding_it() {
+        assert_eq!(
+            unused_in(&[
+                ("", "mod nook;\nmod other;\npub use nook::sub::Thing;\n"),
+                ("nook", "pub mod sub;\n"),
+                (
+                    "nook/sub",
+                    "pub struct Thing;\npub fn beside() -> u32 { 1 }\n"
+                ),
+                (
+                    "other",
+                    "pub fn helper() -> u32 { crate::nook::sub::beside() }\n"
+                ),
+            ]),
+            vec!["beside", "helper"],
+            "`Thing` is reached through the re-export; `beside` is not, and never was"
+        );
+    }
+
+    /// The difference between the honest rule and the over-broad simulation
+    /// #28 quotes. A `pub use` of a module written in a module that is not
+    /// itself on the surface roots nothing: outside code cannot name the
+    /// re-export, so it cannot go through it.
+    #[test]
+    fn a_named_pub_use_of_a_module_in_a_private_module_puts_nothing_on_the_surface() {
+        assert_eq!(
+            unused_in(&[
+                ("", "mod cellar;\nmod orphan;\n"),
+                ("cellar", "mod nook;\npub use nook::sub;\n"),
+                ("cellar/nook", "pub mod sub;\n"),
+                ("cellar/nook/sub", "pub fn thing() -> u32 { 1 }\n"),
+                (
+                    "orphan",
+                    "pub fn helper() -> u32 { crate::cellar::nook::sub::thing() }\n"
+                ),
+            ]),
+            vec!["thing", "sub", "helper"],
+            "`cellar` is private, so the re-export in it is nameable by nobody — \
+             and is reported in its own right for the same reason"
+        );
+    }
+
+    /// The rule is a closure and not a pass. `first` is on the surface only
+    /// because the crate root re-exports it, and the `pub use` *inside* `first`
+    /// is then an edge from a module the new edge itself put in the set — so a
+    /// single walk in an unlucky order would miss `second` entirely.
+    #[test]
+    fn the_surface_closure_follows_a_named_pub_use_from_a_module_a_named_pub_use_reached() {
+        let two_hops = &[
+            ("", "mod chain;\nmod other;\npub use chain::first;\n"),
+            ("chain", "pub mod first;\npub mod second;\n"),
+            ("chain/first", "pub use super::second;\n"),
+            ("chain/second", "pub fn thing() -> u32 { 1 }\n"),
+            (
+                "other",
+                "pub fn helper() -> u32 { crate::chain::second::thing() }\n",
+            ),
+        ];
+        assert_eq!(
+            unused_in(two_hops),
+            vec!["helper"],
+            "`fixture::first::second::thing` needs both hops to be nameable"
+        );
+
+        let one_hop = &[
+            ("chain/first", "pub fn unrelated() -> u32 { 1 }\n"),
+            two_hops[0],
+            two_hops[1],
+            two_hops[3],
+            two_hops[4],
+        ];
+        assert_eq!(
+            unused_in(one_hop),
+            vec!["unrelated", "thing", "helper"],
+            "with the second hop taken away `thing` is behind a private module again"
+        );
+    }
+
+    /// `is_worth_reporting` reads the same set, so widening it for the root set
+    /// widens it here too — a `pub use` in a module a named `pub use` reaches
+    /// is doing its job by existing, exactly as one in a glob-exported module
+    /// is. Phase 11 existed to stop these two from drifting; a phase that
+    /// widened one and not the other would have reintroduced the drift.
+    #[test]
+    fn a_pub_use_inside_a_module_a_named_pub_use_reaches_is_not_reported() {
+        assert!(
+            unused_in(&[
+                ("", "mod nook;\npub use nook::sub;\n"),
+                ("nook", "pub mod sub;\nmod deep;\n"),
+                ("nook/sub", "pub use crate::nook::deep::Thing as Renamed;\n"),
+                ("nook/deep", "pub struct Thing;\n"),
+            ])
+            .is_empty(),
+            "`fixture::sub::Renamed` is nameable, and the re-export is what names it"
+        );
+    }
+
+    /// A named `pub use` we cannot follow into the workspace puts nothing on
+    /// the surface, for the same reason an unfollowable glob does not.
+    /// Conservatism is unchanged by this phase: an unreadable mention never
+    /// becomes evidence, and it never becomes surface either.
+    #[test]
+    fn a_named_pub_use_leading_outside_the_workspace_puts_nothing_on_the_surface() {
+        assert_eq!(
+            unused_in(&[
+                ("", "mod inner;\npub use outside::Thing;\n"),
+                (
+                    "inner",
+                    "pub fn buried() -> u32 { 1 }\nfn caller() -> u32 { buried() }\n"
+                ),
+            ]),
+            vec!["buried"],
+            "the re-export names nothing here, so `inner` is judged as before"
         );
     }
 
