@@ -266,6 +266,40 @@ putting it in the key would mean that turning a check down from `deny` to
 the key for the same reason the line is not: it tells `alpha::twin` from
 `beta::twin` in one file, and it does not move when code above it does.
 
+**And it survives a moved file, for the kinds that name an item.** `git mv
+src/legacy.rs src/legacy/mod.rs` changes no code and no item, so the findings
+in it stay suppressed. Matching runs in two passes: the key above first, and
+then — over what that pass left unmatched *on both sides* — the identity a move
+preserves, which is the kind, the package, the module path and the name. The
+file is to the module path what the line is to the file: where you go to read
+the item, not what the item is.
+
+That second pass declines far more often than it fires, and every refusal is
+deliberate:
+
+- **A finding with no module is out of its reach entirely.** A dead file has no
+  name and no module, so nothing about it survives a move for anything to
+  compare — two unrelated dead files are indistinguishable without a content
+  signal Deadwood does not compute, and a rule that appeared to handle them
+  would be guessing. The two dependency kinds and `unsatisfiable_cfg` are out
+  for the same reason; a manifest path moves only when a whole package does.
+- **It never overrules the file.** Two items with the same kind, name and module
+  in two different files are both matched by the key, so baselining one still
+  leaves the other reported.
+- **It matches only a one-to-one pairing** — exactly one leftover entry and
+  exactly one leftover finding under an identity, which is the only shape a move
+  can have. Two candidates for one entry, or two entries for one candidate, and
+  it refuses: the run goes back to reporting the finding and naming the entry
+  stale, which is where a move stops being distinguishable from a coincidence.
+- **It will not cross a package.** `module` is `crate`-relative and says nothing
+  about which crate, so two members can each have a `crate::legacy::gone`; the
+  recorded file supplies the package. An entry whose path is in no package of
+  the workspace — a package directory that itself moved — matches nothing new.
+
+A relocated entry keeps the path it was written with, exactly as a matched entry
+keeps its drifted line. `--prune-baseline` drops entries and rewrites none;
+`--write-baseline` is what re-records the new paths.
+
 ```json
 { "kind": "unused_pub_item", "severity": "deny", "file": "src/lib.rs",
   "line": 11, "name": "twin", "module": "crate::alpha",
@@ -324,9 +358,12 @@ Two rules keep the file from lying:
 One entry covers every finding that shares its key, so two items that share a
 file, a name *and* a module are still suppressed together — a `pub struct Group`
 beside a `pub fn Group(..)`, or two `#[cfg]`-alternative definitions of one item
-([#30](https://github.com/rlorenzo/deadwood/issues/30)). Moving a file
-un-baselines the findings in it
-([#17](https://github.com/rlorenzo/deadwood/issues/17)).
+([#30](https://github.com/rlorenzo/deadwood/issues/30)). Within one package the
+module path is shared by every target's crate root, so two binaries or examples
+each defining `pub const X` at `crate` are one relocation identity as well: if
+one disappears and the other appears in the same run, the second pass reads it
+as a move. That shape occurs once in the 2659 reportable `pub` definitions of
+the corpus every phase measures on, and produces no finding today.
 
 ## Configuration
 
@@ -675,11 +712,18 @@ toolchain is pinned to `stable` with `clippy` and `rustfmt` via
   entry is the right answer. Since the key deliberately ignores the line, there
   is no way to say which occurrence is the new one, and pointing at a baselined
   line would be a wrong finding rather than a missed one.
-- The baseline key includes the file path, so moving a file un-baselines every
-  finding in it and makes every entry that recorded them stale
-  ([#17](https://github.com/rlorenzo/deadwood/issues/17)). `--prune-baseline`
-  then `--write-baseline` is the workaround, at the cost of re-accepting
-  anything else that regressed in between.
+- Moving a file un-baselines the findings in it for the four kinds that name no
+  module: a `dead_file`, an `unsatisfiable_cfg` gate site, and a `Cargo.toml`
+  entry of either dependency kind whose whole package moved. The item kinds
+  survive a move (above); these do not, because there is nothing about them that
+  a move preserves and guessing would suppress a genuinely new finding.
+  `--prune-baseline` then `--write-baseline` is the workaround, at the cost of
+  re-accepting anything else that regressed in between. So is editing the two or
+  three paths by hand, which the format is meant to allow.
+- The second pass that survives a move is scoped to the package but not to the
+  *target*, because no finding carries one and one file can belong to several.
+  Within a package every target's crate root is spelled `crate`, so two binaries
+  or examples each defining `pub const X` at the root are one identity to it.
 
 ## License
 

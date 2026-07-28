@@ -509,8 +509,27 @@ pub fn analyze_with(
         Some(configured) => baseline::Location::Configured(configured.to_path_buf()),
         None => baseline::Location::Default(meta.workspace_root.join(baseline::FILE_NAME)),
     };
-    let (findings, baseline) =
-        baseline::run(baseline_mode, &location, findings, &meta.workspace_root)?;
+    // Which package a recorded path belongs to is the one thing a baseline
+    // entry's `module` cannot say — it is `crate`-relative — and it is what
+    // keeps a moved file from being matched across two members. Directories,
+    // not files: the point is to answer for a path whose file is gone.
+    let packages = baseline::Packages::new(meta.packages.iter().map(|package| {
+        let directory = package
+            .manifest_path
+            .parent()
+            .unwrap_or(&meta.workspace_root);
+        (
+            relative_to(directory, &meta.workspace_root),
+            package.name.clone(),
+        )
+    }));
+    let (findings, baseline) = baseline::run(
+        baseline_mode,
+        &location,
+        findings,
+        &meta.workspace_root,
+        &packages,
+    )?;
 
     Ok(Analysis {
         workspace_root: meta.workspace_root,

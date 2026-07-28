@@ -1,0 +1,10 @@
+{
+  "findings": [
+    { "kind": "unused_dependency", "file": "alpha/Cargo.toml", "name": "unused_crate" },
+    { "kind": "dead_file", "file": "alpha/src/attic/dropped.rs" },
+    { "kind": "unused_pub_item", "file": "alpha/src/bin/one.rs", "line": 900, "name": "shared", "module": "crate" },
+    { "kind": "unused_pub_item", "file": "alpha/src/bin/two.rs", "line": 901, "name": "shared", "module": "crate" },
+    { "kind": "unused_pub_item", "file": "alpha/src/legacy/mod.rs", "line": 902, "name": "gone", "module": "crate::legacy" },
+    { "kind": "unused_pub_item", "file": "alpha/src/migrated.rs", "line": 903, "name": "migrated", "module": "crate::legacy" }
+  ]
+}

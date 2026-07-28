@@ -1,0 +1,12 @@
+# The headline case of #17. Every finding this fixture produces is recorded,
+# and the two item findings are recorded at the file they were written in
+# before the move:
+#
+#   alpha/src/legacy.rs  ->  alpha/src/legacy/mod.rs   (file module to directory)
+#   beta/src/legacy.rs   ->  beta/src/lib.rs           (out-of-line mod to inline)
+#
+# Both leave the item exactly where it was in its crate's module tree, so both
+# are matched and the run is silent. Every line number is deliberately wrong, so
+# this also keeps pinning that the second pass did not reintroduce the drift the
+# line was kept out of the key to avoid.
+baseline = "moved-baseline.json"

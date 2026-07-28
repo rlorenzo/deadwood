@@ -70,10 +70,84 @@
 //!
 //! The file path is what makes the key specific enough to be safe — without it
 //! one `unused_pub_item foo` entry would cover every `foo` in the workspace,
-//! and two `dead_file` findings would be indistinguishable. The price is that
-//! moving a file un-baselines everything in it
-//! ([#17](https://github.com/rlorenzo/deadwood/issues/17)); the failure mode is
-//! noise on a deliberate, reviewed act, which is the right side to be on.
+//! and two `dead_file` findings would be indistinguishable. It is compared
+//! first and it is never dropped; what it no longer has to be, for the kinds
+//! that name a module, is the *whole* of where an item lives. That is the next
+//! section.
+//!
+//! # A moved file: the second pass, and the four things that hold it back
+//!
+//! `git mv src/legacy.rs src/legacy/mod.rs` changes no code and no item, and
+//! under the key above it turns every finding in the file into a new one and
+//! every entry recording them into a stale one. A pure rename failing the run
+//! is the defect ([#17](https://github.com/rlorenzo/deadwood/issues/17)).
+//!
+//! The fix is not rename detection, and nothing here computes a similarity
+//! signal. It is the observation that for an *item* the file is a second name
+//! for a place the key already records: `crate::legacy::gone` in package
+//! `alpha` names one definition, and the file it is written in is where you go
+//! to read it, not what it is. **The file is to the module path what the line
+//! is to the file** — recorded, printed, and matched only until something
+//! better is available. So matching runs in two passes:
+//!
+//! 1. The key above, exactly as before. Everything it matches is matched by it.
+//! 2. Whatever is *left over on both sides* — entries no finding matched, and
+//!    findings no entry covered — paired on [`Relocation`], the identity a move
+//!    preserves: kind, package, module path and name.
+//!
+//! Four things keep the second pass from becoming the guess the issue warned
+//! about, and each is a place a mutation is caught:
+//!
+//! - **It cannot reach a finding with no module.** [`Relocation`] is built from
+//!   [`Key::relocation`], which answers `None` unless *both* the module and the
+//!   name are recorded. `dead_file` has neither, so the 39 dead files in the
+//!   corpus are structurally out of reach rather than excluded by a kind list
+//!   someone could extend. Two unrelated dead files are indistinguishable
+//!   without a content signal, and this pass does not have one — so it does not
+//!   pretend to. The two dependency kinds and `unsatisfiable_cfg` are out for
+//!   the same reason, and a manifest path moves only when a whole package does,
+//!   which is a rarer event with no signal here either.
+//! - **It runs second, so it can never overrule the file.** A finding the exact
+//!   key matched is not left over, and neither is the entry that matched it. Two
+//!   items sharing a kind, a name *and* a module in two different files —
+//!   `clap`'s `CLAP_STYLING`, defined at `crate` in two example targets — are
+//!   still two findings, and baselining one still leaves the other reported:
+//!   both occur, so the exact key claims both sides and there is nothing left
+//!   over to pair.
+//! - **It refuses when the pairing is ambiguous.** A relocation is accepted only
+//!   when exactly one leftover entry and exactly one leftover finding carry it.
+//!   Two candidates for one entry is an inference we cannot make — a move is
+//!   one-to-one and the observation is not — so the pass declines and the run
+//!   falls back to reporting the findings and naming the entries stale. That is
+//!   the direction this project takes when the evidence runs out: noise, not
+//!   silence. It is deliberately *not* the set semantics the exact key uses,
+//!   where one entry covers every finding under its key; there the question is
+//!   which occurrence is new (unanswerable, so cover them all) and here it is
+//!   whether a move happened at all (unanswerable, so assume not).
+//! - **It is scoped to the package**, because the module path is not enough on
+//!   its own. `module` is crate-*relative* and `crate`-rooted, so two workspace
+//!   members each with a `crate::legacy::gone` differ in nothing else the pass
+//!   looks at. The file supplies what the module path cannot: which package the
+//!   entry was recorded in, resolved by containment against the workspace's
+//!   manifest directories ([`Packages`]). So the path stays in the key and is
+//!   read for a second, narrower thing — and an entry whose path lies in no
+//!   package of this workspace (a package directory that itself moved) resolves
+//!   to nothing and stays exactly as stale as it is today.
+//!
+//! What that leaves, stated rather than glossed. Within one package the module
+//! path is shared by every target's root, so two binaries or examples each
+//! defining `pub const X` at `crate` are one relocation identity; if one
+//! disappears and the other appears in the same run, the second pass reads it as
+//! a move. Measured over the corpus every phase uses, that shape occurs once in
+//! 2659 reportable `pub` definitions — `clap`'s `CLAP_STYLING` — and it produces
+//! no finding today. Distinguishing it needs the *target*, which no finding
+//! carries and which one file can belong to several of.
+//!
+//! An entry matched this way keeps the path it was written with: like the line
+//! beside it, the path is recorded for whoever opens the file and is not
+//! rewritten by `--prune-baseline`, which drops entries and edits none.
+//! `--write-baseline` re-records everything from the current run and is how a
+//! baseline picks the new paths up.
 //!
 //! # An absent module is not a module: the fallback, in both directions
 //!
@@ -291,6 +365,30 @@ impl Key {
         (self.kind, self.file.clone(), self.name.clone())
     }
 
+    /// What of this key a move leaves alone, or `None` when there is not
+    /// enough of it to say.
+    ///
+    /// Both the module and the name are required, which is the whole of what
+    /// keeps the second pass off the kinds that have no item to identify: a
+    /// dead file records neither, a manifest entry and a gate site record no
+    /// module. The package comes from the file, and a file belonging to no
+    /// package of this workspace answers `None` as well.
+    ///
+    /// The name is the one condition here no test can catch on its own, and
+    /// that is worth stating rather than leaving as an apparent gap in the
+    /// coverage: every finding Deadwood produces that carries a module also
+    /// carries a name, so an entry that lost the name requirement still has
+    /// nothing to pair with. It stays because an identity without a name is not
+    /// one, not because it is load bearing today.
+    fn relocation(&self, packages: &Packages) -> Option<Relocation> {
+        Some(Relocation {
+            kind: self.kind,
+            package: packages.holding(&self.file)?.to_string(),
+            module: self.module.clone()?,
+            name: self.name.clone()?,
+        })
+    }
+
     /// `src/lib.rs: unused_pub_item `dead` in `crate::alpha``, for the text
     /// report.
     ///
@@ -359,6 +457,89 @@ impl Modules {
             Some(module) => self.unqualified || self.qualified.contains(module),
         }
     }
+}
+
+/// The identity of an *item* finding that a move preserves: which package it
+/// is in, where it sits in that package's module tree, and what it is called.
+///
+/// Everything a file rename changes is absent from it, and everything it names
+/// is something the item would have to actually change for the finding to be a
+/// different claim. That is why the second pass is not a similarity heuristic —
+/// it compares identities, and declines whenever two of them collide.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct Relocation {
+    kind: FindingKind,
+    /// The package the recorded file belongs to. The module path is
+    /// `crate`-relative and so says nothing about which crate; without this,
+    /// two members each with a `crate::legacy::gone` would be one identity.
+    package: String,
+    module: String,
+    name: String,
+}
+
+/// The workspace's packages, by the directory each one owns.
+///
+/// Built from `cargo metadata`, so nothing here is inferred from a path's
+/// shape. The lookup is containment against the manifest directories, which is
+/// what lets a *recorded* path still name its package after the file it points
+/// at is gone — the case the whole second pass exists for.
+#[derive(Debug, Default)]
+pub(crate) struct Packages {
+    /// `(directory, package name)`, deepest directory first, so a member
+    /// nested inside another package's directory answers for its own files.
+    dirs: Vec<(PathBuf, String)>,
+}
+
+impl Packages {
+    /// `dirs` are package directories relative to the workspace root, as
+    /// [`Finding::file`] and a baseline entry's `file` both are. The root
+    /// package's directory is the empty path, which contains everything and so
+    /// sorts last.
+    pub(crate) fn new(dirs: impl IntoIterator<Item = (PathBuf, String)>) -> Packages {
+        let mut dirs: Vec<(PathBuf, String)> = dirs.into_iter().collect();
+        dirs.sort_by_key(|(dir, _)| std::cmp::Reverse(dir.components().count()));
+        Packages { dirs }
+    }
+
+    fn holding(&self, file: &Path) -> Option<&str> {
+        self.dirs
+            .iter()
+            .find(|(dir, _)| file.starts_with(dir))
+            .map(|(_, name)| name.as_str())
+    }
+}
+
+/// The relocations both sides agree on, from what the exact key left over.
+///
+/// `entries` and `findings` are the leftovers — deduplicated keys, so a
+/// baseline that records one entry twice is one candidate rather than two — and
+/// a relocation survives only when exactly one of each carries it. Anything
+/// else is two readings of the same evidence, and the pass has no way to choose
+/// between them; declining leaves the run reporting the findings and naming the
+/// entries stale, which is what it does today.
+///
+/// One set answers both questions, which is the same reason [`Modules::covers`]
+/// is one function: an entry kept fresh by a move and a finding suppressed by
+/// one are the same claim, and two copies of it could drift into an entry that
+/// suppresses a finding *and* reads as no longer occurring.
+fn relocations(entries: &[Key], findings: &[Key], packages: &Packages) -> HashSet<Relocation> {
+    fn candidates(keys: &[Key], packages: &Packages) -> HashMap<Relocation, HashSet<PathBuf>> {
+        let mut out: HashMap<Relocation, HashSet<PathBuf>> = HashMap::new();
+        for key in keys {
+            if let Some(relocation) = key.relocation(packages) {
+                out.entry(relocation).or_default().insert(key.file.clone());
+            }
+        }
+        out
+    }
+
+    let from = candidates(entries, packages);
+    let to = candidates(findings, packages);
+    from.into_iter()
+        .filter(|(_, files)| files.len() == 1)
+        .filter(|(relocation, _)| to.get(relocation).is_some_and(|files| files.len() == 1))
+        .map(|(relocation, _)| relocation)
+        .collect()
 }
 
 /// Index one side of the match by its shared key.
@@ -437,8 +618,18 @@ struct File {
 }
 
 /// A parsed baseline file, in the order its entries are written.
+///
+/// Crate-private, unlike the module around it. What a consumer of the library
+/// needs is what a run *did* — [`Report`], the [`Key`]s in it, [`Mode`] to ask
+/// for a mode, [`FILE_NAME`] to find the default location — and
+/// [`crate::analyze_with`] is the entry point that does it. The file reader
+/// itself is machinery: [`Baseline::apply`] needs a [`Packages`] index built
+/// from `cargo metadata`, so publishing it would publish that too, and an
+/// index of manifest directories is not something to promise anybody. Phase 13
+/// narrowed it for that reason; before then it was `pub` with no caller
+/// outside this crate.
 #[derive(Debug, Default)]
-pub struct Baseline {
+pub(crate) struct Baseline {
     entries: Vec<Entry>,
 }
 
@@ -447,7 +638,7 @@ impl Baseline {
     ///
     /// A missing file is an error, not an empty baseline: a run that cannot
     /// find the file it was told to use is a run whose result means nothing.
-    pub fn load(path: &Path) -> Result<Baseline> {
+    pub(crate) fn load(path: &Path) -> Result<Baseline> {
         let text = std::fs::read_to_string(path).with_context(|| {
             format!(
                 "could not read baseline file `{}` (run `deadwood check --write-baseline` to \
@@ -464,7 +655,7 @@ impl Baseline {
 
     /// Write `findings` to `path` as the whole baseline, replacing whatever
     /// was there.
-    pub fn write(path: &Path, findings: &[Finding]) -> Result<()> {
+    pub(crate) fn write(path: &Path, findings: &[Finding]) -> Result<()> {
         Baseline {
             entries: findings.iter().map(Entry::of).collect(),
         }
@@ -529,16 +720,45 @@ impl Baseline {
     /// Split `findings` into the ones this baseline does not cover and a
     /// record of what it did.
     ///
+    /// Both passes live here, and they have to: the second one is defined on
+    /// what the first left over, so neither the suppressed set nor the stale
+    /// set can be computed without the other side's leftovers in hand.
+    ///
     /// `path` is only carried into the report; nothing is read or written.
-    pub fn apply(&self, findings: Vec<Finding>, path: PathBuf) -> (Vec<Finding>, Report) {
+    pub(crate) fn apply(
+        &self,
+        findings: Vec<Finding>,
+        path: PathBuf,
+        packages: &Packages,
+    ) -> (Vec<Finding>, Report) {
         let occurring = index(findings.iter().map(Key::of));
         let baselined = self.index_entries();
-
         let total = findings.len();
-        let kept: Vec<Finding> = findings
+
+        // Pass one: the exact key, unchanged. What it matches is matched, and
+        // the second pass never sees either side of it.
+        let unmatched: Vec<Finding> = findings
             .into_iter()
             .filter(|finding| !covered(&baselined, &Key::of(finding)))
             .collect();
+        let orphaned = self.orphaned(&occurring);
+
+        // Pass two: the identity a move preserves, over what is left.
+        let moved = relocations(
+            &orphaned,
+            &unmatched.iter().map(Key::of).collect::<Vec<_>>(),
+            packages,
+        );
+        let relocated = |key: &Key| {
+            key.relocation(packages)
+                .is_some_and(|relocation| moved.contains(&relocation))
+        };
+
+        let kept: Vec<Finding> = unmatched
+            .into_iter()
+            .filter(|finding| !relocated(&Key::of(finding)))
+            .collect();
+        let stale: Vec<Key> = orphaned.into_iter().filter(|key| !relocated(key)).collect();
         let suppressed = total - kept.len();
 
         (
@@ -547,7 +767,7 @@ impl Baseline {
                 path,
                 action: Action::Applied,
                 suppressed,
-                stale: self.stale(&occurring),
+                stale,
             },
         )
     }
@@ -556,15 +776,18 @@ impl Baseline {
         index(self.entries.iter().map(Entry::key))
     }
 
-    /// The keys this baseline records that no occurring finding matches, in
-    /// file order and without repeats.
+    /// The keys this baseline records that no occurring finding matches *by the
+    /// exact key*, in file order and without repeats.
     ///
     /// `occurring` is the finding side indexed by [`index`], so the relation
     /// asked here is [`Modules::covers`] read the other way round: an entry
     /// naming `crate::alpha` is fresh when some finding is in `crate::alpha` —
     /// or when a finding under the same shared key names no module at all,
     /// which is the same forgiving fallback that suppresses it.
-    fn stale(&self, occurring: &HashMap<Shared, Modules>) -> Vec<Key> {
+    ///
+    /// Not the stale set: these are the candidates the second pass then draws
+    /// from, and what survives it is what the report calls stale.
+    fn orphaned(&self, occurring: &HashMap<Shared, Modules>) -> Vec<Key> {
         let mut seen = HashSet::new();
         self.entries
             .iter()
@@ -574,20 +797,28 @@ impl Baseline {
             .collect()
     }
 
-    /// Drop the entries no finding matches, keeping every surviving entry's
-    /// fields and the order they were written in.
+    /// Drop the entries whose keys are in `stale`, keeping every surviving
+    /// entry's fields and the order they were written in.
+    ///
+    /// It takes the report's own stale set rather than recomputing the match,
+    /// so `--prune-baseline` removes exactly the entries the run just named and
+    /// the two can never disagree.
     ///
     /// Not the file's bytes: pruning re-serializes, so a hand-formatted or
     /// hand-abbreviated file comes back in the canonical form
     /// [`Baseline::save`] emits. Only the entries are preserved, which is the
-    /// property that matters — pruning must never quietly accept a new finding
-    /// or drop a field off a surviving one.
-    fn without_stale(&self, occurring: &HashMap<Shared, Modules>) -> Baseline {
+    /// property that matters — pruning must never quietly accept a new finding,
+    /// drop a field off a surviving one, or *rewrite* one. An entry the second
+    /// pass matched keeps the path it was written with, exactly as a matched
+    /// entry keeps its drifted line; `--write-baseline` is what re-records
+    /// either.
+    fn without(&self, stale: &[Key]) -> Baseline {
+        let stale: HashSet<&Key> = stale.iter().collect();
         Baseline {
             entries: self
                 .entries
                 .iter()
-                .filter(|entry| covered(occurring, &entry.key()))
+                .filter(|entry| !stale.contains(&entry.key()))
                 .cloned()
                 .collect(),
         }
@@ -605,6 +836,7 @@ pub(crate) fn run(
     location: &Location,
     findings: Vec<Finding>,
     workspace_root: &Path,
+    packages: &Packages,
 ) -> Result<(Vec<Finding>, Option<Report>)> {
     let display = |path: &Path| crate::relative_to(path, workspace_root);
     match mode {
@@ -628,11 +860,11 @@ pub(crate) fn run(
         Mode::Prune => {
             let path = location.path();
             let baseline = Baseline::load(path)?;
-            let occurring = index(findings.iter().map(Key::of));
-            baseline.without_stale(&occurring).save(path)?;
-            // `apply`'s stale set is exactly the entries just removed, which is
-            // what the report should name under this action.
-            let (kept, mut report) = baseline.apply(findings, display(path));
+            // `apply`'s stale set is exactly the entries to remove, so the
+            // report names precisely what was pruned rather than what a second
+            // computation of the same match happened to agree on.
+            let (kept, mut report) = baseline.apply(findings, display(path), packages);
+            baseline.without(&report.stale).save(path)?;
             report.action = Action::Pruned;
             Ok((kept, Some(report)))
         }
@@ -652,7 +884,7 @@ pub(crate) fn run(
             _ => {
                 let path = location.path();
                 let baseline = Baseline::load(path)?;
-                let (kept, report) = baseline.apply(findings, display(path));
+                let (kept, report) = baseline.apply(findings, display(path), packages);
                 Ok((kept, Some(report)))
             }
         },
@@ -727,8 +959,40 @@ mod tests {
         }
     }
 
+    /// A single-package workspace rooted where the findings are, which is what
+    /// every case below wants unless it is specifically about two members.
+    fn one_package() -> Packages {
+        Packages::new([(PathBuf::new(), "only".to_string())])
+    }
+
     fn applied(baseline: &Baseline, findings: Vec<Finding>) -> (Vec<Finding>, Report) {
-        baseline.apply(findings, PathBuf::from(FILE_NAME))
+        baseline.apply(findings, PathBuf::from(FILE_NAME), &one_package())
+    }
+
+    fn applied_in(
+        baseline: &Baseline,
+        findings: Vec<Finding>,
+        packages: &Packages,
+    ) -> (Vec<Finding>, Report) {
+        baseline.apply(findings, PathBuf::from(FILE_NAME), packages)
+    }
+
+    fn item(file: &str, name: &str, module: &str) -> Finding {
+        in_module(
+            finding(FindingKind::UnusedPubItem, file, Some(1), Some(name)),
+            module,
+        )
+    }
+
+    fn reported(findings: &[Finding]) -> Vec<String> {
+        findings
+            .iter()
+            .map(|finding| format!("{}", finding.file.display()))
+            .collect()
+    }
+
+    fn stale_of(report: &Report) -> Vec<String> {
+        report.stale.iter().map(Key::describe).collect()
     }
 
     /// The property the whole file format rests on: an entry is the report's
@@ -1051,11 +1315,308 @@ mod tests {
     fn pruning_removes_the_stale_entries_and_nothing_else() {
         let gone = finding(FindingKind::UnusedPubItem, "src/lib.rs", Some(3), Some("a"));
         let here = finding(FindingKind::DeadFile, "src/orphan.rs", None, None);
-        let full = baseline(&[gone, here.clone()]);
+        let full = baseline(&[gone.clone(), here.clone()]);
 
-        let pruned = full.without_stale(&index([Key::of(&here)]));
+        let (_, report) = applied(&full, vec![here.clone()]);
+        let pruned = full.without(&report.stale);
         assert_eq!(pruned.entries.len(), 1);
         assert_eq!(pruned.entries[0].key(), Key::of(&here));
+        assert_eq!(report.stale, vec![Key::of(&gone)]);
+    }
+
+    // -- a moved file: the second pass ------------------------------------
+    //
+    // Every case below turns on one question — is the leftover evidence enough
+    // to say an item moved — and the answer is "no" far more often than "yes".
+
+    /// The headline case of #17: `git mv` changes no item, so the findings in
+    /// the moved file stay suppressed and the entries recording them stay
+    /// fresh.
+    #[test]
+    fn an_item_whose_file_moved_is_still_baselined() {
+        let before = item("src/legacy.rs", "gone", "crate::legacy");
+        let after = item("src/legacy/mod.rs", "gone", "crate::legacy");
+
+        let (kept, report) = applied(&baseline(&[before]), vec![after]);
+        assert!(kept.is_empty(), "{:?}", reported(&kept));
+        assert!(report.stale.is_empty(), "{:?}", stale_of(&report));
+        assert_eq!(report.suppressed, 1);
+    }
+
+    /// The exact key answers first and the second pass never sees what it
+    /// claimed. Both twins occur, so baselining one leaves the other reported —
+    /// this is the case a matcher that simply dropped the file would get wrong,
+    /// and the file is what it gets wrong.
+    #[test]
+    fn two_items_sharing_a_name_and_a_module_in_two_files_are_still_two_findings() {
+        let one = item("src/bin/one.rs", "shared", "crate");
+        let two = item("src/bin/two.rs", "shared", "crate");
+
+        let (kept, report) = applied(&baseline(std::slice::from_ref(&one)), vec![one, two]);
+        assert_eq!(reported(&kept), ["src/bin/two.rs"]);
+        assert!(report.stale.is_empty(), "{:?}", stale_of(&report));
+    }
+
+    /// One entry and two candidates is not a move, it is two readings of the
+    /// same evidence. The pass declines, and the run says so out loud rather
+    /// than picking one.
+    #[test]
+    fn an_entry_with_two_candidates_relocates_to_neither() {
+        let recorded = item("src/bin/three.rs", "shared", "crate");
+        let one = item("src/bin/one.rs", "shared", "crate");
+        let two = item("src/bin/two.rs", "shared", "crate");
+
+        let (kept, report) = applied(&baseline(&[recorded]), vec![one, two]);
+        assert_eq!(reported(&kept), ["src/bin/one.rs", "src/bin/two.rs"]);
+        assert_eq!(
+            stale_of(&report),
+            ["src/bin/three.rs: unused_pub_item `shared` in `crate`"]
+        );
+    }
+
+    /// And the same refusal read the other way: two entries competing for one
+    /// finding leaves the finding reported and both entries stale.
+    #[test]
+    fn two_entries_competing_for_one_finding_relocate_to_neither() {
+        let old = item("src/legacy.rs", "gone", "crate::legacy");
+        let older = item("src/attic/legacy.rs", "gone", "crate::legacy");
+        let now = item("src/legacy/mod.rs", "gone", "crate::legacy");
+
+        let (kept, report) = applied(&baseline(&[old, older]), vec![now]);
+        assert_eq!(reported(&kept), ["src/legacy/mod.rs"]);
+        assert_eq!(stale_of(&report).len(), 2, "{:?}", stale_of(&report));
+    }
+
+    /// `module` is `crate`-relative, so two members can each own a
+    /// `crate::legacy::gone` and the module path cannot tell them apart. The
+    /// file supplies the package, and the pass will not cross it.
+    #[test]
+    fn a_move_is_not_matched_across_two_packages() {
+        let packages = Packages::new([
+            (PathBuf::from("alpha"), "alpha".to_string()),
+            (PathBuf::from("beta"), "beta".to_string()),
+        ]);
+        let recorded = item("alpha/src/legacy.rs", "gone", "crate::legacy");
+        let elsewhere = item("beta/src/legacy/mod.rs", "gone", "crate::legacy");
+
+        let (kept, report) = applied_in(&baseline(&[recorded]), vec![elsewhere], &packages);
+        assert_eq!(reported(&kept), ["beta/src/legacy/mod.rs"]);
+        assert_eq!(stale_of(&report).len(), 1, "{:?}", stale_of(&report));
+
+        // ...and inside one package the same move is matched, so the package is
+        // doing the refusing rather than the pass being off entirely.
+        let within = item("alpha/src/legacy/mod.rs", "gone", "crate::legacy");
+        let recorded = item("alpha/src/legacy.rs", "gone", "crate::legacy");
+        let (kept, report) = applied_in(&baseline(&[recorded]), vec![within], &packages);
+        assert!(kept.is_empty(), "{:?}", reported(&kept));
+        assert!(report.stale.is_empty(), "{:?}", stale_of(&report));
+    }
+
+    /// A member nested inside another package's directory answers for its own
+    /// files, so the deepest directory wins the lookup.
+    #[test]
+    fn the_deepest_package_directory_owns_a_nested_members_files() {
+        let packages = Packages::new([
+            (PathBuf::new(), "root".to_string()),
+            (PathBuf::from("crates/inner"), "inner".to_string()),
+        ]);
+        let recorded = item("crates/inner/src/legacy.rs", "gone", "crate::legacy");
+        let elsewhere = item("src/legacy/mod.rs", "gone", "crate::legacy");
+
+        let (kept, report) = applied_in(&baseline(&[recorded]), vec![elsewhere], &packages);
+        assert_eq!(reported(&kept), ["src/legacy/mod.rs"]);
+        assert_eq!(stale_of(&report).len(), 1, "{:?}", stale_of(&report));
+    }
+
+    /// A dead file has no name and no module, so there is nothing for the pass
+    /// to compare and nothing it could compare would be evidence. Moving one
+    /// behaves exactly as it did before this pass existed.
+    #[test]
+    fn a_dead_file_that_moved_is_reported_and_its_entry_goes_stale() {
+        let before = finding(FindingKind::DeadFile, "src/dropped.rs", None, None);
+        let after = finding(FindingKind::DeadFile, "src/attic/dropped.rs", None, None);
+
+        let (kept, report) = applied(&baseline(&[before]), vec![after]);
+        assert_eq!(reported(&kept), ["src/attic/dropped.rs"]);
+        assert_eq!(stale_of(&report), ["src/dropped.rs: dead_file"]);
+    }
+
+    /// The dependency kinds name a crate in a manifest and record no module, so
+    /// they are out of the pass's reach by the same construction — a manifest
+    /// path moves only when a whole package does, which is a different event.
+    #[test]
+    fn a_manifest_entry_recorded_at_another_manifest_is_not_relocated() {
+        let packages = Packages::new([
+            (PathBuf::from("alpha"), "alpha".to_string()),
+            (PathBuf::from("beta"), "beta".to_string()),
+        ]);
+        for kind in [
+            FindingKind::UnusedDependency,
+            FindingKind::MisplacedDependency,
+        ] {
+            let before = finding(kind, "alpha/Cargo.toml", None, Some("serde"));
+            let after = finding(kind, "beta/Cargo.toml", None, Some("serde"));
+
+            let (kept, report) = applied_in(&baseline(&[before]), vec![after], &packages);
+            assert_eq!(reported(&kept), ["beta/Cargo.toml"], "{kind:?}");
+            assert_eq!(stale_of(&report).len(), 1, "{kind:?}");
+        }
+    }
+
+    /// An unsatisfiable gate names a site rather than a definition: it has a
+    /// name and no module, and half an identity is not one.
+    #[test]
+    fn a_gate_site_has_a_name_and_no_module_so_it_is_not_relocated() {
+        let before = finding(
+            FindingKind::UnsatisfiableCfg,
+            "src/lib.rs",
+            Some(3),
+            Some("mod imp"),
+        );
+        let after = finding(
+            FindingKind::UnsatisfiableCfg,
+            "src/moved.rs",
+            Some(3),
+            Some("mod imp"),
+        );
+
+        let (kept, report) = applied(&baseline(&[before]), vec![after]);
+        assert_eq!(reported(&kept), ["src/moved.rs"]);
+        assert_eq!(stale_of(&report).len(), 1, "{:?}", stale_of(&report));
+    }
+
+    /// The kind is as load bearing in a relocation as it is in the key. An item
+    /// and a re-export of it are different claims, and a file move is not a
+    /// licence to swap one for the other.
+    #[test]
+    fn a_relocation_does_not_cross_two_kinds() {
+        let before = item("src/legacy.rs", "gone", "crate::legacy");
+        let after = in_module(
+            finding(
+                FindingKind::UnusedReexport,
+                "src/legacy/mod.rs",
+                Some(1),
+                Some("gone"),
+            ),
+            "crate::legacy",
+        );
+
+        let (kept, report) = applied(&baseline(&[before]), vec![after]);
+        assert_eq!(reported(&kept), ["src/legacy/mod.rs"]);
+        assert_eq!(stale_of(&report).len(), 1, "{:?}", stale_of(&report));
+    }
+
+    /// And the module is what makes the identity an identity. An item that
+    /// changed module changed its position in the crate's tree, which is a
+    /// different item as far as anything here can tell.
+    #[test]
+    fn a_relocation_does_not_cross_two_modules() {
+        let before = item("src/legacy.rs", "gone", "crate::legacy");
+        let after = item("src/legacy/mod.rs", "gone", "crate::compat::legacy");
+
+        let (kept, report) = applied(&baseline(&[before]), vec![after]);
+        assert_eq!(reported(&kept), ["src/legacy/mod.rs"]);
+        assert_eq!(stale_of(&report).len(), 1, "{:?}", stale_of(&report));
+    }
+
+    /// The exact key claims its matches first, and what it claims is out of the
+    /// second pass entirely — on *both* sides. So a baselined `shared` that is
+    /// still where it was does not make its neighbour's move ambiguous: the
+    /// matched pair is gone from the leftovers before anything is counted.
+    #[test]
+    fn what_the_exact_key_matched_does_not_crowd_out_a_move_beside_it() {
+        let staying = item("src/bin/one.rs", "shared", "crate");
+        let recorded = item("src/bin/three.rs", "shared", "crate");
+        let arrived = item("src/bin/two.rs", "shared", "crate");
+
+        let (kept, report) = applied(
+            &baseline(&[staying.clone(), recorded]),
+            vec![staying, arrived],
+        );
+        assert!(kept.is_empty(), "{:?}", reported(&kept));
+        assert!(report.stale.is_empty(), "{:?}", stale_of(&report));
+        assert_eq!(report.suppressed, 2);
+    }
+
+    /// A hand-written entry that names a module and no name identifies no item,
+    /// so it relocates onto nothing.
+    #[test]
+    fn an_entry_with_a_module_and_no_name_is_not_relocated() {
+        let mut before = item("src/legacy.rs", "gone", "crate::legacy");
+        before.name = None;
+        let after = item("src/legacy/mod.rs", "gone", "crate::legacy");
+
+        let (kept, report) = applied(&baseline(&[before]), vec![after]);
+        assert_eq!(reported(&kept), ["src/legacy/mod.rs"]);
+        assert_eq!(stale_of(&report).len(), 1, "{:?}", stale_of(&report));
+    }
+
+    /// A package whose whole directory moved leaves entries pointing outside
+    /// every package this workspace has. There is no package to scope the pass
+    /// to, so it declines — today's behaviour, and honestly a limitation.
+    #[test]
+    fn an_entry_outside_every_package_directory_is_not_relocated() {
+        let packages = Packages::new([(PathBuf::from("vendor/alpha"), "alpha".to_string())]);
+        let recorded = item("crates/alpha/src/legacy.rs", "gone", "crate::legacy");
+        let now = item("vendor/alpha/src/legacy.rs", "gone", "crate::legacy");
+
+        let (kept, report) = applied_in(
+            &baseline(std::slice::from_ref(&recorded)),
+            vec![now.clone()],
+            &packages,
+        );
+        assert_eq!(reported(&kept), ["vendor/alpha/src/legacy.rs"]);
+        assert_eq!(stale_of(&report).len(), 1, "{:?}", stale_of(&report));
+
+        // "No package" is not a package the two sides can agree on: with
+        // nothing resolving, nothing relocates either.
+        let (kept, report) = applied_in(&baseline(&[recorded]), vec![now], &Packages::default());
+        assert_eq!(reported(&kept), ["vendor/alpha/src/legacy.rs"]);
+        assert_eq!(stale_of(&report).len(), 1, "{:?}", stale_of(&report));
+    }
+
+    /// A finding the exact key already matched is not a candidate for anyone's
+    /// relocation, and neither is the entry that matched it. Both sides are
+    /// leftovers or neither is — which is what lets a move be found at all in a
+    /// file that also holds an ordinary baselined finding of the same identity.
+    #[test]
+    fn a_finding_the_exact_key_matched_is_not_a_relocation_candidate() {
+        let recorded = item("src/legacy.rs", "gone", "crate::legacy");
+        let also = item("src/other.rs", "gone", "crate::legacy");
+        let moved = item("src/legacy/mod.rs", "gone", "crate::legacy");
+
+        // `also` is claimed by its own entry, so the leftovers are exactly one
+        // entry and exactly one finding and the move is found. Offer the whole
+        // set to the second pass instead and `recorded` has two candidates, the
+        // one-to-one rule refuses, and `moved` is reported.
+        let (kept, report) = applied(&baseline(&[recorded, also.clone()]), vec![also, moved]);
+        assert!(kept.is_empty(), "{:?}", reported(&kept));
+        assert!(report.stale.is_empty(), "{:?}", stale_of(&report));
+        assert_eq!(report.suppressed, 2);
+    }
+
+    /// Suppression and staleness come out of one relocation set, so an entry
+    /// can never both suppress a finding and read as no longer occurring.
+    #[test]
+    fn relocation_answers_suppression_and_staleness_together() {
+        let recorded = item("src/legacy.rs", "gone", "crate::legacy");
+        for occurring in [
+            item("src/legacy/mod.rs", "gone", "crate::legacy"),
+            item("src/legacy/mod.rs", "gone", "crate::other"),
+            item("src/legacy/mod.rs", "other", "crate::legacy"),
+        ] {
+            let (kept, report) = applied(
+                &baseline(std::slice::from_ref(&recorded)),
+                vec![occurring.clone()],
+            );
+            assert_eq!(
+                kept.is_empty(),
+                report.stale.is_empty(),
+                "against {:?}/{:?}",
+                occurring.file,
+                occurring.module,
+            );
+        }
     }
 
     /// A baseline naming a file that is not there must never read as "nothing

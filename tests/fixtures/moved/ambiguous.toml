@@ -1,0 +1,7 @@
+# One entry, two candidates. `shared` is recorded at a third file that is not
+# there, and both `one.rs`'s and `two.rs`'s `shared` are unmatched — so the
+# entry could have moved to either and there is nothing to choose with. A move
+# is one-to-one and this observation is not, so the pass declines: both findings
+# are reported and the entry is named stale, which is exactly what a Deadwood
+# without the second pass does.
+baseline = "ambiguous-baseline.json"

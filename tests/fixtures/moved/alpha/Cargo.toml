@@ -1,0 +1,13 @@
+# The registry dependency below does not exist and does not need to:
+# `cargo metadata --no-deps` never resolves it, and Deadwood never builds.
+[package]
+name = "alpha"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Named by nothing at all: an `unused_dependency` finding, at a manifest path.
+# `beta` has no such entry, so a baseline recording this one against *beta's*
+# manifest has exactly one candidate to relocate onto and must still decline —
+# a manifest entry names no module, so there is no item identity to move.
+unused_crate = "1"
