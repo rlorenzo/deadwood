@@ -4,6 +4,8 @@
 
 use std::path::{Path, PathBuf};
 
+use serde_json::json;
+
 use deadwood::config::Severity;
 use deadwood::{Analysis, FindingKind, analyze};
 
@@ -1908,6 +1910,20 @@ fn a_finding_with_no_module_is_never_relocated() {
 fn pruning_keeps_a_relocated_entry_with_the_path_it_was_written_with() {
     let dir = scratch_copy("moved", "prune-relocated");
     let config = dir.join("moved.toml");
+    let path = dir.join("moved-baseline.json");
+
+    // One entry nothing can match, added on purpose: without it a
+    // `--prune-baseline` that did nothing at all would pass this test, and the
+    // claim is that pruning tells a relocated entry from a stale one — not that
+    // it leaves the file alone.
+    let mut source: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    source["findings"].as_array_mut().unwrap().push(json!({
+        "kind": "dead_file",
+        "file": "alpha/src/never-existed.rs"
+    }));
+    std::fs::write(&path, serde_json::to_string_pretty(&source).unwrap()).unwrap();
+
     let (code, out) = run_binary(
         dir.as_path(),
         &["--config", config.to_str().unwrap(), "--prune-baseline"],
@@ -1915,19 +1931,24 @@ fn pruning_keeps_a_relocated_entry_with_the_path_it_was_written_with() {
     assert_eq!(code, Some(0), "{out}");
 
     let file: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(dir.join("moved-baseline.json")).unwrap())
-            .unwrap();
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     let entries = file["findings"].as_array().unwrap();
     assert_eq!(
         entries.len(),
         6,
-        "nothing was stale, so nothing was dropped"
+        "the stale entry went and the other six stayed: {entries:#?}"
+    );
+    assert!(
+        !entries
+            .iter()
+            .any(|entry| entry["file"] == "alpha/src/never-existed.rs"),
+        "the entry nothing matched is gone: {entries:#?}"
     );
     assert!(
         entries
             .iter()
             .any(|entry| entry["file"] == "alpha/src/legacy.rs" && entry["line"] == 902),
-        "the relocated entry is untouched, path and line alike: {entries:#?}"
+        "and the relocated entry is untouched, path and line alike: {entries:#?}"
     );
 }
 

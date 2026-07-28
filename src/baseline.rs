@@ -1565,19 +1565,24 @@ mod tests {
         assert_eq!(stale_of(&report).len(), 1, "{:?}", stale_of(&report));
     }
 
-    /// A relocation is *not* a licence to suppress a second finding under the
-    /// same identity: the entry pairs with one leftover finding or with none.
+    /// A finding the exact key already matched is not a candidate for anyone's
+    /// relocation, and neither is the entry that matched it. Both sides are
+    /// leftovers or neither is — which is what lets a move be found at all in a
+    /// file that also holds an ordinary baselined finding of the same identity.
     #[test]
-    fn a_relocated_entry_does_not_also_cover_a_finding_the_exact_key_matched() {
+    fn a_finding_the_exact_key_matched_is_not_a_relocation_candidate() {
         let recorded = item("src/legacy.rs", "gone", "crate::legacy");
         let also = item("src/other.rs", "gone", "crate::legacy");
         let moved = item("src/legacy/mod.rs", "gone", "crate::legacy");
 
-        // `also` is matched by nothing, `moved` is matched by nothing, and the
-        // one entry has two candidates: neither is suppressed.
-        let (kept, report) = applied(&baseline(&[recorded]), vec![also, moved]);
-        assert_eq!(reported(&kept), ["src/other.rs", "src/legacy/mod.rs"]);
-        assert_eq!(stale_of(&report).len(), 1);
+        // `also` is claimed by its own entry, so the leftovers are exactly one
+        // entry and exactly one finding and the move is found. Offer the whole
+        // set to the second pass instead and `recorded` has two candidates, the
+        // one-to-one rule refuses, and `moved` is reported.
+        let (kept, report) = applied(&baseline(&[recorded, also.clone()]), vec![also, moved]);
+        assert!(kept.is_empty(), "{:?}", reported(&kept));
+        assert!(report.stale.is_empty(), "{:?}", stale_of(&report));
+        assert_eq!(report.suppressed, 2);
     }
 
     /// Suppression and staleness come out of one relocation set, so an entry

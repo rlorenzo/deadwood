@@ -286,10 +286,11 @@ deliberate:
 - **It never overrules the file.** Two items with the same kind, name and module
   in two different files are both matched by the key, so baselining one still
   leaves the other reported.
-- **It refuses when the pairing is ambiguous** — exactly one leftover entry and
-  exactly one leftover finding, or no match at all. A move is one-to-one and the
-  evidence is not, so where it runs out the run goes back to reporting the
-  finding and naming the entry stale.
+- **It matches only a one-to-one pairing** — exactly one leftover entry and
+  exactly one leftover finding under an identity, which is the only shape a move
+  can have. Two candidates for one entry, or two entries for one candidate, and
+  it refuses: the run goes back to reporting the finding and naming the entry
+  stale, which is where a move stops being distinguishable from a coincidence.
 - **It will not cross a package.** `module` is `crate`-relative and says nothing
   about which crate, so two members can each have a `crate::legacy::gone`; the
   recorded file supplies the package. An entry whose path is in no package of
@@ -711,10 +712,11 @@ toolchain is pinned to `stable` with `clippy` and `rustfmt` via
   entry is the right answer. Since the key deliberately ignores the line, there
   is no way to say which occurrence is the new one, and pointing at a baselined
   line would be a wrong finding rather than a missed one.
-- Moving a file un-baselines the findings in it for the three kinds that name no
-  module: a `dead_file`, and a `Cargo.toml` entry whose whole package moved. The
-  item kinds survive a move (above); these do not, because there is nothing about
-  them that a move preserves and guessing would suppress a genuinely new finding.
+- Moving a file un-baselines the findings in it for the four kinds that name no
+  module: a `dead_file`, an `unsatisfiable_cfg` gate site, and a `Cargo.toml`
+  entry of either dependency kind whose whole package moved. The item kinds
+  survive a move (above); these do not, because there is nothing about them that
+  a move preserves and guessing would suppress a genuinely new finding.
   `--prune-baseline` then `--write-baseline` is the workaround, at the cost of
   re-accepting anything else that regressed in between. So is editing the two or
   three paths by hand, which the format is meant to allow.

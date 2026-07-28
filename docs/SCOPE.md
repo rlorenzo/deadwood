@@ -870,9 +870,11 @@ number that separates them is what the phase turns on.
   demonstrate the collision, exactly as phase 12's `twin` does for the key. So
   for most of the corpus an identity that survives a path change already existed
   and needed no similarity signal, no content hash and no format change. The
-  other 86 split into `dead_file` (39), which has no name and no module and
-  genuinely needs a signal nothing computes, and the manifest kinds (43), whose
-  path moves only when a whole package does.
+  other 86 split three ways: `dead_file` (39), which has no name and no module
+  and genuinely needs a signal nothing computes; the manifest kinds (43), whose
+  path moves only when a whole package does; and `unsatisfiable_cfg` (4), which
+  names a gate site rather than an item and moves with the file it is written
+  in.
 - **The file is to the module path what the line is to the file, and that is the
   whole idea.** For an *item*, the file is a second name for a place the key
   already records: `crate::legacy::gone` in package `alpha` names one definition
@@ -899,8 +901,9 @@ number that separates them is what the phase turns on.
   list someone could extend. It runs second, so a finding the exact key matched
   is never available to it — which is why two items sharing a name and a module
   in two files are still two findings, and baselining one still leaves the other
-  reported. It refuses when the pairing is ambiguous: exactly one leftover entry
-  and exactly one leftover finding, or nothing. And it will not cross a package.
+  reported. It matches only a one-to-one pairing — exactly one leftover entry and
+  exactly one leftover finding, which is the only shape a move can have — and
+  refuses every other count. And it will not cross a package.
   Deliberately *not* the set semantics the exact key uses — there the unanswerable
   question is which occurrence is new, so all are covered; here it is whether a
   move happened at all, so none is.
@@ -920,7 +923,8 @@ number that separates them is what the phase turns on.
 - **What is left, and it is a decision rather than an oversight.**
   `tests/fixtures/moved/unmoved.toml` pins that a moved `dead_file` and a
   dependency entry recorded against another manifest behave exactly as they did
-  before this phase. The residual is filed
+  before this phase; `unsatisfiable_cfg` is out of range by the same rule and for
+  the same reason — it names a gate site, not an item. The residual is filed
   ([#32](https://github.com/rlorenzo/deadwood/issues/32)), including the half of
   it that is cheap — a package that moves keeps its name, and only the entry not
   recording that name stops it being matchable — and the half that is not, which
@@ -980,12 +984,14 @@ kinds with no item identity, and a package directory that moves.
    ([#32](https://github.com/rlorenzo/deadwood/issues/32)) — phase 13's
    residual, and last of the filed entries because its failure mode is noise
    and it has a workaround. 86 of the corpus's 213 findings name no module and
-   so have no identity a move preserves. Two halves with different prices: a
+   so have no identity a move preserves — `dead_file` (39), the manifest kinds
+   (43) and `unsatisfiable_cfg` (4). Two halves with different prices: a
    package that moves keeps its *name*, so recording that name on the entry
    would close the manifest kinds and extend the item kinds across a package
    move — at the cost of a second additive field and a second one-way door,
-   which is the same bill #30 is weighing. `dead_file` has nothing but its path
-   and wants a content signal, which is a different phase with its own argument.
+   which is the same bill #30 is weighing. `dead_file` and `unsatisfiable_cfg`
+   have nothing but a path and want a content signal, which is a different phase
+   with its own argument.
 5. **Report a `[dev-dependencies]` entry the library itself names.** The
    check has never made that claim, because the likeliest explanation used to
    be a mis-attribution of ours rather than a manifest that cannot compile.
