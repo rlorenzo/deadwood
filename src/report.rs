@@ -153,6 +153,7 @@ mod tests {
                     file: PathBuf::from("src/lib.rs"),
                     line: Some(3),
                     name: Some("dead".into()),
+                    module: Some("crate".into()),
                     message: "pub fn `dead` is never referenced by any resolved path in this \
                               workspace"
                         .into(),
@@ -163,6 +164,7 @@ mod tests {
                     file: PathBuf::from("src/lib.rs"),
                     line: Some(9),
                     name: Some("Stale".into()),
+                    module: Some("crate".into()),
                     message: "`pub use` re-export of `Stale` is never referenced through this \
                               module"
                         .into(),
@@ -173,6 +175,7 @@ mod tests {
                     file: PathBuf::from("Cargo.toml"),
                     line: None,
                     name: Some("regex".into()),
+                    module: None,
                     message: "dependency `regex` is never referenced by any target of package \
                               `demo`"
                         .into(),
@@ -256,6 +259,7 @@ mod tests {
                 file: PathBuf::from("src/lib.rs"),
                 line: Some(4),
                 name: Some("win".into()),
+                module: None,
                 message: "`#[cfg(feature = \"gone\")]` can never hold: package `demo` declares no \
                           feature `gone`"
                     .into(),
@@ -318,6 +322,7 @@ mod tests {
             kind: FindingKind::UnusedPubItem,
             file: PathBuf::from("src/old.rs"),
             name: Some("gone".into()),
+            module: None,
         }
     }
 

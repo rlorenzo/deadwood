@@ -21,16 +21,17 @@
 //!
 //! Reading is looser than writing on purpose. Only `kind` and `file` are
 //! required, so a hand-written or hand-edited entry is a two-line object;
-//! `line`, `name`, `severity` and `message` are accepted, written back, and
-//! shown to whoever reads the file, but see below for which of them the
-//! matching actually uses. Unknown keys are rejected, for the reason every
+//! `line`, `name`, `module`, `severity` and `message` are accepted, written
+//! back, and shown to whoever reads the file, but see below for which of them
+//! the matching actually uses. Unknown keys are rejected, for the reason every
 //! other file Deadwood reads rejects them: a key that is parsed and ignored is
 //! a setting the user believes is working.
 //!
 //! # The match key, and what is deliberately not in it
 //!
-//! An entry matches a finding when **kind, file and name** are equal. That is
-//! the whole key, and each exclusion is a decision:
+//! An entry matches a finding when **kind, file, name and module** are equal,
+//! with one exception for the module that the next section is entirely about.
+//! That is the whole key, and each exclusion is a decision:
 //!
 //! - **Not the line.** Code moves. A baseline keyed on line numbers would
 //!   un-suppress a whole file the first time someone adds an import at the top,
@@ -53,8 +54,19 @@
 //!   "`serde` is in the wrong table", because those are different claims and
 //!   the second one is news.
 //!
+//! - **The module, which arrived last and is the only field the key acquired
+//!   after shipping.** Two `pub fn twin` in two inline modules of one file
+//!   differ in nothing else the key looks at, so one entry used to suppress
+//!   both — and a *third* `twin` added later was suppressed before it existed
+//!   ([#16](https://github.com/rlorenzo/deadwood/issues/16)). The module path
+//!   is `crate`-rooted and crate-relative (`crate`, `crate::alpha`), it is what
+//!   [`crate::Finding::module`] carries, and — the property that makes it
+//!   admissible at all — it does not move when code above it does. That is the
+//!   whole test the line failed.
+//!
 //! `name` is an `Option`, and `None` is a value like any other: a dead file has
-//! no name, and matches only a baseline entry that has none either.
+//! no name, and matches only a baseline entry that has none either. `module` is
+//! an `Option` too and behaves entirely differently — see below.
 //!
 //! The file path is what makes the key specific enough to be safe — without it
 //! one `unused_pub_item foo` entry would cover every `foo` in the workspace,
@@ -63,20 +75,53 @@
 //! ([#17](https://github.com/rlorenzo/deadwood/issues/17)); the failure mode is
 //! noise on a deliberate, reviewed act, which is the right side to be on.
 //!
-//! # Two findings that share a key
+//! # An absent module is not a module: the fallback, in both directions
 //!
-//! The key is not unique. Two `pub fn twin` in two inline modules of one file
-//! produce two `unused_pub_item` findings with the same kind, file and name,
-//! differing only in the line the key deliberately ignores.
+//! Only three of the seven kinds have a module to name. A dead file is not an
+//! item at all, the two dependency kinds name an entry in a manifest, and an
+//! unsatisfiable gate names the site the gate is written at rather than a
+//! definition — so the key gained a field most kinds can never fill, and every
+//! baseline written before the field existed fills it for none of them.
 //!
-//! One baseline entry suppresses **every** finding matching its key — set
-//! semantics, not counting. The alternative, recording a multiplicity and
-//! reporting the (n+1)th occurrence as new, was rejected: since lines are not
-//! matched, we could not say *which* occurrence is the new one, so the report
-//! would point at a line that is very likely baselined. That is a wrong
-//! finding. Suppressing the extra one is a missed finding. The tenet is
-//! explicit about which of those to prefer, and
-//! [#16](https://github.com/rlorenzo/deadwood/issues/16) tracks the gap.
+//! So `None` here means *nothing was said about the module*, never *the crate
+//! root* — which is why the root is spelled `crate` and not the empty string.
+//! Matching compares modules **only when both sides name one** ([`Modules`]).
+//! An entry with no module covers every finding under its shared key, exactly as
+//! it did before this field existed; a finding with no module is covered by an
+//! entry that names one. The forgiving direction is not a convenience: the
+//! alternative un-baselines every entry of every baseline in every project that
+//! upgrades without touching its file, which is a run failing over code nobody
+//! changed. This project prefers noise to silence, but only when the noise is
+//! about the user's own code.
+//!
+//! The same relation answers both questions — a finding is suppressed when some
+//! entry covers it, and an entry is stale when no finding covers it — from one
+//! function, because two copies could drift into an entry that suppresses a
+//! finding *and* reads as no longer occurring.
+//!
+//! # Two findings that still share a key
+//!
+//! The module narrows the key; it does not make it unique, and one entry still
+//! suppresses **every** finding matching its key. Set semantics, not counting:
+//! recording a multiplicity and reporting the (n+1)th occurrence as new stays
+//! rejected for the reason phase 6 rejected it — with lines unmatched we cannot
+//! say which occurrence is the new one, so the report would point at a line that
+//! is very likely baselined. That is a wrong finding where this is a missed one.
+//!
+//! Two shapes survive, both measured on real code and both cases where two
+//! definitions genuinely share a file, a name *and* a module:
+//!
+//! - **Two `cfg`-alternative definitions of one item.** `#[cfg(feature =
+//!   "utf8")] pub type DefaultCharAccumulator = Utf8Parser;` beside its
+//!   `not(utf8)` twin. Deadwood's matrix is the union of every build, so both
+//!   halves are analyzed and both could be reported. One entry covering both is
+//!   *right* here — it is one item, and a reader fixing it fixes both.
+//! - **A type and a value sharing a name.** `pub struct Group` beside
+//!   `#[allow(non_snake_case)] pub fn Group(..)`, syn's constructor-shim idiom.
+//!   These are two different items, and the module path cannot separate them
+//!   because Rust separates them by *namespace*, which nothing in the key
+//!   models. This is the residual of #16, and it is left open rather than
+//!   guessed at.
 //!
 //! # Suppressed findings do not appear in the report
 //!
@@ -126,8 +171,28 @@
 //! while discovery may find none, and the split here is exactly parallel: a
 //! path written down in `deadwood.toml` must exist, while the default location
 //! simply may or may not have a file in it yet.
+//!
+//! # Reading a newer baseline is a hard error too, and that door is one-way
+//!
+//! [`Entry`] rejects unknown fields, so the compatibility of the `module` field
+//! runs one way only. A newer Deadwood reads every older baseline (the fallback
+//! above); an **older** Deadwood handed a baseline carrying `module` exits 2 with
+//! ``unknown field `module` ``, on a file it read yesterday. Downgrading after
+//! rewriting the baseline needs the field deleted by hand, or the file
+//! regenerated by the older binary.
+//!
+//! Relaxing the strictness would not fix that — the strict reader is the one
+//! already released — and it would cost the protection outright. "A setting that
+//! silently does nothing is worse than no setting" is a rule about config, and
+//! the objection to applying it to a *data* file is fair as far as it goes: an
+//! ignored decoration on an entry still leaves the entry matching, and the
+//! failure is noise rather than silence. But `module` is not a decoration. It is
+//! part of the key, so an entry whose `module` was silently dropped as a typo
+//! falls back to the broad shared key and suppresses the neighbour this field
+//! exists to stop suppressing — silence, in the exact place the phase was about.
+//! The strictness stays, and the door is documented rather than papered over.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -186,7 +251,8 @@ pub struct Report {
     pub stale: Vec<Key>,
 }
 
-/// The identity of a finding, for baseline matching: kind, file, and name.
+/// The identity of a finding, for baseline matching: kind, file, name, and the
+/// module the name is written in.
 ///
 /// Deliberately not the line (code moves), the severity (a config decision) or
 /// the message (prose); the module docs have the reasoning for each.
@@ -196,7 +262,20 @@ pub struct Key {
     pub file: PathBuf,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// `crate::alpha`, for the kinds that have one. `None` is not a wildcard in
+    /// the *key* — two keys with different modules are different keys, and both
+    /// are reported and deduplicated on their own — but it is one in
+    /// [`Modules::covers`], which is where matching happens.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub module: Option<String>,
 }
+
+/// The part of a key that every key has, whatever it says about the module.
+///
+/// Matching falls back to this whenever one side records no module, which is
+/// what makes a baseline written before the field existed keep working. The
+/// module is not in it: it is carried alongside, as a [`Modules`].
+type Shared = (FindingKind, PathBuf, Option<String>);
 
 impl Key {
     fn of(finding: &Finding) -> Key {
@@ -204,17 +283,99 @@ impl Key {
             kind: finding.kind,
             file: finding.file.clone(),
             name: finding.name.clone(),
+            module: finding.module.clone(),
         }
     }
 
-    /// `src/lib.rs: unused_pub_item `dead``, for the text report.
+    fn shared(&self) -> Shared {
+        (self.kind, self.file.clone(), self.name.clone())
+    }
+
+    /// `src/lib.rs: unused_pub_item `dead` in `crate::alpha``, for the text
+    /// report.
+    ///
+    /// The module is appended only when there is one, so an entry written
+    /// before the field existed is described exactly as it always was.
     pub fn describe(&self) -> String {
         let kind = self.kind.label();
-        match &self.name {
+        let mut out = match &self.name {
             Some(name) => format!("{}: {kind} `{name}`", self.file.display()),
             None => format!("{}: {kind}", self.file.display()),
+        };
+        if let Some(module) = &self.module {
+            out.push_str(&format!(" in `{module}`"));
+        }
+        out
+    }
+}
+
+/// What one side of the match records about the module, under one [`Shared`]
+/// key.
+///
+/// This is the whole of the format's compatibility story, and it is
+/// deliberately the *forgiving* reading in both directions. A side that records
+/// no module has not said the modules differ — it has said nothing about
+/// modules at all — so there is nothing to compare and the shared key is the
+/// whole key, which is exactly today's behaviour. Only when both sides name a
+/// module does a mismatch separate them.
+///
+/// The alternative, treating an absent module as a module of its own, would
+/// un-baseline every entry in every baseline ever written the moment a project
+/// upgraded — a file the user committed, breaking on a run that changed no code
+/// of theirs. That is the loudest possible noise, and this project prefers noise
+/// to silence only when the noise is about the user's own code.
+///
+/// Never empty: it exists only where something was added to it.
+#[derive(Debug, Default)]
+struct Modules {
+    /// Something under this key records no module.
+    unqualified: bool,
+    /// The modules that are named.
+    qualified: HashSet<String>,
+}
+
+impl Modules {
+    fn add(&mut self, module: Option<&str>) {
+        match module {
+            None => self.unqualified = true,
+            Some(module) => {
+                self.qualified.insert(module.to_string());
+            }
         }
     }
+
+    /// Whether this side covers something on the other side that records
+    /// `module`.
+    ///
+    /// Symmetric on purpose: `apply` asks it of the entries and `stale` asks it
+    /// of the findings, and an entry that suppresses a finding must be the same
+    /// relation as a finding that keeps an entry fresh. Two copies of it, drifting,
+    /// would produce an entry that both suppresses a finding and reads as stale.
+    fn covers(&self, module: Option<&str>) -> bool {
+        match module {
+            // The other side records no module either: nothing to compare on,
+            // so the shared key is the whole key.
+            None => true,
+            Some(module) => self.unqualified || self.qualified.contains(module),
+        }
+    }
+}
+
+/// Index one side of the match by its shared key.
+fn index(keys: impl IntoIterator<Item = Key>) -> HashMap<Shared, Modules> {
+    let mut out: HashMap<Shared, Modules> = HashMap::new();
+    for key in keys {
+        out.entry(key.shared())
+            .or_default()
+            .add(key.module.as_deref());
+    }
+    out
+}
+
+/// Whether `side` — one side of the match, indexed by [`index`] — covers `key`.
+fn covered(side: &HashMap<Shared, Modules>, key: &Key) -> bool {
+    side.get(&key.shared())
+        .is_some_and(|modules| modules.covers(key.module.as_deref()))
 }
 
 /// A recorded finding, as it sits in the file.
@@ -235,6 +396,11 @@ pub(crate) struct Entry {
     line: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     name: Option<String>,
+    /// Absent in every baseline written before this field existed, and in every
+    /// entry for a kind that has no module to name. Absent means *unqualified*,
+    /// never *the crate root*: see [`Modules`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    module: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     message: Option<String>,
 }
@@ -247,6 +413,7 @@ impl Entry {
             file: finding.file.clone(),
             line: finding.line,
             name: finding.name.clone(),
+            module: finding.module.clone(),
             message: Some(finding.message.clone()),
         }
     }
@@ -256,6 +423,7 @@ impl Entry {
             kind: self.kind,
             file: self.file.clone(),
             name: self.name.clone(),
+            module: self.module.clone(),
         }
     }
 }
@@ -363,13 +531,13 @@ impl Baseline {
     ///
     /// `path` is only carried into the report; nothing is read or written.
     pub fn apply(&self, findings: Vec<Finding>, path: PathBuf) -> (Vec<Finding>, Report) {
-        let occurring: HashSet<Key> = findings.iter().map(Key::of).collect();
-        let baselined: HashSet<Key> = self.entries.iter().map(Entry::key).collect();
+        let occurring = index(findings.iter().map(Key::of));
+        let baselined = self.index_entries();
 
         let total = findings.len();
         let kept: Vec<Finding> = findings
             .into_iter()
-            .filter(|finding| !baselined.contains(&Key::of(finding)))
+            .filter(|finding| !covered(&baselined, &Key::of(finding)))
             .collect();
         let suppressed = total - kept.len();
 
@@ -384,14 +552,24 @@ impl Baseline {
         )
     }
 
-    /// The keys this baseline records that nothing in `occurring` matches, in
+    fn index_entries(&self) -> HashMap<Shared, Modules> {
+        index(self.entries.iter().map(Entry::key))
+    }
+
+    /// The keys this baseline records that no occurring finding matches, in
     /// file order and without repeats.
-    fn stale(&self, occurring: &HashSet<Key>) -> Vec<Key> {
+    ///
+    /// `occurring` is the finding side indexed by [`index`], so the relation
+    /// asked here is [`Modules::covers`] read the other way round: an entry
+    /// naming `crate::alpha` is fresh when some finding is in `crate::alpha` —
+    /// or when a finding under the same shared key names no module at all,
+    /// which is the same forgiving fallback that suppresses it.
+    fn stale(&self, occurring: &HashMap<Shared, Modules>) -> Vec<Key> {
         let mut seen = HashSet::new();
         self.entries
             .iter()
             .map(|entry| entry.key())
-            .filter(|key| !occurring.contains(key))
+            .filter(|key| !covered(occurring, key))
             .filter(|key| seen.insert(key.clone()))
             .collect()
     }
@@ -404,12 +582,12 @@ impl Baseline {
     /// [`Baseline::save`] emits. Only the entries are preserved, which is the
     /// property that matters — pruning must never quietly accept a new finding
     /// or drop a field off a surviving one.
-    fn without_stale(&self, occurring: &HashSet<Key>) -> Baseline {
+    fn without_stale(&self, occurring: &HashMap<Shared, Modules>) -> Baseline {
         Baseline {
             entries: self
                 .entries
                 .iter()
-                .filter(|entry| occurring.contains(&entry.key()))
+                .filter(|entry| covered(occurring, &entry.key()))
                 .cloned()
                 .collect(),
         }
@@ -450,7 +628,7 @@ pub(crate) fn run(
         Mode::Prune => {
             let path = location.path();
             let baseline = Baseline::load(path)?;
-            let occurring: HashSet<Key> = findings.iter().map(Key::of).collect();
+            let occurring = index(findings.iter().map(Key::of));
             baseline.without_stale(&occurring).save(path)?;
             // `apply`'s stale set is exactly the entries just removed, which is
             // what the report should name under this action.
@@ -531,8 +709,16 @@ mod tests {
             file: PathBuf::from(file),
             line,
             name: name.map(str::to_string),
+            module: None,
             message: "why".to_string(),
         }
+    }
+
+    /// The same finding, recorded as written in `module` — what the three item
+    /// kinds carry and the other four never do.
+    fn in_module(mut finding: Finding, module: &str) -> Finding {
+        finding.module = Some(module.to_string());
+        finding
     }
 
     fn baseline(entries: &[Finding]) -> Baseline {
@@ -551,6 +737,10 @@ mod tests {
     #[test]
     fn entry_matches_a_report_finding_field_for_field() {
         for sample in [
+            in_module(
+                finding(FindingKind::UnusedPubItem, "src/lib.rs", Some(3), Some("a")),
+                "crate::alpha",
+            ),
             finding(FindingKind::UnusedPubItem, "src/lib.rs", Some(3), Some("a")),
             finding(FindingKind::DeadFile, "src/orphan.rs", None, None),
         ] {
@@ -574,6 +764,7 @@ mod tests {
                 kind: FindingKind::DeadFile,
                 file: PathBuf::from("src/a.rs"),
                 name: None,
+                module: None,
             }
         );
     }
@@ -594,6 +785,33 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(top.contains("finding"), "{top}");
+    }
+
+    /// The other direction of the format change, and the reason it is a one-way
+    /// door. `module` was added to a struct that rejects unknown fields, so a
+    /// baseline written by a newer Deadwood makes an *older* one exit 2 on a
+    /// file it used to read — and there is no version of this code that can fix
+    /// that, because the strict reader is the one already released.
+    ///
+    /// Relaxing the strictness here would buy nothing for `module` and cost the
+    /// protection outright: a field that participates in *matching* and is
+    /// silently dropped on a typo turns one entry back into the broad key this
+    /// phase narrowed, which is the exact silence the phase exists to remove.
+    /// So the door stays one-way and is documented as one. This test pins the
+    /// mechanism by standing in for the next field with a name of its own.
+    #[test]
+    fn a_field_a_newer_deadwood_adds_is_rejected_rather_than_ignored() {
+        let err = serde_json::from_str::<File>(
+            r#"{"findings":[{"kind":"dead_file","file":"a.rs","occurrence":2}]}"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("occurrence"), "{err}");
+        assert!(
+            err.contains("module"),
+            "and the fields it does know are listed, which is how a reader \
+             identifies the version mismatch: {err}"
+        );
     }
 
     /// The line is recorded and not compared: code moves, and a baseline that
@@ -654,29 +872,159 @@ mod tests {
         );
     }
 
-    /// Set semantics, pinned: one entry covers every finding sharing its key,
-    /// because we cannot say which of them is the new one.
+    /// The two twins, for the module cases below: one kind, one file, one name,
+    /// two modules.
+    fn twins() -> (Finding, Finding) {
+        let twin = |line, module| {
+            in_module(
+                finding(
+                    FindingKind::UnusedPubItem,
+                    "src/lib.rs",
+                    Some(line),
+                    Some("twin"),
+                ),
+                module,
+            )
+        };
+        (twin(2, "crate::alpha"), twin(9, "crate::beta"))
+    }
+
+    /// An entry from a baseline written before the module was recorded says
+    /// nothing about modules, so it still covers every finding sharing its
+    /// shared key — set semantics, exactly as before. This is the upgrade path:
+    /// the file suppresses what it always suppressed, without an edit.
     #[test]
-    fn one_entry_suppresses_every_finding_that_shares_its_key() {
-        let first = finding(
-            FindingKind::UnusedPubItem,
-            "src/lib.rs",
-            Some(2),
-            Some("twin"),
-        );
-        let second = finding(
-            FindingKind::UnusedPubItem,
-            "src/lib.rs",
-            Some(9),
-            Some("twin"),
-        );
+    fn an_entry_with_no_module_still_covers_every_finding_that_shares_its_key() {
+        let (first, second) = twins();
+        let mut recorded = first.clone();
+        recorded.module = None;
+
+        let (kept, report) = applied(&baseline(&[recorded]), vec![first, second]);
+        assert!(kept.is_empty(), "{kept:?}");
+        assert_eq!(report.suppressed, 2);
+        assert!(report.stale.is_empty(), "{:?}", report.stale);
+    }
+
+    /// The phase itself: with the module recorded, an entry for one twin covers
+    /// that twin and leaves the other one reported at its own line.
+    #[test]
+    fn an_entry_naming_a_module_leaves_its_same_named_neighbour_reported() {
+        let (first, second) = twins();
 
         let (kept, report) = applied(
             &baseline(std::slice::from_ref(&first)),
-            vec![first.clone(), second],
+            vec![first.clone(), second.clone()],
+        );
+        assert_eq!(kept.len(), 1, "only the recorded twin is covered: {kept:?}");
+        assert_eq!(kept[0].line, second.line, "and at the right line");
+        assert_eq!(kept[0].module.as_deref(), Some("crate::beta"));
+        assert_eq!(report.suppressed, 1);
+        assert!(
+            report.stale.is_empty(),
+            "the recorded twin still occurs: {:?}",
+            report.stale
+        );
+    }
+
+    /// Nothing counts. One entry still covers *every* finding matching its key,
+    /// module included, so two items that share a module as well as a name are
+    /// suppressed together — the multiplicity phase 6 rejected stays rejected,
+    /// and the residual case is documented rather than guessed at.
+    #[test]
+    fn one_entry_still_covers_every_finding_sharing_its_module_too() {
+        let (first, _) = twins();
+        let mut sibling = first.clone();
+        sibling.line = Some(40);
+
+        let (kept, report) = applied(
+            &baseline(std::slice::from_ref(&first)),
+            vec![first, sibling],
         );
         assert!(kept.is_empty(), "{kept:?}");
         assert_eq!(report.suppressed, 2);
+    }
+
+    /// A module in the key must not reintroduce what the line was kept out of
+    /// the key to avoid: a module path does not change when code above it does.
+    #[test]
+    fn a_finding_that_moved_within_its_module_is_still_matched() {
+        let (recorded, _) = twins();
+        let mut moved = recorded.clone();
+        moved.line = Some(970);
+
+        let (kept, report) = applied(&baseline(&[recorded]), vec![moved]);
+        assert!(kept.is_empty(), "{kept:?}");
+        assert_eq!(report.suppressed, 1);
+        assert!(report.stale.is_empty(), "{:?}", report.stale);
+    }
+
+    /// The teeth on the comparison: an entry naming a module nothing occurs in
+    /// suppresses nothing and reads as stale, module and all.
+    #[test]
+    fn an_entry_naming_a_module_no_finding_is_in_is_stale() {
+        let (recorded, occurring) = twins();
+
+        let (kept, report) = applied(&baseline(std::slice::from_ref(&recorded)), vec![occurring]);
+        assert_eq!(kept.len(), 1, "nothing was suppressed: {kept:?}");
+        assert_eq!(report.suppressed, 0);
+        assert_eq!(report.stale, vec![Key::of(&recorded)]);
+        assert_eq!(
+            report.stale[0].describe(),
+            "src/lib.rs: unused_pub_item `twin` in `crate::alpha`",
+            "and the report says which module went missing"
+        );
+    }
+
+    /// The fallback runs both ways. A finding with no module — every kind but
+    /// the three that name an item — is covered by an entry that names one,
+    /// because the entry knowing more than the finding is not evidence that they
+    /// are different findings. Un-baselining on that would punish a project for
+    /// a change in what Deadwood records.
+    #[test]
+    fn a_finding_with_no_module_matches_an_entry_that_names_one() {
+        let (recorded, _) = twins();
+        let mut unqualified = recorded.clone();
+        unqualified.module = None;
+
+        let (kept, report) = applied(&baseline(&[recorded]), vec![unqualified]);
+        assert!(kept.is_empty(), "{kept:?}");
+        assert_eq!(report.suppressed, 1);
+        assert!(
+            report.stale.is_empty(),
+            "and the entry is not stale either: {:?}",
+            report.stale
+        );
+    }
+
+    /// Suppressing a finding and keeping an entry fresh have to be one relation.
+    /// Two copies of it, drifting, would give an entry that both silences a
+    /// finding and is reported as no longer occurring.
+    #[test]
+    fn suppression_and_staleness_are_the_same_relation() {
+        let (alpha, beta) = twins();
+        let unqualified = |finding: &Finding| {
+            let mut copy = finding.clone();
+            copy.module = None;
+            copy
+        };
+
+        for recorded in [alpha.clone(), unqualified(&alpha)] {
+            for occurring in [alpha.clone(), beta.clone(), unqualified(&alpha)] {
+                let (kept, report) = applied(
+                    &baseline(std::slice::from_ref(&recorded)),
+                    vec![occurring.clone()],
+                );
+                assert_eq!(
+                    kept.is_empty(),
+                    report.stale.is_empty(),
+                    "entry {:?} against finding {:?}: suppressed={} stale={:?}",
+                    recorded.module,
+                    occurring.module,
+                    report.suppressed,
+                    report.stale,
+                );
+            }
+        }
     }
 
     /// An entry with no matching finding is stale — reported so the file can
@@ -705,8 +1053,7 @@ mod tests {
         let here = finding(FindingKind::DeadFile, "src/orphan.rs", None, None);
         let full = baseline(&[gone, here.clone()]);
 
-        let occurring: HashSet<Key> = [Key::of(&here)].into_iter().collect();
-        let pruned = full.without_stale(&occurring);
+        let pruned = full.without_stale(&index([Key::of(&here)]));
         assert_eq!(pruned.entries.len(), 1);
         assert_eq!(pruned.entries[0].key(), Key::of(&here));
     }

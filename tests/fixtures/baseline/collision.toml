@@ -1,5 +1,9 @@
-# One entry for a key two findings share. It covers both: the key ignores the
-# line, so there is no way to say which occurrence is the new one, and pointing
-# at a line that is very likely baselined would be a wrong finding rather than
-# a missed one.
+# One entry, from before the key carried a module, for a key two findings share.
+# It covers both — an entry that says nothing about modules has not said the
+# modules differ, so matching falls back to the key it was written against.
+#
+# This is the upgrade path in one file: a baseline recorded by an older Deadwood
+# suppresses exactly what it always suppressed, with no edit. `modules.toml`
+# beside it is the same collision recorded the new way, where the twin that was
+# not recorded *is* reported.
 baseline = "collision-baseline.json"

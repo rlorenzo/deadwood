@@ -1530,6 +1530,14 @@ fn a_baseline_suppresses_exactly_the_findings_it_records() {
         "no `baseline` key and no file at the default location is no baseline"
     );
 
+    // `all-baseline.json` was written by `--write-baseline` before the key
+    // carried a module, and is checked in exactly as that run left it: a file
+    // from an older Deadwood, read by this one with no edit. That it still
+    // suppresses all six findings is the upgrade promise, and it is only a test
+    // of that while the file genuinely predates the field.
+    let recorded = std::fs::read_to_string(fixtures().join("baseline/all-baseline.json")).unwrap();
+    assert!(!recorded.contains("module"), "{recorded}");
+
     let analysis = analyze_configured("baseline", "all.toml");
     assert!(analysis.findings.is_empty(), "{:?}", analysis.findings);
     assert!(!analysis.has_denied(), "so the run exits 0");
@@ -1621,14 +1629,20 @@ fn the_two_dependency_kinds_are_never_confused() {
     );
 }
 
-/// Two `pub fn twin` in one file share a kind, a file and a name, and differ
-/// only in the line the key ignores. One entry covers both: we cannot say
-/// which occurrence is new, so reporting one would point at a line that is
-/// very likely baselined — a wrong finding rather than a missed one.
+/// The upgrade path, and the whole compatibility claim of the module field, in
+/// a file checked in before that field existed: `collision-baseline.json` names
+/// no module, so it still covers both twins and reports nothing stale. An entry
+/// that says nothing about modules has not said the modules differ.
 #[test]
-fn one_entry_covers_every_finding_that_shares_its_key() {
-    let analysis = analyze_configured("baseline", "collision.toml");
+fn an_entry_with_no_module_still_covers_every_finding_that_shares_its_key() {
+    let recorded =
+        std::fs::read_to_string(fixtures().join("baseline/collision-baseline.json")).unwrap();
+    assert!(
+        !recorded.contains("module"),
+        "this case is only a test of the fallback while the file predates the field:\n{recorded}"
+    );
 
+    let analysis = analyze_configured("baseline", "collision.toml");
     assert!(
         reported(&analysis, FindingKind::UnusedPubItem)
             .iter()
@@ -1637,6 +1651,51 @@ fn one_entry_covers_every_finding_that_shares_its_key() {
         analysis.findings
     );
     assert_eq!(suppressed(&analysis), 2);
+    assert!(
+        stale_keys(&analysis).is_empty(),
+        "and the entry is not stale either: {:?}",
+        stale_keys(&analysis)
+    );
+}
+
+/// The phase: the same two twins, recorded with the module they are written in.
+/// One entry now covers one twin, and the other twin — a finding that could
+/// never reach the report before — is reported at its own line.
+///
+/// Every line in `modules-baseline.json` is wrong, so this also pins that the
+/// module did not reintroduce the drift the line was kept out of the key to
+/// avoid; and one entry names `crate::gamma`, which nothing occurs in, so an
+/// implementation that recorded the module without comparing it would suppress
+/// both twins and report nothing stale.
+#[test]
+fn an_entry_naming_a_module_leaves_its_same_named_neighbour_reported() {
+    let analysis = analyze_configured("baseline", "modules.toml");
+
+    assert_eq!(
+        reported(&analysis, FindingKind::UnusedPubItem),
+        vec![("src/lib.rs".to_string(), "twin")],
+        "the unrecorded twin is the only finding: {:?}",
+        analysis.findings
+    );
+    assert_eq!(
+        analysis.findings[0].line,
+        Some(15),
+        "and it points at `beta::twin`, not at the baselined line"
+    );
+    assert_eq!(
+        analysis.findings[0].module.as_deref(),
+        Some("crate::beta"),
+        "{:?}",
+        analysis.findings
+    );
+    assert!(analysis.has_denied(), "so it fails the run");
+    assert_eq!(suppressed(&analysis), 5, "everything else stayed quiet");
+
+    assert_eq!(
+        stale_keys(&analysis),
+        vec!["src/lib.rs: unused_pub_item `twin` in `crate::gamma`".to_string()],
+        "and the module nothing occurs in is named in the stale list"
+    );
 }
 
 /// A baseline path that is written down and not there must never read as
@@ -1766,6 +1825,91 @@ fn writing_a_baseline_silences_the_next_run_but_not_the_next_finding() {
     assert!(
         stdout.contains("6 finding(s) suppressed"),
         "and the moved ones are still covered:\n{stdout}"
+    );
+}
+
+/// The round trip through both writing flags, on the field the key gained:
+/// `--write-baseline` records the module of every item finding, deleting one
+/// twin's entry reports that twin and nothing else, and `--prune-baseline`
+/// carries the surviving modules back out to the file unchanged.
+#[test]
+fn both_writing_flags_round_trip_the_module_of_every_entry() {
+    let dir = scratch_fixture("module-round-trip");
+    let baseline = dir.join("deadwood-baseline.json");
+
+    let (code, _) = run_binary(&dir, &["--write-baseline"]);
+    assert_eq!(code, Some(0));
+
+    let modules = |path: &Path| -> Vec<Option<String>> {
+        let file: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        file["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| {
+                entry
+                    .get("module")
+                    .map(|module| module.as_str().unwrap().to_string())
+            })
+            .collect()
+    };
+    assert_eq!(
+        modules(&baseline),
+        vec![
+            // The two dependency findings and the dead file name no module,
+            // and the key has to record that as an absence rather than
+            // inventing one.
+            None,
+            None,
+            Some("crate".to_string()),
+            Some("crate::alpha".to_string()),
+            Some("crate::beta".to_string()),
+            None,
+        ],
+        "the written file records the module of exactly the kinds that have one"
+    );
+
+    // Drop `crate::alpha`'s entry, as a developer accepting one twin and not
+    // the other would. Only that twin comes back, and it comes back at its own
+    // line rather than the one left in the file.
+    let mut file: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&baseline).unwrap()).unwrap();
+    file["findings"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|entry| entry["module"] != "crate::alpha");
+    std::fs::write(&baseline, serde_json::to_string(&file).unwrap()).unwrap();
+
+    let (code, stdout) = run_binary(&dir, &[]);
+    assert_eq!(
+        code,
+        Some(1),
+        "the un-recorded twin fails the run: {stdout}"
+    );
+    assert!(stdout.contains("1 finding(s) in workspace"), "{stdout}");
+    assert!(stdout.contains("src/lib.rs:11:"), "{stdout}");
+    assert!(
+        stdout.contains("5 finding(s) suppressed"),
+        "and `crate::beta`'s twin is still covered:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("Stale baseline entries"),
+        "nothing went stale:\n{stdout}"
+    );
+
+    let (code, stdout) = run_binary(&dir, &["--prune-baseline"]);
+    assert_eq!(code, Some(1), "{stdout}");
+    assert_eq!(
+        modules(&baseline),
+        vec![
+            None,
+            None,
+            Some("crate".to_string()),
+            Some("crate::beta".to_string()),
+            None,
+        ],
+        "pruning re-serializes, and every surviving module survives it"
     );
 }
 

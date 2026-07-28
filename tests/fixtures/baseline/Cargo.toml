@@ -3,8 +3,9 @@
 # The tree produces a small, stable set of findings with no configuration at
 # all, chosen so that every question the baseline has to answer is asked by
 # something here: a finding with a line (which may drift), a finding with none
-# (a manifest entry), two findings sharing a kind, a file *and* a name, and the
-# two dependency kinds that differ by nothing but their kind.
+# (a manifest entry), two findings sharing a kind, a file *and* a name and
+# differing only in the module they are written in, and the two dependency kinds
+# that differ by nothing but their kind.
 #
 # Each `*.toml` beside this file names a `*-baseline.json` and is applied with
 # `--config`, so the baselines can disagree with reality in one controlled way

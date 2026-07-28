@@ -725,36 +725,166 @@ half of the surface root — and all nine were caught by a named test.
 
 Closes [#25](https://github.com/rlorenzo/deadwood/issues/25).
 
+## Phase 12 — a baseline entry a same-named neighbour cannot share (shipped)
+
+The match key was `(kind, file, name)`, so two `pub fn twin` in two inline
+modules of one file were one key: one entry suppressed both, and a third `twin`
+added later was suppressed before it existed. The key now carries the item's
+**module path**, and matching compares it only when both sides name one.
+
+This is the first phase whose risk sits outside the analysis entirely. The
+failure mode of the defect is *silence* — a finding suppressed before it exists
+appears in no output, so counting today's output cannot see the cost — while the
+failure mode of the fix lands on a format change, a migration path, and every
+baseline file already committed to somebody's repository. So the measurement had
+to be of the population at risk rather than of today's findings, and the
+migration is most of what the phase is.
+
+- **What is at risk, measured.** Across the 34 crates in the local registry, the
+  18 fixtures and Deadwood itself there are 213 findings and **exactly one key
+  shared by more than one finding** — the `twin` case in the `baseline` fixture,
+  which exists to demonstrate the collision. On real code the defect occurs zero
+  times, and that number is not the argument. The population at risk is every
+  *reportable* `pub` item sharing a name inside one file, since two of those are
+  a collision the day both become findings: **27 such groups**, 26 of them in
+  registry crates and none in Deadwood itself. Not one of the 26 produces even a
+  single finding today. So the defect is reachable — it is not a theoretical key
+  weakness — and it is nowhere near being reached.
+- **What the module path fixes, and what it cannot.** Of the 27 groups it fully
+  separates **17** and cannot separate **10**, and the 10 are the more
+  interesting half. Six are two `cfg`-alternative definitions of one item —
+  `#[cfg(fast_arithmetic = "32")] pub type Limb = u32;` beside its `"64"` twin
+  in `serde_json`, `anstream`'s `RawStream`, `anstyle-parse`'s
+  `DefaultCharAccumulator`, `clap_builder`'s two `pub use ... as
+  DefaultFormatter` — where Deadwood's matrix is the union of every build, so
+  both halves are analyzed. One entry covering both is *right* there: it is one
+  item and one fix. The other four are a type and a value sharing a name,
+  `pub struct Group` beside `#[allow(non_snake_case)] pub fn Group(..)` in `syn`
+  2 and 3, twice each. Those are two different items in one module, separated
+  only by Rust's namespaces, which nothing in the key models. That residual is
+  filed rather than guessed at
+  ([#30](https://github.com/rlorenzo/deadwood/issues/30)).
+- **Where the module lives, and this was the phase's real decision.** On
+  `Finding`, which means `--json` grows a key. The alternative — the field on the
+  baseline entry alone — breaks the invariant the whole format rests on, that an
+  entry *is* the report's finding object (`entry_matches_a_report_finding_field_for_field`),
+  and it would make the one field that decides matching the one field no `--json`
+  output can produce, so a baseline would stop being something you can write by
+  hand from a report. The cost, stated plainly: a consumer that ignores unknown
+  fields sees **nothing** change — every field it reads is present, unchanged, in
+  the same order, and the finding list, its order, the counts and the exit code
+  are identical — while a consumer that validates against a closed schema, or
+  builds a `Finding` with a struct literal, has to learn the field. Measured over
+  the whole corpus, `--json` gained 127 lines and lost none, every one of them a
+  `module` key: one per item finding, which is exactly the 123 `unused_pub_item`
+  plus 4 `unused_reexport` findings the corpus has.
+- **An absent module is not a module, and the fallback is the migration.** Only
+  three of seven kinds have a module to name — a dead file is not an item, the
+  two dependency kinds name a manifest entry, an unsatisfiable gate names a gate
+  site — and no baseline written before this phase names one for any kind. So
+  `None` means *nothing was said*, never *the crate root*, which is why the root
+  is spelled `crate` and not the empty string, and modules are compared only when
+  both sides name one. An entry with no module covers every finding under its
+  shared key, exactly as before; a finding with no module is covered by an entry
+  that names one. The forgiving direction is not a convenience: the alternative
+  un-baselines every entry of every baseline in every project that upgrades
+  without touching its file, which is a run failing over code nobody changed —
+  the loudest possible noise, and about the tool rather than the user's code.
+  `collision-baseline.json` and `all-baseline.json` are checked in as the
+  previous release wrote them, and the tests reading them assert the files carry
+  no `module` before asserting they suppress what they always did; a round trip
+  through one version proves nothing about the version that wrote the file last
+  week.
+- **The reverse direction is a one-way door, deliberately — for the baselines
+  the field reaches.** `Entry` rejects unknown fields, so a baseline written by
+  this Deadwood makes an *older* one exit 2 on a file it read yesterday —
+  ``unknown field `module`, expected one of `kind`, `severity`, `file`, `line`,
+  `name`, `message` `` — verified against a binary built from `main`. It is not
+  every baseline: `module` is `skip_serializing_if`, and only three kinds have
+  one, so a file recording nothing but dead files, dependency entries or
+  unsatisfiable gates is byte-compatible in both directions. Both halves were
+  measured against that same binary rather than read off the serde attribute —
+  a one-finding `dead_file` baseline round-trips through the old reader and
+  suppresses, and adding a single `unused_pub_item` entry to it is what closes
+  the door. Relaxing the strictness cannot fix that —
+  the strict reader is the one already released — and it would cost the
+  protection outright. "A setting that silently does nothing is worse than no
+  setting" is a rule about config, and the objection to applying it to a *data*
+  file is fair as far as it goes: an ignored decoration still leaves the entry
+  matching, so the failure is noise. But `module` is not a decoration. It is part
+  of the key, so an entry whose `module` a typo turned into an unknown field
+  would fall back to the broad shared key and suppress the neighbour this phase
+  exists to stop suppressing — silence, in the exact place the phase was about.
+  The door stays one-way and is documented as one, in `README.md` and in the
+  module docs.
+- **The multiplicity phase 6 rejected stays rejected.** One entry still covers
+  *every* finding matching its key, module included. Nothing counts occurrences,
+  because with the line still unmatched we still cannot say which occurrence is
+  the new one — the argument has not changed, only the number of findings a key
+  gathers. The two shapes above are what that costs, and both are cases where the
+  findings share a module as well as a name.
+- **Conservatism, unchanged in both directions.** The module path does not move
+  when code above it does, which is the test the line failed and the reason this
+  field is admissible at all: every line in `modules-baseline.json` is
+  deliberately wrong and every entry still matches. And nothing is un-baselined
+  on a project that upgrades without touching its file.
+- **What it found.** Default output is byte-identical across all 53 targets — the
+  18 fixtures, the 34 registry crates and Deadwood itself — text report, stderr
+  and exit codes alike, verified against a binary built from `main` in a detached
+  worktree. `--json` differs only by the added key described above. The one
+  behaviour that moved is the one the phase is for, and it is in the fixture
+  written to produce it: `crate::beta`'s `twin` is now reported when only
+  `crate::alpha`'s is recorded.
+
+Recall was checked the other way, by mutation: fourteen inversions — each of the
+three branches of the match relation, the module dropped from the entry, from the
+entry's key and from the finding's key, the module left off the stale
+description, `stale` and `without_stale` each reverted to exact equality, the
+serialization of an absent module, the unknown-field strictness, the crate root
+spelled as an empty path, the module path truncated so inline `mod`s stop
+separating, and an unqualified entry made a different shared key from a qualified
+one — and all fourteen were caught by a named test.
+
+Closes [#16](https://github.com/rlorenzo/deadwood/issues/16), and files the
+residual it leaves: [#30](https://github.com/rlorenzo/deadwood/issues/30), two
+definitions that share a file, a name *and* a module.
+
 ## Next (sequenced, one slice at a time)
 
-1. **Give a baseline entry an identity a same-named neighbour cannot share**
-   ([#16](https://github.com/rlorenzo/deadwood/issues/16)) — one entry
-   suppresses every finding with its key, so a second `twin` in the same file
-   is accepted before it exists. The item's module path is the candidate, and
-   it is a format change: older baselines carry no such field and must keep
-   matching.
-2. **Survive a moved file**
+1. **Survive a moved file**
    ([#17](https://github.com/rlorenzo/deadwood/issues/17)) — the path is in
    the key, so `git mv` un-baselines everything in the file. Rename detection
    needs a similarity signal we do not compute, and the honest answer may be
    to document the `--prune-baseline` + `--write-baseline` workaround instead
-   of guessing; weigh that before building anything.
-3. **Make an inline `#[cfg(test)] mod` test code for the entry-point split**
+   of guessing; weigh that before building anything. Phase 12 changed what this
+   has to work with rather than what it costs: the module path is a second
+   location signal, exactly invariant across the `foo.rs` → `foo/mod.rs`
+   conversion (measured) and moving in lockstep with the path for every other
+   shape of move, and it needs no format change of its own. The issue carries
+   both halves of that.
+2. **Make an inline `#[cfg(test)] mod` test code for the entry-point split**
    ([#27](https://github.com/rlorenzo/deadwood/issues/27)) — the out-of-line
    spelling is handled and the inline one is not, so the two disagree about an
    entry point that is neither `#[test]` nor `#[bench]`. Below the baseline
-   entries because it was measured before it was filed: simulating the fix
+   entry because it was measured before it was filed: simulating the fix
    changed no finding anywhere. It wants `cfg::Gates` reachable from
    `src/resolve.rs`, which phase 4 deliberately kept out of it.
-4. **Follow a named `pub use` of a module onto the public surface**
+3. **Follow a named `pub use` of a module onto the public surface**
    ([#28](https://github.com/rlorenzo/deadwood/issues/28)) — phase 11 follows
    a `pub use inner::*;` glob and the `pub` modules under it, and `pub use
    inner::sub;` reaches the same place by a third route the closure does not
    take, so an item under it whose only referrer is dead is reported though a
-   consumer can name it. Same shape and same risk as phase 11, and last of the
-   filed entries for the same reason as the one above it: simulating the fix
-   changed no finding on any fixture, on the registry crates, or on Deadwood
-   itself.
+   consumer can name it. Same shape and same risk as phase 11, and low for the
+   same reason as the one above it: simulating the fix changed no finding on any
+   fixture, on the registry crates, or on Deadwood itself.
+4. **Separate two definitions that share a file, a name and a module**
+   ([#30](https://github.com/rlorenzo/deadwood/issues/30)) — phase 12's
+   residual, and last of the filed entries because it is the smallest and the
+   least reachable. `pub struct Group` beside `#[allow(non_snake_case)] pub fn
+   Group(..)` differ by Rust's namespaces, which the key does not model; two
+   `cfg`-alternative definitions of one item differ by nothing at all, and
+   suppressing those together is correct. Ten groups in the corpus are at risk
+   this way and none of them produces a finding today.
 5. **Report a `[dev-dependencies]` entry the library itself names.** The
    check has never made that claim, because the likeliest explanation used to
    be a mis-attribution of ours rather than a manifest that cannot compile.
