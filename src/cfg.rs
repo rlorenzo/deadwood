@@ -60,6 +60,18 @@
 //! `miri`, a bare `cfg` a build script sets — is [`Truth::Either`]. The matrix
 //! has no axis for them, so no configuration is ruled out by one, and the
 //! answer is honest rather than guessed.
+//!
+//! # One question here is not about `cfg` at all
+//!
+//! [`Gates::test_only`] asks whether an item is confined to a test build, and
+//! `#[cfg(test)]` is not the only way to write that: `#[test]` confines the
+//! function it sits on just as completely, and it is not a `cfg`, carries no
+//! predicate, and is judged against no matrix. It is answered here anyway,
+//! because it is the same question with the same callers — and deliberately
+//! *not* answered in [`eval`] or [`prune`], which read configuration
+//! predicates. See [`Gates::test_only`] and [`Site`] for the boundary, which is
+//! narrower than the one [`crate::resolve`] draws around the same two
+//! attributes for a different question.
 
 use std::collections::{HashMap, HashSet};
 
@@ -153,6 +165,70 @@ impl Matrix {
     }
 }
 
+/// What kind of item an attribute set sits on, for the one question where that
+/// matters: rustc honours `#[test]` on a free function and nowhere else.
+///
+/// Verified against rustc rather than assumed. `#[test] mod tests { .. }` and
+/// `#[test]` on an associated function are `error: the #[test] attribute may
+/// only be used on a free function`; on a macro invocation
+/// (`#[test] include!("gen.rs")`) it is the same message as a *warning* and the
+/// item is compiled into the library regardless. So a test attribute written
+/// anywhere but a `fn` confines nothing, and a caller asking about anything
+/// else says so.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Site {
+    /// A `fn` item: at module scope, or inside another function's body, where
+    /// rustc still strips it from every non-test build (it only declines to
+    /// register it with the harness — `warning: cannot test inner items`).
+    FreeFn,
+    /// Anything else — a `mod`, an associated or trait function, an `extern`
+    /// block member, a macro invocation, a file's own inner attributes — where
+    /// only a `cfg` gate can confine the item.
+    Other,
+}
+
+/// The built-in attributes that confine a function to a test build on their
+/// own, with no `cfg` and no predicate.
+///
+/// `#[bench]` is here with `#[test]` for the reason
+/// [`crate::resolve`]'s root set pairs them: `cargo bench` is no more a
+/// consumer of the crate than `cargo test` is, and rustc strips a `#[bench] fn`
+/// from a non-test build identically (it is unstable, so such a crate is
+/// nightly-only, which changes nothing about where the function is compiled).
+const TEST_BUILD_ATTRS: &[&str] = &["test", "bench"];
+
+/// Whether `attrs` hold a built-in test attribute.
+///
+/// The match is exact where [`crate::resolve`]'s deliberately is not, and the
+/// asymmetry is the point: there, treating `#[tokio::test]` as a test entry
+/// point can only keep an item alive, so the *last* path segment decides. Here
+/// the answer moves a mention out of the library and into the tests, which is
+/// what makes a `[dependencies]` entry reportable — so only the attribute rustc
+/// itself expands counts: a bare, single-segment `test` or `bench` with no
+/// arguments.
+///
+/// A test attribute reached through `cfg_attr` is not matched either, for the
+/// reason [`eval_attrs`] does not follow that indirection at all: the attribute
+/// it would expand to is not written in the syntax. Like every other refusal
+/// here, that leaves the function's mentions attributed to the code they are
+/// written in.
+///
+/// Everything else is a guess about a macro Deadwood cannot expand, and the
+/// guess would be wrong in both directions: `#[tokio::test]` does confine (it
+/// expands to the built-in attribute), while an attribute macro merely *named*
+/// `test` need not. `#[core::prelude::v1::test]` — which is what
+/// `#[tokio::test]` expands to, and which rustc does honour — is not matched
+/// either, because nothing distinguishes it from the proc-macro case before
+/// expansion. That costs a finding and cannot invent one.
+fn test_attribute(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|attr| {
+        matches!(attr.meta, syn::Meta::Path(_))
+            && TEST_BUILD_ATTRS
+                .iter()
+                .any(|name| attr.path().is_ident(name))
+    })
+}
+
 /// A [`Matrix`] resolved against one package's manifest.
 ///
 /// Features are per package, so the same `#[cfg(feature = "std")]` is a
@@ -240,20 +316,36 @@ impl<'a> Gates<'a> {
     /// Whether `attrs` confine the item to a test build: it is compiled by
     /// some build of the package, and by none that is not a test build.
     ///
-    /// This is `#[cfg(test)]` and everything that implies it
-    /// (`#[cfg(all(test, unix))]`), judged against the maximal matrix rather
-    /// than the configured one — the question is a property of the code, not
-    /// of what the user asked to analyze. An item behind a gate that can hold
-    /// in *no* build answers `false`: it is dead by construction
-    /// ([`Gates::gate_sites`] reports it), not test-only.
+    /// Two spellings confine an item, and only one of them is a gate:
+    ///
+    /// - `#[cfg(test)]` and everything that implies it
+    ///   (`#[cfg(all(test, unix))]`), judged against the maximal matrix rather
+    ///   than the configured one — the question is a property of the code, not
+    ///   of what the user asked to analyze.
+    /// - `#[test]` and `#[bench]`, which carry no predicate at all: rustc moves
+    ///   the function they sit on into the test harness binary and leaves it
+    ///   out of every other build. That is *unconditional* confinement, so it
+    ///   contributes to the "no non-test build compiles this" half of the
+    ///   answer exactly as `cfg(test)` does — and `site` is what says whether
+    ///   rustc honours it here at all ([`Site`]).
+    ///
+    /// An item behind a gate that can hold in *no* build answers `false`
+    /// whichever way it is written: it is dead by construction
+    /// ([`Gates::gate_sites`] reports it), not test-only. `#[test]
+    /// #[cfg(feature = "nope")] fn` is compiled by nothing, and calling it
+    /// test-only would attribute its mentions to a test build that does not
+    /// exist either.
     ///
     /// [`crate::deps`] uses this to tell a dev-dependency used by the unit
-    /// tests inside a library from one the library itself depends on.
-    pub fn test_only(&self, attrs: &[syn::Attribute]) -> bool {
+    /// tests inside a library from one the library itself depends on;
+    /// [`crate::modtree`] uses it on `mod` declarations and `include!` sites,
+    /// which are [`Site::Other`] and so unaffected by the test attributes.
+    pub fn test_only(&self, attrs: &[syn::Attribute], site: Site) -> bool {
         let mut non_test = self.maximal();
         non_test.test = false;
-        eval_attrs(attrs, &non_test) == Truth::Never
-            && eval_attrs(attrs, &self.maximal()) != Truth::Never
+        let confined = eval_attrs(attrs, &non_test) == Truth::Never
+            || (site == Site::FreeFn && test_attribute(attrs));
+        confined && eval_attrs(attrs, &self.maximal()) != Truth::Never
     }
 
     /// The features named by `gate` that the manifest does not declare, when
@@ -1016,6 +1108,129 @@ mod tests {
             ),
             Truth::Either
         );
+    }
+
+    /// Whether the first item of `source` is confined to a test build, asked
+    /// the way its own kind requires: a `fn` is the one [`Site::FreeFn`].
+    fn confined(gates: &Gates<'_>, source: &str) -> bool {
+        let file: syn::File = syn::parse_str(source).expect("fixture must parse");
+        let item = &file.items[0];
+        let site = match item {
+            syn::Item::Fn(_) => Site::FreeFn,
+            _ => Site::Other,
+        };
+        gates.test_only(attrs_of(item), site)
+    }
+
+    /// The claim this answer exists for, and the one `#[cfg(test)]` never
+    /// covered: `#[test]` confines a function to a test build on its own.
+    /// Verified against rustc — a bare `#[test] fn` naming a crate that does
+    /// not exist compiles as a library and fails under `--test`.
+    #[test]
+    fn a_test_attribute_confines_a_function_to_a_test_build() {
+        let matrix = Matrix::default();
+        let manifest = package(&[("std", &[])], &[]);
+        let gates = Gates::new(&matrix, &manifest);
+
+        for source in [
+            "#[test]\nfn t() {}\n",
+            "#[bench]\nfn b() {}\n",
+            // Beside gates that hold in a non-test build, which is winnow's
+            // shape: the test attribute is what confines it, and the gates
+            // only say which builds compile the tests.
+            "#[test]\n#[cfg(feature = \"std\")]\n#[cfg(unix)]\nfn t() {}\n",
+            // With `#[should_panic]`, which is not itself a confinement but
+            // accompanies one.
+            "#[test]\n#[should_panic]\nfn t() {}\n",
+            // Already-confined code says the same thing twice.
+            "#[test]\n#[cfg(test)]\nfn t() {}\n",
+        ] {
+            assert!(confined(&gates, source), "`{source}` is test-only");
+        }
+    }
+
+    /// The boundary. Everything here confines nothing, and a mention inside it
+    /// stays attributed to the code it is written in — which for
+    /// [`crate::deps`] is the difference between a `[dependencies]` entry
+    /// reported as misplaced and one left alone.
+    #[test]
+    fn nothing_but_a_bare_test_or_bench_attribute_confines_an_item() {
+        let matrix = Matrix::default();
+        let manifest = package(&[("std", &[])], &[]);
+        let gates = Gates::new(&matrix, &manifest);
+
+        for source in [
+            // `#[should_panic]` alone leaves the function in the library
+            // build: rustc resolves its body under `--crate-type=lib`.
+            "#[should_panic]\nfn p() {}\n",
+            // A proc-macro test attribute is a macro Deadwood cannot expand.
+            "#[tokio::test]\nasync fn t() {}\n",
+            "#[rstest]\nfn t() {}\n",
+            // The built-in attribute's own path spelling, which rustc *does*
+            // honour, and which is indistinguishable from the line above
+            // before expansion. A missed finding, deliberately.
+            "#[core::prelude::v1::test]\nfn t() {}\n",
+            // Not the attribute at all, however much it looks like it.
+            "#[test_case(1)]\nfn t() {}\n",
+            // The attribute with arguments is not the built-in one either.
+            "#[test(flavor = \"multi_thread\")]\nfn t() {}\n",
+            // `cfg_attr` is an indirection this module does not follow, here
+            // as everywhere else in it.
+            "#[cfg_attr(unix, test)]\nfn t() {}\n",
+            // rustc rejects `#[test]` on anything but a `fn`, so these are
+            // `Site::Other` and only their gates count.
+            "#[test]\nmod tests {}\n",
+            "#[test]\ninclude!(\"generated.rs\");\n",
+            "#[test]\nstruct S;\n",
+            "#[test]\nimpl S {}\n",
+        ] {
+            assert!(!confined(&gates, source), "`{source}` confines nothing");
+        }
+    }
+
+    /// An item compiled by no build at all is dead by construction, not test
+    /// code — which `#[cfg(test)]` has always answered this way and a test
+    /// attribute must not be able to override. Attributing its mentions to the
+    /// tests would place them in a build that does not exist either.
+    #[test]
+    fn a_test_function_behind_an_impossible_gate_is_not_test_only() {
+        let matrix = Matrix::default();
+        let manifest = package(&[("std", &[])], &[]);
+        let gates = Gates::new(&matrix, &manifest);
+
+        assert!(!confined(
+            &gates,
+            "#[test]\n#[cfg(feature = \"nope\")]\nfn t() {}\n"
+        ));
+        assert!(!confined(
+            &gates,
+            "#[cfg(all(test, feature = \"nope\"))]\nfn t() {}\n"
+        ));
+    }
+
+    /// A test attribute is not a configuration predicate, so it is not a gate
+    /// site, it makes nothing unsatisfiable, and — the load-bearing half —
+    /// [`prune`] never removes the function. Deleting it would take its
+    /// references out of every detector's view, which is a different phase's
+    /// claim and not this one's.
+    #[test]
+    fn a_test_attribute_is_not_a_cfg_gate() {
+        let matrix = Matrix::new(None, None, Some(false));
+        let manifest = package(&[("std", &[])], &[]);
+        let gates = Gates::new(&matrix, &manifest);
+
+        let source = "#[test]\nfn t() {}\n#[bench]\nfn b() {}\n#[cfg(test)]\nfn gated() {}\n";
+        let mut file: syn::File = syn::parse_str(source).unwrap();
+        assert!(
+            gates.gate_sites(&file).len() == 1,
+            "only `cfg(test)` is one"
+        );
+        assert!(gates.compiled(attrs_of(&file.items[0])));
+        assert!(gates.compiled(attrs_of(&file.items[1])));
+
+        prune(&gates, &mut file);
+        let kept: Vec<String> = file.items.iter().filter_map(item_name).collect();
+        assert_eq!(kept, vec!["t".to_string(), "b".to_string()]);
     }
 
     /// An optional dependency gets an implicit feature of the same name, so

@@ -217,7 +217,7 @@ use std::path::{Path, PathBuf};
 use proc_macro2::{TokenStream, TokenTree};
 use syn::visit::Visit;
 
-use crate::cfg::{Gates, TargetVerdict};
+use crate::cfg::{Gates, Site, TargetVerdict};
 use crate::config::DependencyAllowList;
 use crate::metadata::{DependencyKind, Package, Target};
 use crate::modtree::ParsedFile;
@@ -390,9 +390,10 @@ impl CrateReferences {
         depth: usize,
     ) {
         // An inner `#![cfg(test)]` makes the whole file unit-test code, wherever
-        // its target would otherwise put it.
+        // its target would otherwise put it. A file is `Site::Other`: `#![test]`
+        // is not a thing rustc honours.
         let mut origin = origin;
-        origin.context = test_shifted(origin, &ast.attrs);
+        origin.context = test_shifted(origin, &ast.attrs, Site::Other);
 
         let mut collector = Collector {
             names: &mut self.names,
@@ -456,8 +457,14 @@ impl CrateReferences {
 /// mention must not become attributable, and a build script's `#[cfg(test)]`
 /// module is not compiled by `cargo test` at all — it is still build-script
 /// code, and treating it as dev code would be inventing a claim.
-fn test_shifted(origin: Origin<'_>, attrs: &[syn::Attribute]) -> Contexts {
-    let test_only = origin.gates.is_some_and(|gates| gates.test_only(attrs));
+///
+/// `site` is what the item is, which decides whether a `#[test]` written on it
+/// confines it at all ([`Site`]); every caller here states its own answer,
+/// because the ones that are not a `fn` are not a judgement call.
+fn test_shifted(origin: Origin<'_>, attrs: &[syn::Attribute], site: Site) -> Contexts {
+    let test_only = origin
+        .gates
+        .is_some_and(|gates| gates.test_only(attrs, site));
     if origin.context == Contexts::RUNTIME && test_only {
         Contexts::DEV
     } else {
@@ -847,9 +854,12 @@ impl Collector<'_, '_> {
     }
 
     /// Walk `body` with the context `attrs` puts it in, then restore.
-    fn within(&mut self, attrs: &[syn::Attribute], body: impl FnOnce(&mut Self)) {
+    ///
+    /// `site` says whether a `#[test]` among `attrs` confines the item, which
+    /// only a `fn` can be ([`Site`]).
+    fn within(&mut self, attrs: &[syn::Attribute], site: Site, body: impl FnOnce(&mut Self)) {
         let outer = self.origin.context;
-        self.origin.context = test_shifted(self.origin, attrs);
+        self.origin.context = test_shifted(self.origin, attrs, site);
         body(self);
         self.origin.context = outer;
     }
@@ -895,25 +905,35 @@ impl<'ast> Visit<'ast> for Collector<'_, '_> {
     // `extern` blocks. Items inside function bodies arrive through
     // `visit_item` as well, since `syn` walks a `Stmt::Item` into it.
     fn visit_item(&mut self, node: &'ast syn::Item) {
-        self.within(crate::cfg::attrs_of(node), |this| {
+        // A `fn` is the one item a `#[test]` on it confines — including one
+        // written inside another function's body, which arrives here too.
+        let site = match node {
+            syn::Item::Fn(_) => Site::FreeFn,
+            _ => Site::Other,
+        };
+        self.within(crate::cfg::attrs_of(node), site, |this| {
             syn::visit::visit_item(this, node);
         });
     }
 
+    // An associated function carrying `#[test]` is `error: the #[test]
+    // attribute may only be used on a free function`, so these three are
+    // `Site::Other`: only a `cfg` gate confines a member of an `impl`, a
+    // `trait` or an `extern` block.
     fn visit_impl_item(&mut self, node: &'ast syn::ImplItem) {
-        self.within(crate::cfg::impl_item_attrs(node), |this| {
+        self.within(crate::cfg::impl_item_attrs(node), Site::Other, |this| {
             syn::visit::visit_impl_item(this, node);
         });
     }
 
     fn visit_trait_item(&mut self, node: &'ast syn::TraitItem) {
-        self.within(crate::cfg::trait_item_attrs(node), |this| {
+        self.within(crate::cfg::trait_item_attrs(node), Site::Other, |this| {
             syn::visit::visit_trait_item(this, node);
         });
     }
 
     fn visit_foreign_item(&mut self, node: &'ast syn::ForeignItem) {
-        self.within(crate::cfg::foreign_item_attrs(node), |this| {
+        self.within(crate::cfg::foreign_item_attrs(node), Site::Other, |this| {
             syn::visit::visit_foreign_item(this, node);
         });
     }
@@ -1612,6 +1632,138 @@ mod tests {
         // code, so a normal entry named there stays where it is.
         let refs = references(&["#[cfg(not(test))]\nfn helper() { runtime_only::go(); }\n"]);
         let manifest = package(vec![dependency("runtime_only")]);
+        assert!(misplaced(&manifest, &refs).0.is_empty());
+    }
+
+    /// The finding the gate `#[test]` closed used to cost. A bare `#[test] fn`
+    /// at module scope is compiled by no build a consumer gets, so a normal
+    /// entry named only from one is a `[dev-dependencies]` entry with the
+    /// wrong table written above it — and every mention of it looked like
+    /// library code until `#[test]` counted as a confinement.
+    #[test]
+    fn a_normal_entry_named_only_from_a_test_function_belongs_in_dev_dependencies() {
+        for attribute in ["#[test]", "#[bench]"] {
+            let refs = references(&[format!(
+                "pub fn go() {{}}\n{attribute}\nfn t() {{ test_helper::assert_ok(); }}\n"
+            )
+            .as_str()]);
+            let manifest = package(vec![dependency("test_helper")]);
+            assert_eq!(
+                misplaced(&manifest, &refs).0,
+                vec![("test_helper".to_string(), DependencyKind::Development)],
+                "`{attribute}` confines the only mention to a test build"
+            );
+        }
+    }
+
+    /// The mirror, and the reason the gate had to land before any claim about
+    /// a `[dev-dependencies]` entry the library names: this manifest is
+    /// correct, and the mention that made it look broken is test code.
+    /// `clap_builder`'s `static_assertions` and `winnow`'s `term-transcript`
+    /// are this case in the corpus.
+    #[test]
+    fn a_dev_dependency_named_only_from_a_test_function_is_correctly_placed() {
+        let refs = references(&[concat!(
+            "pub fn go() {}\n",
+            "#[test]\nfn check_auto_traits() { dev_only::assert_impl_all!(); }\n",
+        )]);
+        assert_eq!(
+            refs.names.get("dev_only").copied(),
+            Some(Contexts::DEV),
+            "the mention is dev code and nothing else"
+        );
+        let manifest = package(vec![dev_dependency("dev_only")]);
+        assert!(misplaced(&manifest, &refs).0.is_empty());
+    }
+
+    /// The `#[cfg(test)] mod tests` case is untouched, and a `#[test] fn`
+    /// inside one adds nothing: the module already moved its subtree, so the
+    /// answer is the same set and not a second copy of it.
+    #[test]
+    fn a_test_function_inside_a_cfg_test_module_is_not_counted_twice() {
+        let refs = references(&[concat!(
+            "pub fn go() {}\n",
+            "#[cfg(test)]\nmod tests {\n",
+            " #[test] fn t() { dev_only::assert_ok(); }\n}\n",
+        )]);
+        assert_eq!(refs.names.get("dev_only").copied(), Some(Contexts::DEV));
+        let manifest = package(vec![dev_dependency("dev_only")]);
+        assert!(misplaced(&manifest, &refs).0.is_empty());
+    }
+
+    /// The boundary, from the direction that matters: an attribute Deadwood
+    /// cannot expand confines nothing it can prove, so the mention stays
+    /// library code and the entry stays where the author put it. A
+    /// `[dependencies]` entry reported here would be a finding invented
+    /// against a manifest that compiles.
+    #[test]
+    fn an_attribute_that_is_not_the_built_in_test_one_leaves_a_mention_in_the_library() {
+        for attribute in [
+            "#[should_panic]",
+            "#[tokio::test]",
+            "#[core::prelude::v1::test]",
+            "#[test_case(1)]",
+        ] {
+            let refs = references(&[format!(
+                "pub fn go() {{}}\n{attribute}\nfn t() {{ maybe_runtime::go(); }}\n"
+            )
+            .as_str()]);
+            assert!(
+                refs.names
+                    .get("maybe_runtime")
+                    .copied()
+                    .is_some_and(|found| found.contains(Contexts::RUNTIME)),
+                "`{attribute}` leaves the mention attributed to the library"
+            );
+            let manifest = package(vec![dependency("maybe_runtime")]);
+            assert!(
+                misplaced(&manifest, &refs).0.is_empty(),
+                "`{attribute}` must not move a normal entry"
+            );
+        }
+    }
+
+    /// A build script is not dev code, and a test attribute inside one does
+    /// not make it any. `cargo test` compiles no test harness for a build
+    /// script, so a `#[test] fn` written there is compiled by nothing — and
+    /// calling what it names a dev-dependency would move an entry out of the
+    /// only table anything reads it from. This is the same answer phase 5 gave
+    /// a build script's `#[cfg(test)]` module, now reachable through a second
+    /// spelling.
+    #[test]
+    fn a_test_function_in_the_build_script_stays_build_script_code() {
+        let refs = references_from(&[(
+            "custom-build",
+            "fn main() {}\n#[test]\nfn probes() { build_only::assert_ok(); }\n",
+        )]);
+        assert_eq!(
+            refs.names.get("build_only").copied(),
+            Some(Contexts::BUILD_SCRIPT)
+        );
+        let manifest = package(vec![build_dependency("build_only")]);
+        assert!(
+            misplaced(&manifest, &refs).0.is_empty(),
+            "the build script is the only thing that names it: {:?}",
+            misplaced(&manifest, &refs).0
+        );
+    }
+
+    /// The other half of the boundary, which is about the item rather than the
+    /// attribute: `#[test]` on an associated function is `error: the #[test]
+    /// attribute may only be used on a free function`, so the members of an
+    /// `impl` block are [`Site::Other`] and a test attribute among their
+    /// attributes says nothing about where they are compiled.
+    #[test]
+    fn a_test_attribute_on_an_associated_function_moves_no_mention() {
+        let refs = references(&[concat!(
+            "pub struct Held;\n",
+            "impl Held {\n #[test]\n fn probe() { maybe_runtime::go(); }\n}\n",
+        )]);
+        assert_eq!(
+            refs.names.get("maybe_runtime").copied(),
+            Some(Contexts::RUNTIME)
+        );
+        let manifest = package(vec![dependency("maybe_runtime")]);
         assert!(misplaced(&manifest, &refs).0.is_empty());
     }
 

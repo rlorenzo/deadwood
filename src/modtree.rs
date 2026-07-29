@@ -85,7 +85,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::cfg::Gates;
+use crate::cfg::{Gates, Site};
 use crate::config::Ignore;
 
 /// What module resolution found from one crate root.
@@ -496,8 +496,10 @@ fn collect_mod_decls(
         let name = m.ident.to_string();
         // Test-confinement accumulates downward and never lifts: a module
         // inside `#[cfg(test)] mod tests` is test code whatever its own gate
-        // says, so the declaration only ever adds to what it inherited.
-        let test_only = under.test_only || declaring.gates.test_only(&m.attrs);
+        // says, so the declaration only ever adds to what it inherited. A
+        // `mod` is `Site::Other`: rustc rejects `#[test]` on one outright, so
+        // only its `cfg` gates can confine what it declares.
+        let test_only = under.test_only || declaring.gates.test_only(&m.attrs, Site::Other);
         // A `mod` the configured matrix rules out is not part of this build:
         // neither it nor the files under it are read, and neither is dead.
         if !declaring.gates.compiled(&m.attrs) {
@@ -630,7 +632,10 @@ fn queue_include(
         path: declaring.dir.join(literal),
         is_mod_root: true,
         module: under.module.to_vec(),
-        test_only: under.test_only || declaring.gates.test_only(&mac.attrs),
+        // A macro invocation is `Site::Other`: rustc warns about `#[test]`
+        // written on one and compiles the spliced code anyway, so a test
+        // attribute here confines nothing.
+        test_only: under.test_only || declaring.gates.test_only(&mac.attrs, Site::Other),
         include_depth: declaring.include_depth + 1,
     });
 }
@@ -893,6 +898,59 @@ mod tests {
             .find(|file| file.module == ["inline", "outline"])
             .expect("the fixture declares `#[cfg(test)] mod outline;`");
         assert!(outline.test_only, "the two spellings have to agree");
+    }
+
+    /// The two questions this module asks [`Gates::test_only`] are both
+    /// [`Site::Other`], and that is not a formality: a test attribute written
+    /// on a `mod` declaration or on a macro invocation confines nothing.
+    /// Verified against rustc — `#[test] mod tests { .. }` is `error: the
+    /// #[test] attribute may only be used on a free function`, and on an
+    /// `include!` it is the same message as a *warning* with the spliced code
+    /// compiled into the library anyway. Neither shape belongs in a committed
+    /// fixture for that reason, so the tree is written here.
+    #[test]
+    fn a_test_attribute_on_a_mod_declaration_or_an_include_confines_nothing() {
+        let dir = std::env::temp_dir().join(format!(
+            "deadwood-modtree-test-attr-{}/src",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("lib.rs"),
+            "#[test]\nmod child;\n#[test]\ninclude!(\"spliced.rs\");\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("child.rs"), "pub fn thing() {}\n").unwrap();
+        std::fs::write(dir.join("spliced.rs"), "pub fn other() {}\n").unwrap();
+
+        let config = crate::config::Config::default();
+        let package = crate::cfg::tests_support::bare_package();
+        let gates = crate::cfg::Gates::new(config.cfg(), &package);
+        let mut warnings = Vec::new();
+        let resolved = resolve(&dir.join("lib.rs"), config.ignore(), &gates, &mut warnings);
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+
+        let mut reached: Vec<(String, bool)> = resolved
+            .files
+            .iter()
+            .chain(&resolved.spliced)
+            .map(|file| {
+                let name = file.path.file_name().unwrap().to_string_lossy().to_string();
+                (name, file.test_only)
+            })
+            .collect();
+        reached.sort();
+        assert_eq!(
+            reached,
+            vec![
+                ("child.rs".to_string(), false),
+                ("lib.rs".to_string(), false),
+                // The spliced file, whose `test_only` phase 18 pinned and
+                // nothing reads — for the same reason it pinned it.
+                ("spliced.rs".to_string(), false),
+            ],
+            "only a `cfg` gate can confine a file"
+        );
     }
 
     /// One file can declare `mod imp` twice under disjoint `cfg`s, and the
