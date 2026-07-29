@@ -273,8 +273,13 @@ above it does.
 and the `#[allow(non_snake_case)] pub fn Group(..)` beside it share a kind, a
 file, a name *and* a module; Rust tells them apart by namespace, and so does the
 key. The namespace is `type`, `value`, or `both` — a unit or tuple struct binds
-a constructor value of its own name, and so does a `use` alias — and two entries
-match when the namespaces they stand for overlap, so `both` covers either half.
+a constructor value of its own name, and a `use` alias binds whatever the path
+it names binds, resolved through the symbol table like any other path — and two
+entries match when the namespaces they stand for overlap, so `both` covers
+either half. An alias whose target cannot be resolved keeps `both`: a re-export
+leading outside the workspace, or through a glob that does, says nothing about
+namespaces rather than guessing at one.
+
 That leaves two definitions sharing a key in exactly one case, and it is the
 case where one entry is right: Rust will not compile two definitions of one name
 in one module unless they are in different namespaces and neither is in both, so
@@ -758,6 +763,16 @@ toolchain is pinned to `stable` with `clippy` and `rustfmt` via
   namespaces separate them. Since the key deliberately ignores the line, there is
   no way to say which occurrence is the new one, and pointing at a baselined line
   would be a wrong finding rather than a missed one.
+- One exception to "and nothing else", and it costs a finding rather than
+  inventing one: a `pub use` whose target Deadwood cannot resolve records `both`,
+  which overlaps everything. The kind is in the key too, so an unused re-export
+  and an unused item of one name are already two entries whatever the namespace
+  says; where this bites is `test_only_item`, the one kind reported about both,
+  and a second `pub use` of that name in that module. It takes a target outside
+  the workspace, one behind a glob that leads outside it, or a chain of more
+  than eight aliases to get there — and then a third item of that name added to
+  the module later before anything is actually missed. Resolvable targets, which
+  is nearly all of them, record what they bind.
 - Moving a file un-baselines the findings in it for the four kinds that name no
   module: a `dead_file`, an `unsatisfiable_cfg` gate site, and a `Cargo.toml`
   entry of either dependency kind whose whole package moved. The item kinds
