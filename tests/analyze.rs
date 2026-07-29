@@ -3342,3 +3342,171 @@ fn both_writing_flags_round_trip_the_namespace_of_every_entry() {
         "pruning re-serializes, and every surviving namespace survives it"
     );
 }
+
+/// The shape `windows-sys` has, and the whole of what
+/// [#39](https://github.com/rlorenzo/deadwood/issues/39) is: a crate root that
+/// reaches its module tree through `include!("...")`. Every file under it is
+/// compiled by the build that actually happens, so none of them is dead — and
+/// that includes the ones the included file declares with `mod`, which is 245
+/// of the corpus's 246 and the half a fix that only marks the named file
+/// misses.
+#[test]
+fn a_module_tree_reached_only_through_an_include_is_not_dead() {
+    let analysis = analyze_fixture("included");
+
+    let dead: Vec<String> = reported(&analysis, FindingKind::DeadFile)
+        .into_iter()
+        .map(|(file, _)| file)
+        .collect();
+    for spliced in [
+        // The file the `include!` names.
+        "src/tree/mod.rs",
+        // Declared by it with an ordinary `mod`, which is the corpus's shape.
+        "src/tree/branch.rs",
+        // And one level further, where the ordinary rules have resumed.
+        "src/tree/branch/twig.rs",
+    ] {
+        assert!(
+            !dead.contains(&spliced.to_string()),
+            "`{spliced}` is compiled through the `include!`: {dead:?}"
+        );
+    }
+}
+
+/// A `mod` declared inside an included file resolves beside **that file**, not
+/// beside the file the `include!` was written in. Both layouts are in the
+/// fixture and only one of them compiles: `src/tree/branch.rs` is what rustc
+/// loads for `pub mod branch;` in `src/tree/mod.rs`, and `src/branch.rs` is
+/// the file a fix that took the includer's directory would have spared
+/// instead.
+#[test]
+fn a_mod_inside_an_included_file_resolves_beside_that_file_not_beside_the_includer() {
+    let analysis = analyze_fixture("included");
+
+    let dead: Vec<String> = reported(&analysis, FindingKind::DeadFile)
+        .into_iter()
+        .map(|(file, _)| file)
+        .collect();
+    assert!(
+        dead.contains(&"src/branch.rs".to_string()),
+        "nothing compiles `src/branch.rs`: {dead:?}"
+    );
+    assert!(
+        !dead.contains(&"src/tree/branch.rs".to_string()),
+        "`src/tree/branch.rs` is the file `pub mod branch;` loads: {dead:?}"
+    );
+}
+
+/// Every dead-file phase so far could only add noise; this one takes findings
+/// away, so the failure to avoid is exonerating a file that really is dead.
+/// `src/attic.rs` sits beside a spliced tree and is reached by nothing, and
+/// the exemption must not leak to it.
+#[test]
+fn a_dead_file_beside_an_included_tree_is_still_reported() {
+    let analysis = analyze_fixture("included");
+
+    assert_eq!(
+        reported(&analysis, FindingKind::DeadFile),
+        vec![
+            ("src/attic.rs".to_string(), ""),
+            ("src/branch.rs".to_string(), ""),
+        ],
+        "exactly two files in the fixture are reachable by nothing"
+    );
+}
+
+/// The boundary this phase stops at, named so that moving it is a decision
+/// rather than a diff. An `include!`-ed file is evidence that it was reached
+/// and evidence of nothing else: its items take no part in resolution, so
+/// `never_named` in the spliced tree is not reported even though nothing in
+/// the workspace names it.
+///
+/// `reached_both_ways` is the control, and the reason this test cannot pass by
+/// resolution simply not running: it is declared by `src/lib.rs` as an
+/// ordinary module *and* from inside the spliced file, the `mod` walk drains
+/// first, and so it is analyzed and reported.
+#[test]
+fn an_included_files_items_take_no_part_in_resolution() {
+    let analysis = analyze_fixture("included");
+
+    assert_eq!(
+        reported(&analysis, FindingKind::UnusedPubItem),
+        vec![("src/dual.rs".to_string(), "reached_both_ways")],
+        "measured before choosing: admitting the spliced items would report \
+         132,414 unused public items in `windows-sys` alone, where it reports \
+         10 today"
+    );
+}
+
+/// A crate named only from inside a spliced tree is still a used dependency.
+///
+/// The dependency check never sees those files through the module tree — the
+/// boundary above keeps them out of it — so they have to go on being read the
+/// way every file no `mod` declaration names is read. Getting this wrong is
+/// this phase inventing an `unused_dependency` finding while it removes
+/// `dead_file` ones, which would be a poor trade.
+#[test]
+fn a_dependency_named_only_inside_a_spliced_tree_is_still_a_used_dependency() {
+    let analysis = analyze_fixture("included");
+
+    assert_eq!(
+        reported(&analysis, FindingKind::UnusedDependency),
+        Vec::new(),
+        "`splicedep` is named in `src/tree/branch.rs` and nowhere else"
+    );
+}
+
+/// An `include!` written inside an inline module takes its path from the
+/// *file* it is written in, not from the directory that module's own `mod`
+/// declarations would resolve in: `mod inner { include!("tree/twiglet.rs"); }`
+/// in `src/lib.rs` is `src/tree/twiglet.rs`, never `src/inner/tree/twiglet.rs`.
+/// Only the module path its items land under is the inline module's.
+#[test]
+fn an_include_inside_an_inline_module_resolves_from_the_file_it_is_written_in() {
+    let analysis = analyze_fixture("included");
+
+    let dead: Vec<String> = reported(&analysis, FindingKind::DeadFile)
+        .into_iter()
+        .map(|(file, _)| file)
+        .collect();
+    assert!(
+        !dead.contains(&"src/tree/twiglet.rs".to_string()),
+        "the file the inline module splices in is compiled: {dead:?}"
+    );
+}
+
+/// An `include!` the configured matrix rules out is not followed, and the
+/// files it would have reached fall back to the answer they get today rather
+/// than being spared.
+///
+/// It takes nothing with it into the excluded set either, unlike a `mod` the
+/// matrix rules out: an included file's children are its own *directory's*, so
+/// for `include!("gen.rs")` at a crate root that directory is the whole of
+/// `src/`, and excluding it would suppress every genuinely dead file beside
+/// it. Under the default matrix every platform is analyzed, so this costs
+/// nothing unless a project narrows the matrix itself.
+#[test]
+fn an_include_the_matrix_rules_out_is_not_followed() {
+    let default = analyze_fixture("included");
+    let dead: Vec<String> = reported(&default, FindingKind::DeadFile)
+        .into_iter()
+        .map(|(file, _)| file)
+        .collect();
+    assert!(
+        !dead.contains(&"src/winonly/mod.rs".to_string()),
+        "`#[cfg(windows)] include!` is part of some build the default matrix \
+         analyzes: {dead:?}"
+    );
+
+    let narrowed = analyze_configured("included", "linux-only.toml");
+    assert_eq!(
+        reported(&narrowed, FindingKind::DeadFile),
+        vec![
+            ("src/attic.rs".to_string(), ""),
+            ("src/branch.rs".to_string(), ""),
+            ("src/winonly/mod.rs".to_string(), ""),
+        ],
+        "a matrix with no Windows in it does not follow the `include!`, and \
+         the two files that were dead before still are"
+    );
+}

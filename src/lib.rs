@@ -5,7 +5,8 @@
 //! detectors that are currently implemented:
 //!
 //! - **Dead module files**: `.rs` files under a package's `src/` that are not
-//!   reachable from any target root through `mod` declarations.
+//!   reachable from any target root through `mod` declarations, and that no
+//!   `include!` Deadwood can read splices into the build either.
 //! - **Unused public items and re-exports**: fully-`pub` items, and `pub use`
 //!   re-exports, that nothing live in the workspace reaches. Usage is
 //!   established by resolving `use` declarations and qualified paths against
@@ -64,7 +65,8 @@ use crate::config::{Config, Severity};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FindingKind {
-    /// A source file not reachable from any crate root via `mod` declarations.
+    /// A source file no crate root reaches, through `mod` declarations or
+    /// through an `include!` naming a file we can read.
     DeadFile,
     /// A `pub` item nothing live in the workspace refers to: either no
     /// resolved path names it, or every path that does is written inside
@@ -347,6 +349,12 @@ pub fn analyze_with(
         // Files a `cfg` keeps out of the analyzed build: unreachable, but not
         // dead — nothing reaches them because this build does not have them.
         let mut package_excluded: HashSet<PathBuf> = HashSet::new();
+        // Files an `include!` splices into the build. Compiled, so not dead —
+        // and that is the whole of what they are used for here. Their items
+        // are deliberately kept out of resolution and out of the dependency
+        // check; see [`modtree`]'s module docs for the boundary and why it
+        // sits there.
+        let mut package_spliced: HashSet<PathBuf> = HashSet::new();
         let mut package_references = deps::CrateReferences::default();
         for target in &package.targets {
             let resolved = modtree::resolve(&target.src_path, ignore, &gates, &mut warnings);
@@ -361,6 +369,7 @@ pub fn analyze_with(
                     gate_sites.record(&file.path, &package.name, gates.gate_sites(ast));
                 }
             }
+            package_spliced.extend(resolved.spliced.into_iter().map(|file| file.path));
             package_excluded.extend(resolved.excluded);
             // Every target of the package can name a dependency, including
             // its tests, examples, benches, and build script — and *which*
@@ -402,6 +411,12 @@ pub fn analyze_with(
         // to `mod`s) and can hold the only reference. A file the `cfg` matrix
         // excluded is the one exception — it is not compiled in the build
         // being analyzed, so a mention in it is not evidence about this build.
+        // An `include!`-ed file is *not* already read here, and deliberately:
+        // the dependency check never saw its names through the module tree,
+        // because the boundary above keeps spliced files out of it. It is read
+        // below like any other file no `mod` declaration names — which is what
+        // happened before this file was reachable at all, so nothing the
+        // dependency check sees changes.
         let mut already_read = package_reachable.clone();
         already_read.extend(package_excluded.iter().cloned());
         package_references.add_unreached_sources(manifest_dir, &already_read);
@@ -413,7 +428,10 @@ pub fn analyze_with(
         let src_dir = manifest_dir.join("src");
         if src_dir.is_dir() {
             for file in modtree::rs_files_under(&src_dir) {
-                if !package_reachable.contains(&file) && !package_excluded.contains(&file) {
+                if !package_reachable.contains(&file)
+                    && !package_excluded.contains(&file)
+                    && !package_spliced.contains(&file)
+                {
                     findings.push(Finding {
                         kind: FindingKind::DeadFile,
                         // Every construction site leaves the severity at its

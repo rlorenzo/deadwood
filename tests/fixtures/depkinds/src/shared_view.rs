@@ -9,6 +9,11 @@
 
 mod deeper;
 
+// The same case as `deeper` above, reached the other way: this file is walked
+// once under a gated declaration, and the ungated one lifts it. What a walk
+// splices in has to be lifted with what it declares.
+include!("shared_view/spliced.rs");
+
 /// An *inline* module in a file three declarations reach, which is the case
 /// the inline list has to be replaced rather than added to. Whichever gated
 /// declaration is read first records this module as confined, because the file

@@ -21,10 +21,56 @@
 //! inside `tests.rs` records that. Each reached file therefore carries
 //! [`ParsedFile::test_only`] down to the detectors that need it.
 //!
+//! # `include!`, which is not a `mod`
+//!
+//! `include!("Windows/mod.rs")` splices a file's tokens into the item it is
+//! written in. The file is compiled, so it is not dead — but it is not a
+//! module either, and the two questions a caller can ask about it have
+//! different answers:
+//!
+//! - **"Was this file reached?"** — the question [`crate::analyze_with`]'s
+//!   dead-file check asks. Yes: an `include!` this walk could read names it.
+//! - **"What module are its items in?"** — the question every other detector
+//!   asks. The *including* module's, because the tokens land there:
+//!   `include!("Windows/mod.rs")` written at the crate root puts
+//!   `pub mod Wdk;` at `crate::Wdk`, not `crate::Windows::Wdk`.
+//!
+//! Those two answers part company again for the file's *children*. A `mod`
+//! declared inside an included file resolves beside **that file**, whatever it
+//! is named — `include!("a/gen.rs")` with `pub mod b;` inside it needs
+//! `src/a/b.rs`, not `src/b.rs` and not `src/a/gen/b.rs` — so an included file
+//! owns its directory the way `mod.rs` does, while its module path is the
+//! includer's. [`child_base`] decides the first; [`Pending::module`] carries
+//! the second.
+//!
+//! What this phase does with the second answer is nothing: files reached
+//! through an `include!` are returned in [`Resolved::spliced`], apart from
+//! [`Resolved::files`], and the caller feeds them to the dead-file check and
+//! to nothing else. They are parsed, gated and given their module paths all
+//! the same, so the boundary is one filter rather than a missing answer — but
+//! admitting a generated API surface's items to resolution is a finding
+//! population of its own, and it is not this phase's to create. A file both an
+//! `include!` and a `mod` chain reach is *analyzed*: the `mod` walk is drained
+//! before any `include!` target is followed, so the ordinary route wins.
+//!
+//! An `include!` whose path only a build knows —
+//! `include!(concat!(env!("OUT_DIR"), ...))` — is left alone here, silently.
+//! That is not a second policy for it: [`crate::deps`] reads the construct
+//! through the same reader ([`crate::deps::included_file`]) and already
+//! warns, once per check, that the package's references are incomplete. What
+//! it must not do is *spare* files on the suspicion that the unread file might
+//! name them, so a package Deadwood cannot follow keeps reporting exactly the
+//! dead files it reports today. A warning from here would do worse than
+//! nothing: an incomplete module tree skips the whole package's dead-file
+//! check, turning an unreadable `include!` into silence.
+//!
 //! Known simplifications, tracked for later:
 //! - `#[path]` is resolved relative to the declaring file's directory, which
 //!   matches rustc for the common cases but not every inline-module corner.
-//! - Files included via `include!()` are not tracked yet.
+//! - An `include!` is followed from item position only, so one written inside a
+//!   function body is not. [`crate::deps`] reads those, because a mention of a
+//!   crate counts wherever it is written; a `mod` declaration spliced into a
+//!   function body is not a module of the crate.
 //!
 //! Configured `ignore` patterns touch exactly one thing here: a `mod`
 //! declaration pointing at a *missing* file that an ignore pattern covers is
@@ -44,8 +90,18 @@ use crate::config::Ignore;
 
 /// What module resolution found from one crate root.
 pub struct Resolved {
-    /// Every file reached, in the analyzed build.
+    /// Every file reached by `mod` declarations, in the analyzed build.
     pub files: Vec<ParsedFile>,
+    /// Files reached only by following an `include!` — the file a readable
+    /// `include!` names, and everything a `mod` chain from it reaches.
+    ///
+    /// They are compiled by the build, so they are not dead; that is the only
+    /// claim this list is used for. Everything else about them is resolved
+    /// exactly as for [`Resolved::files`] — module paths included, on the
+    /// including module's basis — so moving the boundary is a matter of
+    /// joining the two lists rather than computing something new. See the
+    /// module docs for why it has not been moved.
+    pub spliced: Vec<ParsedFile>,
     /// Files a `cfg` the configured matrix rules out keeps out of the
     /// analysis. They are neither read nor analyzed — and, crucially, not
     /// dead either: nothing reaches them because this build does not contain
@@ -100,12 +156,19 @@ pub struct ParsedFile {
 struct Pending {
     path: PathBuf,
     /// Whether the file owns its parent directory for child modules
-    /// (`lib.rs`/`mod.rs`) or nests them in a stem-named directory.
+    /// (`lib.rs`/`mod.rs`, and every `include!` target) or nests them in a
+    /// stem-named directory.
     is_mod_root: bool,
     module: Vec<String>,
     /// Whether the declaration that queued this file — and every declaration
     /// above it — confines it to a test build.
     test_only: bool,
+    /// How many `include!`s were followed to get here, so that a chain of them
+    /// is bounded the same way [`crate::deps`] bounds it. A `mod` declaration
+    /// inherits the count rather than adding to it: it is `include!` nesting
+    /// that both readers cap, and reading one crate to two different depths is
+    /// how the two of them would come to disagree about the same file.
+    include_depth: usize,
 }
 
 /// A file already loaded, and what a second declaration of it needs to know.
@@ -138,6 +201,12 @@ struct Seen {
 /// file that two targets both compile is resolved once per target and can come
 /// out test-only in one and not the other, which is the right answer: what a
 /// file is depends on what reached it, and each target reached it its own way.
+///
+/// `include!` targets are followed too, into [`Resolved::spliced`], and the
+/// order they are followed in is the answer to a file both routes reach: the
+/// `mod` queue is drained to nothing before the first `include!` target is
+/// popped, so such a file lands among the files that are analyzed rather than
+/// among the ones that are only counted reachable.
 pub fn resolve(
     root: &Path,
     ignore: Ignore<'_>,
@@ -154,6 +223,7 @@ pub fn resolve(
     let mut seen: HashMap<PathBuf, Seen> = HashMap::new();
     let mut resolved = Resolved {
         files: Vec::new(),
+        spliced: Vec::new(),
         excluded: Vec::new(),
     };
     let mut queue: Vec<Pending> = vec![Pending {
@@ -161,138 +231,176 @@ pub fn resolve(
         is_mod_root: true,
         module: Vec::new(),
         test_only: false,
+        include_depth: 0,
     }];
+    // `include!` targets found by the pass being drained, held back until it
+    // has drained. Where in `resolved.files` the `mod` walk stopped and the
+    // spliced files begin — set when the first pass runs out, so it is the
+    // count of files no `include!` was needed to reach.
+    let mut deferred: Vec<Pending> = Vec::new();
+    let mut spliced_from: Option<usize> = None;
 
-    while let Some(Pending {
-        path,
-        is_mod_root,
-        module,
-        test_only,
-    }) = queue.pop()
-    {
-        let path = normalize(&path);
-        if !visited.insert(path.clone()) {
-            // Reached again. Nothing about the file changes — it is the same
-            // file — except that a declaration no gate confines to a test
-            // build overrides a test-only one recorded earlier, and its
-            // children with it. A path that
-            // never became a file has nothing to override.
-            let Some(&Seen { index, is_mod_root }) = seen.get(&path) else {
-                continue;
-            };
-            if test_only || !resolved.files[index].test_only {
+    loop {
+        while let Some(Pending {
+            path,
+            is_mod_root,
+            module,
+            test_only,
+            include_depth,
+        }) = queue.pop()
+        {
+            let path = normalize(&path);
+            if !visited.insert(path.clone()) {
+                // Reached again. Nothing about the file changes — it is the same
+                // file — except that a declaration no gate confines to a test
+                // build overrides a test-only one recorded earlier, and its
+                // children with it. A path that
+                // never became a file has nothing to override.
+                let Some(&Seen { index, is_mod_root }) = seen.get(&path) else {
+                    continue;
+                };
+                if test_only || !resolved.files[index].test_only {
+                    continue;
+                }
+                resolved.files[index].test_only = false;
+                let mut inline_mods = Vec::new();
+                let file = &resolved.files[index];
+                if let Some(ast) = &file.ast {
+                    let declaring = Declaring {
+                        dir: parent_of(&path),
+                        file: &path,
+                        ignore,
+                        gates,
+                        include_depth,
+                    };
+                    // The subtree below was already excluded and warned about on
+                    // the first walk, and repeating either would double it up —
+                    // both are `Vec`s nothing dedups. The two queues are not:
+                    // they are drained through the check above, which is why the
+                    // re-walk re-queues `mod` children to lift their
+                    // confinement, and why `include!` targets go to the real
+                    // `deferred` for exactly the same reason. Dropping them here
+                    // would leave a spliced file holding the `test_only` its
+                    // includer no longer has.
+                    collect_mod_decls(
+                        &ast.items,
+                        &declaring,
+                        Under {
+                            base: &child_base(&path, is_mod_root),
+                            module: &file.module,
+                            test_only: false,
+                        },
+                        &mut Walk {
+                            queue: &mut queue,
+                            deferred: &mut deferred,
+                            excluded: &mut Vec::new(),
+                            warnings: &mut Vec::new(),
+                            inline_mods: &mut inline_mods,
+                        },
+                    );
+                }
+                // The inline list, unlike the two above, is *replaced*: the first
+                // walk recorded every inline module under a file that was itself
+                // confined, and lifting the file leaves only the ones their own
+                // gate confines.
+                resolved.files[index].test_only_mods = confined_inline_mods(inline_mods);
                 continue;
             }
-            resolved.files[index].test_only = false;
+            let source = match fs::read_to_string(&path) {
+                Ok(s) => s,
+                Err(err) => {
+                    warnings.push(format!("could not read `{}`: {err}", path.display()));
+                    continue;
+                }
+            };
+            let mut ast = match syn::parse_file(&source) {
+                Ok(ast) => Some(ast),
+                Err(err) => {
+                    warnings.push(format!("could not parse `{}`: {err}", path.display()));
+                    None
+                }
+            };
+
             let mut inline_mods = Vec::new();
-            let file = &resolved.files[index];
-            if let Some(ast) = &file.ast {
+            if let Some(ast) = &mut ast {
+                let file_dir = path.parent().unwrap_or(Path::new(""));
+                let child_base = child_base(&path, is_mod_root);
+                // An inner `#![cfg(...)]` gates the file it is written in, not one
+                // item in it, so a matrix that rules it out takes the whole file
+                // and every module below it. Checked before the `mod` walk, or the
+                // children of a file that is not in this build would be queued.
+                if !gates.compiled(&ast.attrs) {
+                    resolved.excluded.extend(rs_files_under(&child_base));
+                    resolved.excluded.push(path);
+                    continue;
+                }
                 let declaring = Declaring {
-                    dir: parent_of(&path),
+                    dir: file_dir,
                     file: &path,
                     ignore,
                     gates,
+                    include_depth,
                 };
-                // The subtree below was already excluded and warned about on
-                // the first walk; repeating either would double it up.
                 collect_mod_decls(
                     &ast.items,
                     &declaring,
                     Under {
-                        base: &child_base(&path, is_mod_root),
-                        module: &file.module,
-                        test_only: false,
+                        base: &child_base,
+                        module: &module,
+                        test_only,
                     },
                     &mut Walk {
                         queue: &mut queue,
-                        excluded: &mut Vec::new(),
-                        warnings: &mut Vec::new(),
+                        deferred: &mut deferred,
+                        excluded: &mut resolved.excluded,
+                        warnings,
                         inline_mods: &mut inline_mods,
                     },
                 );
+                // After the walk: the declarations above are read from the file as
+                // written, and pruning would hide the excluded ones from it.
+                crate::cfg::prune(gates, ast);
             }
-            // The inline list, unlike the two above, is *replaced*: the first
-            // walk recorded every inline module under a file that was itself
-            // confined, and lifting the file leaves only the ones their own
-            // gate confines.
-            resolved.files[index].test_only_mods = confined_inline_mods(inline_mods);
-            continue;
-        }
-        let source = match fs::read_to_string(&path) {
-            Ok(s) => s,
-            Err(err) => {
-                warnings.push(format!("could not read `{}`: {err}", path.display()));
-                continue;
-            }
-        };
-        let mut ast = match syn::parse_file(&source) {
-            Ok(ast) => Some(ast),
-            Err(err) => {
-                warnings.push(format!("could not parse `{}`: {err}", path.display()));
-                None
-            }
-        };
 
-        let mut inline_mods = Vec::new();
-        if let Some(ast) = &mut ast {
-            let file_dir = path.parent().unwrap_or(Path::new(""));
-            let child_base = child_base(&path, is_mod_root);
-            // An inner `#![cfg(...)]` gates the file it is written in, not one
-            // item in it, so a matrix that rules it out takes the whole file
-            // and every module below it. Checked before the `mod` walk, or the
-            // children of a file that is not in this build would be queued.
-            if !gates.compiled(&ast.attrs) {
-                resolved.excluded.extend(rs_files_under(&child_base));
-                resolved.excluded.push(path);
-                continue;
-            }
-            let declaring = Declaring {
-                dir: file_dir,
-                file: &path,
-                ignore,
-                gates,
-            };
-            collect_mod_decls(
-                &ast.items,
-                &declaring,
-                Under {
-                    base: &child_base,
-                    module: &module,
-                    test_only,
-                },
-                &mut Walk {
-                    queue: &mut queue,
-                    excluded: &mut resolved.excluded,
-                    warnings,
-                    inline_mods: &mut inline_mods,
+            seen.insert(
+                path.clone(),
+                Seen {
+                    index: resolved.files.len(),
+                    is_mod_root,
                 },
             );
-            // After the walk: the declarations above are read from the file as
-            // written, and pruning would hide the excluded ones from it.
-            crate::cfg::prune(gates, ast);
+            resolved.files.push(ParsedFile {
+                path,
+                ast,
+                module,
+                test_only,
+                test_only_mods: confined_inline_mods(inline_mods),
+            });
         }
 
-        seen.insert(
-            path.clone(),
-            Seen {
-                index: resolved.files.len(),
-                is_mod_root,
-            },
-        );
-        resolved.files.push(ParsedFile {
-            path,
-            ast,
-            module,
-            test_only,
-            test_only_mods: confined_inline_mods(inline_mods),
-        });
+        // The `mod` walk has run out. Everything pushed from here on was
+        // reached by following an `include!`, and everything before it was
+        // not — which is the whole of how the two lists are told apart.
+        let drained = *spliced_from.get_or_insert(resolved.files.len());
+        if deferred.is_empty() {
+            let spliced = resolved.files.split_off(drained);
+            resolved.spliced = spliced;
+            return resolved;
+        }
+        queue.append(&mut deferred);
     }
-
-    resolved
 }
 
 /// Where a file's file-backed child modules live: beside it when it owns its
-/// directory (`lib.rs`, `mod.rs`), in a stem-named directory otherwise.
+/// directory (`lib.rs`, `mod.rs`, and every `include!` target), in a
+/// stem-named directory otherwise.
+///
+/// An `include!` target owns its directory whatever it is named, which is the
+/// one place this differs from the file-name rule: `include!("a/gen.rs")` with
+/// `pub mod b;` inside it needs `src/a/b.rs`, where an ordinary `mod gen;`
+/// leading to the same file would need `src/a/gen/b.rs`. Verified against
+/// rustc rather than assumed; `an_included_files_children_live_beside_it`
+/// pins both halves.
 fn child_base(path: &Path, is_mod_root: bool) -> PathBuf {
     let dir = parent_of(path);
     if is_mod_root {
@@ -314,6 +422,9 @@ struct Declaring<'a> {
     file: &'a Path,
     ignore: Ignore<'a>,
     gates: &'a Gates<'a>,
+    /// How many `include!`s were followed to reach this file, so an `include!`
+    /// written in it can be capped at [`crate::deps::MAX_INCLUDE_DEPTH`].
+    include_depth: usize,
 }
 
 /// What the declarations of one file inherit from the ones above them: where
@@ -330,6 +441,9 @@ struct Under<'a> {
 /// declarations that resolved to nothing.
 struct Walk<'a> {
     queue: &'a mut Vec<Pending>,
+    /// `include!` targets, held back until the queue above has drained so that
+    /// a file the `mod` walk also reaches is resolved as a module first.
+    deferred: &'a mut Vec<Pending>,
     excluded: &'a mut Vec<PathBuf>,
     warnings: &'a mut Vec<String>,
     /// Every inline `mod` the walk passed, by module path, and whether it was
@@ -374,6 +488,10 @@ fn collect_mod_decls(
     walk: &mut Walk<'_>,
 ) {
     for item in items {
+        if let syn::Item::Macro(mac) = item {
+            queue_include(mac, declaring, under, walk);
+            continue;
+        }
         let syn::Item::Mod(m) = item else { continue };
         let name = m.ident.to_string();
         // Test-confinement accumulates downward and never lifts: a module
@@ -420,6 +538,7 @@ fn collect_mod_decls(
                             is_mod_root: owns_dir,
                             module: child_module,
                             test_only,
+                            include_depth: declaring.include_depth,
                         });
                     } else if !declaring.ignore.matches(&target) {
                         walk.warnings.push(format!(
@@ -439,6 +558,7 @@ fn collect_mod_decls(
                         is_mod_root: false,
                         module: child_module,
                         test_only,
+                        include_depth: declaring.include_depth,
                     });
                 } else if as_dir.is_file() {
                     walk.queue.push(Pending {
@@ -446,6 +566,7 @@ fn collect_mod_decls(
                         is_mod_root: true,
                         module: child_module,
                         test_only,
+                        include_depth: declaring.include_depth,
                     });
                 } else if !declaring.ignore.matches(&as_file) && !declaring.ignore.matches(&as_dir)
                 {
@@ -459,6 +580,59 @@ fn collect_mod_decls(
             }
         }
     }
+}
+
+/// Queue the file an `include!` splices in, if this item is one and its path
+/// is one we can read.
+///
+/// Three things are decided here, and each is the opposite of what a `mod`
+/// declaration gets:
+///
+/// - The path is relative to the **declaring file's** directory, not to
+///   `under.base`, which for an `include!` inside an inline `mod` is a
+///   directory deeper.
+/// - The module path is the **including** item's, unchanged: the tokens are
+///   spliced into it, so nothing new is named.
+/// - The file **owns its directory** for its own `mod` declarations whatever
+///   it is called, which is [`child_base`]'s `is_mod_root` and is why an
+///   `include!` target is queued with it set.
+///
+/// An `include!` the matrix rules out is not followed, and — unlike a `mod` it
+/// rules out — takes nothing with it into [`Resolved::excluded`]: the files it
+/// would have reached are its own directory's, and for `include!("gen.rs")` at
+/// a crate root that directory is the whole of `src/`. Excluding it would
+/// suppress every genuinely dead file beside it, which is a worse failure than
+/// the one it fixes; the files fall back to the answer they get today.
+fn queue_include(
+    mac: &syn::ItemMacro,
+    declaring: &Declaring<'_>,
+    under: Under<'_>,
+    walk: &mut Walk<'_>,
+) {
+    let Some(included) = crate::deps::included_file(&mac.mac) else {
+        return;
+    };
+    // A path only a build knows is [`crate::deps`]'s to warn about, and this
+    // walk's to leave exactly as it found it — see the module docs.
+    let crate::deps::Included::At(literal) = included else {
+        return;
+    };
+    if !declaring.gates.compiled(&mac.attrs) {
+        return;
+    }
+    // Deeper than the reader in [`crate::deps`] follows. Stopping here leaves
+    // the rest of the chain unreached, and so reported dead: a file is spared
+    // only by an `include!` that was actually read.
+    if declaring.include_depth >= crate::deps::MAX_INCLUDE_DEPTH {
+        return;
+    }
+    walk.deferred.push(Pending {
+        path: declaring.dir.join(literal),
+        is_mod_root: true,
+        module: under.module.to_vec(),
+        test_only: under.test_only || declaring.gates.test_only(&mac.attrs),
+        include_depth: declaring.include_depth + 1,
+    });
 }
 
 /// Every file a `mod` outside the analyzed build takes with it.
@@ -817,6 +991,167 @@ mod tests {
             through_mod_rs.contains(&normalize(&src.join("modtree.rs"))),
             "`#[path = \"src/mod.rs\"]` nests its children in `src/`, not in \
              `src/mod/`: {through_mod_rs:?}"
+        );
+    }
+
+    /// One file, as `(path relative to `src/`, module path)`.
+    type Placed = (String, Vec<String>);
+
+    /// Resolve the `included` fixture and return the two lists it produces,
+    /// each sorted — the two answers an `include!` has, side by side.
+    fn included_fixture() -> (Vec<Placed>, Vec<Placed>) {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/included/src/lib.rs");
+        let config = crate::config::Config::default();
+        let package = crate::cfg::tests_support::bare_package();
+        let gates = crate::cfg::Gates::new(config.cfg(), &package);
+        let mut warnings = Vec::new();
+        let resolved = resolve(&root, config.ignore(), &gates, &mut warnings);
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+
+        let src = root.parent().unwrap().to_path_buf();
+        let listing = |files: &[ParsedFile]| {
+            let mut out: Vec<Placed> = files
+                .iter()
+                .map(|file| {
+                    let name = file
+                        .path
+                        .strip_prefix(&src)
+                        .unwrap_or(&file.path)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    (name, file.module.clone())
+                })
+                .collect();
+            out.sort();
+            out
+        };
+        (listing(&resolved.files), listing(&resolved.spliced))
+    }
+
+    /// A `mod` declared inside an included file resolves beside **that file**,
+    /// whatever it is named — the rule [`child_base`] answers with
+    /// `is_mod_root`, and the one a fix that only marked the named file
+    /// reached would get wrong for every child below it.
+    ///
+    /// Checked against rustc rather than assumed. With `src/tree/branch.rs`
+    /// removed and only `src/branch.rs` left, the fixture stops compiling with
+    /// `error[E0583]: file not found for module `branch``, and with
+    /// `src/tree/gen.rs` in place of `mod.rs` the answer is the same file —
+    /// which is why this is not the `mod.rs` rule wearing another hat.
+    #[test]
+    fn an_included_files_children_live_beside_it() {
+        let (_, spliced) = included_fixture();
+        let paths: Vec<&str> = spliced.iter().map(|(path, _)| path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec![
+                "tree/branch.rs",
+                "tree/branch/twig.rs",
+                "tree/mod.rs",
+                // Spliced into an inline module, from a path relative to the
+                // *file* the `include!` is written in.
+                "tree/twiglet.rs",
+                // Behind `#[cfg(windows)]`, which the default matrix admits.
+                "winonly/mod.rs",
+            ],
+            "`pub mod branch;` in `src/tree/mod.rs` is `src/tree/branch.rs`, \
+             and `src/branch.rs` beside the includer is reached by nothing"
+        );
+    }
+
+    /// The other half of the same file's answer, and the one that differs: an
+    /// included file's items belong to the **including** module, so
+    /// `pub mod branch;` spliced into the crate root is `crate::branch` and
+    /// not `crate::tree::branch`. Verified against rustc, which resolves
+    /// `crate::b` and rejects `crate::a::b` for the same layout.
+    #[test]
+    fn the_module_path_of_an_included_files_items_is_the_includers() {
+        let (_, spliced) = included_fixture();
+        assert_eq!(
+            spliced,
+            vec![
+                ("tree/branch.rs".to_string(), vec!["branch".to_string()]),
+                (
+                    "tree/branch/twig.rs".to_string(),
+                    vec!["branch".to_string(), "twig".to_string()]
+                ),
+                // The included file itself names no module of its own.
+                ("tree/mod.rs".to_string(), Vec::new()),
+                // Spliced into `mod inner { ... }`, so its items are that
+                // module's — the module path is the includer's wherever the
+                // includer happens to be.
+                ("tree/twiglet.rs".to_string(), vec!["inner".to_string()]),
+                ("winonly/mod.rs".to_string(), Vec::new()),
+            ],
+        );
+    }
+
+    /// A file both routes reach is *analyzed*, not merely counted reachable.
+    /// The `mod` queue is drained to nothing before the first `include!`
+    /// target is popped, so which list `src/dual.rs` lands in is settled by
+    /// the pass order rather than by which declaration happened to pop first
+    /// — and the module path it keeps is the one the `mod` walk gave it.
+    #[test]
+    fn a_file_both_an_include_and_a_mod_chain_reach_is_analyzed() {
+        let (files, spliced) = included_fixture();
+        assert_eq!(
+            files,
+            vec![
+                ("dual.rs".to_string(), vec!["dual".to_string()]),
+                ("lib.rs".to_string(), Vec::new()),
+            ],
+            "`src/dual.rs` is `mod dual;` in the crate root and \
+             `#[path = \"../dual.rs\"] mod dual_again;` in the spliced file",
+        );
+        assert!(
+            !spliced.iter().any(|(path, _)| path == "dual.rs"),
+            "one file, one list: {spliced:?}"
+        );
+    }
+
+    /// Lifting a file's test-confinement lifts it from the files that file
+    /// `include!`s, the same way it lifts from the files it declares with
+    /// `mod`.
+    ///
+    /// A re-reached file is not re-read — its subtree was already excluded and
+    /// warned about — but its children are re-queued, because the queue is
+    /// what carries the lifted confinement down. `include!` targets ride the
+    /// second queue and had been dropped on that path, so a spliced file kept
+    /// the `test_only` its includer no longer had. Nothing reads a spliced
+    /// file's `test_only` today (see the module docs), so this pins the value
+    /// rather than any output.
+    #[test]
+    fn lifting_a_files_test_confinement_lifts_it_from_what_the_file_includes() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/depkinds/src/lib.rs");
+        let config = crate::config::Config::default();
+        let package = crate::cfg::tests_support::bare_package();
+        let gates = crate::cfg::Gates::new(config.cfg(), &package);
+        let mut warnings = Vec::new();
+        let resolved = resolve(&root, config.ignore(), &gates, &mut warnings);
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+
+        let confinement = |files: &[ParsedFile], name: &str| {
+            files
+                .iter()
+                .find(|file| file.path.ends_with(name))
+                .unwrap_or_else(|| panic!("`{name}` was not reached"))
+                .test_only
+        };
+        // The same fixture `test_confinement_follows_declarations_and_an_
+        // unconfined_one_clears_it` uses, and the same three declarations: what
+        // is added here is that the lifted file splices one in as well as
+        // declaring one.
+        assert!(
+            !confinement(&resolved.files, "shared_view.rs"),
+            "the unconfined declaration lifts the file itself",
+        );
+        assert!(
+            !confinement(&resolved.files, "shared_view/deeper.rs"),
+            "and the file it declares with `mod`",
+        );
+        assert!(
+            !confinement(&resolved.spliced, "shared_view/spliced.rs"),
+            "and the file it splices in, which is the one that was dropped",
         );
     }
 
