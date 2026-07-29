@@ -1,0 +1,22 @@
+# Test fixture: two unrelated dead files in one package.
+#
+# This is the shape any content-free rule for matching a moved `dead_file` gets
+# wrong, and the reason phase 13 declined to write one. A dead file carries no
+# name and no module — a path is the whole of what a baseline entry records
+# about it — so an entry naming a path that is gone and a finding naming a path
+# that is new are one leftover on each side, which is *also* exactly what a move
+# looks like. Pairing them would suppress a genuinely new finding.
+#
+# One package, not two: the package-move half of #32 cannot be asked here at
+# all, because the root package's directory is the workspace root and every path
+# is inside it. That is the point — see `tests/fixtures/moved/movedpackage.toml`
+# for the event that needs a second member to express, and it is the reason its
+# population outside a synthetic fixture is zero.
+#
+# The empty [workspace] table keeps this out of any enclosing workspace.
+[package]
+name = "deadfiles"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]

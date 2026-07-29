@@ -1,0 +1,19 @@
+# The second event #32 describes, pinned as today's behaviour rather than left
+# in prose: a whole **package directory** moved.
+#
+# `alpha` used to live at `vendor/alpha`, so every entry recording one of its
+# findings names a path under a directory that is no longer a package of this
+# workspace — the manifest and the dead file, which have no item identity, and
+# the three `unused_pub_item`s, which do. All five go stale and all five
+# findings are reported again.
+#
+# The item kinds are the point. Their identity — kind, package, module, name —
+# survives this move intact in everything but one part: the package is resolved
+# by containment against the workspace's manifest directories, and
+# `vendor/alpha/src/legacy/mod.rs` is inside none of them. So the second pass
+# has no package to scope itself to and declines, exactly as it does for the
+# kinds that never had an identity at all.
+#
+# `beta` did not move, and its entry still matches, so the failure is scoped to
+# the package the event happened to rather than to the run.
+baseline = "movedpackage-baseline.json"

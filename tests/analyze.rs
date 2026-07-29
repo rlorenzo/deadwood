@@ -2157,6 +2157,159 @@ fn pruning_keeps_a_relocated_entry_with_the_path_it_was_written_with() {
     );
 }
 
+// -- what a move does not survive, and why that is the answer ---------------
+//
+// Phase 17 measured #32 and closed it: the four kinds with no item identity
+// keep behaving exactly as they do above, and the boundary is pinned here
+// rather than only argued in `docs/SCOPE.md`. Each test below is a case a rule
+// that closed #32 would have had to get right, and each one is a case the rule
+// available gets wrong.
+
+/// The second event #32 describes, and the one the item kinds do not survive
+/// either. A whole package directory moved, so every entry recording one of its
+/// findings — the manifest entry and the dead file, which never had an item
+/// identity, and the three `unused_pub_item`s, which do — names a path inside
+/// no package of this workspace. The pass resolves a recorded path to a package
+/// by containment, gets nothing, and declines for all five alike.
+#[test]
+fn a_moved_package_directory_relocates_none_of_its_findings() {
+    let analysis = analyze_configured("moved", "movedpackage.toml");
+    assert_eq!(
+        all_reported(&analysis),
+        vec![
+            (
+                FindingKind::UnusedDependency,
+                "alpha/Cargo.toml".to_string(),
+                "unused_crate".to_string()
+            ),
+            (
+                FindingKind::DeadFile,
+                "alpha/src/attic/dropped.rs".to_string(),
+                String::new()
+            ),
+            (
+                FindingKind::UnusedPubItem,
+                "alpha/src/bin/one.rs".to_string(),
+                "shared".to_string()
+            ),
+            (
+                FindingKind::UnusedPubItem,
+                "alpha/src/bin/two.rs".to_string(),
+                "shared".to_string()
+            ),
+            (
+                FindingKind::UnusedPubItem,
+                "alpha/src/legacy/mod.rs".to_string(),
+                "gone".to_string()
+            ),
+        ],
+        "every finding of the moved package is reported again"
+    );
+    assert_eq!(
+        stale_keys(&analysis),
+        vec![
+            "vendor/alpha/Cargo.toml: unused_dependency `unused_crate`".to_string(),
+            "vendor/alpha/src/attic/dropped.rs: dead_file".to_string(),
+            "vendor/alpha/src/bin/one.rs: unused_pub_item `shared` in `crate` (value namespace)"
+                .to_string(),
+            "vendor/alpha/src/bin/two.rs: unused_pub_item `shared` in `crate` (value namespace)"
+                .to_string(),
+            "vendor/alpha/src/legacy/mod.rs: unused_pub_item `gone` in `crate::legacy` (value \
+             namespace)"
+                .to_string(),
+        ],
+        "and every entry recording one is stale, item kinds included"
+    );
+    assert_eq!(
+        suppressed(&analysis),
+        1,
+        "`beta` did not move, so its entry still matches: the failure is scoped \
+         to the package the event happened to"
+    );
+}
+
+/// The unconfigured run the two cases below are measured against: two dead
+/// files, nothing else, and no baseline.
+#[test]
+fn the_deadfiles_fixture_reports_two_unrelated_dead_files() {
+    let analysis = analyze_fixture("deadfiles");
+    assert_eq!(
+        all_reported(&analysis),
+        vec![
+            (
+                FindingKind::DeadFile,
+                "src/attic/dropped.rs".to_string(),
+                String::new()
+            ),
+            (
+                FindingKind::DeadFile,
+                "src/spare.rs".to_string(),
+                String::new()
+            ),
+        ]
+    );
+    assert!(
+        analysis.baseline.is_none(),
+        "no `baseline` key and no file at the default location is no baseline"
+    );
+}
+
+/// Baselining one dead file leaves an unrelated one reported. Both are where
+/// the baseline says they are, so this is the exact key answering and it has
+/// always held; it is here as the control for the case below, where the only
+/// difference is that the recorded path is gone.
+#[test]
+fn one_of_two_dead_files_baselined_leaves_the_other_reported() {
+    let analysis = analyze_configured("deadfiles", "pair.toml");
+    assert_eq!(
+        all_reported(&analysis),
+        vec![(
+            FindingKind::DeadFile,
+            "src/spare.rs".to_string(),
+            String::new()
+        )]
+    );
+    assert_eq!(suppressed(&analysis), 1);
+    assert!(
+        stale_keys(&analysis).is_empty(),
+        "{:?}",
+        stale_keys(&analysis)
+    );
+}
+
+/// The case any content-free rule gets wrong, which is why there is none. One
+/// leftover entry — a dead file that was deleted — and one leftover finding — a
+/// dead file that is new — is the same evidence a moved dead file leaves, and a
+/// dead file records no name and no module for anything to tell them apart
+/// with. Pairing them would silence `src/spare.rs`, so the run reports it and
+/// names the entry stale: noise, which is the direction this pass falls back
+/// in.
+#[test]
+fn an_unrelated_dead_file_is_not_read_as_a_move_of_a_baselined_one() {
+    let analysis = analyze_configured("deadfiles", "unrelated.toml");
+    assert_eq!(
+        all_reported(&analysis),
+        vec![(
+            FindingKind::DeadFile,
+            "src/spare.rs".to_string(),
+            String::new()
+        )],
+        "the new dead file is news, not the old one in a new place"
+    );
+    assert!(analysis.has_denied(), "so it fails the run");
+    assert_eq!(
+        stale_keys(&analysis),
+        vec!["src/deleted.rs: dead_file".to_string()],
+        "and the deleted one's entry is stale"
+    );
+    assert_eq!(
+        suppressed(&analysis),
+        1,
+        "the dead file that did not move is still suppressed by the exact key, \
+         which is what leaves exactly one leftover on each side"
+    );
+}
+
 /// A baseline path that is written down and not there must never read as
 /// "nothing is baselined": the run would be green for the wrong reason, and a
 /// typo would silently disarm a CI gate.
