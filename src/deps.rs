@@ -231,7 +231,12 @@ const DOC_FILE_REASON: &str = "documentation is included from a file that could 
 const UNPARSABLE_REASON: &str = "a source file could not be read or parsed";
 
 /// How deep a chain of `include!`d files is followed. Real code never nests.
-const MAX_INCLUDE_DEPTH: usize = 8;
+///
+/// Shared with [`crate::modtree`], which follows the same chains for a
+/// different reason: two readers with two caps would read one crate to two
+/// depths, and a file one of them stopped short of is a file they disagree
+/// about.
+pub(crate) const MAX_INCLUDE_DEPTH: usize = 8;
 
 /// Whether a target is test code in its entirety.
 ///
@@ -726,6 +731,45 @@ fn words_into(names: &mut HashMap<String, Contexts>, text: &str, context: Contex
     }
 }
 
+/// What an `include!` invocation names, for a macro invocation that is one.
+///
+/// The two answers are the whole of the policy question `include!` poses, and
+/// they are kept apart here so that each caller states its own answer to the
+/// second one rather than inheriting a default. This module skips the package
+/// with [`INCLUDE_REASON`] on [`Included::Unreadable`]; [`crate::modtree`]
+/// leaves the file alone, which is deliberately *not* the same thing — see its
+/// module docs.
+pub(crate) enum Included {
+    /// A literal path, relative to the directory of the file the `include!` is
+    /// written in.
+    At(String),
+    /// A path that only a build knows
+    /// (`include!(concat!(env!("OUT_DIR"), "/generated.rs"))`).
+    Unreadable,
+}
+
+/// Read an `include!` invocation, if the macro is one.
+///
+/// One reader, used by this module and by [`crate::modtree`]: the question
+/// "which file does this `include!` splice in" has one answer, and two copies
+/// of it could come to disagree about which forms are readable.
+pub(crate) fn included_file(mac: &syn::Macro) -> Option<Included> {
+    // `std::include!` and `core::include!` are the same macro; the last
+    // segment is what names it.
+    if mac
+        .path
+        .segments
+        .last()
+        .is_none_or(|segment| segment.ident != "include")
+    {
+        return None;
+    }
+    Some(match literal_argument(&mac.tokens) {
+        Some(path) => Included::At(path),
+        None => Included::Unreadable,
+    })
+}
+
 /// The single string literal a macro was invoked with, if that is all it was
 /// invoked with: `include!("generated.rs")` but not
 /// `include!(concat!(env!("OUT_DIR"), "/generated.rs"))`.
@@ -905,20 +949,15 @@ impl<'ast> Visit<'ast> for Collector<'_, '_> {
         self.path_head(&node.path);
         // `include!` splices another file into this one. Its path is relative
         // to this file's directory; anything more elaborate than a literal
-        // (`concat!(env!("OUT_DIR"), ..)`) names a file we cannot find.
-        if node
-            .path
-            .segments
-            .last()
-            .is_some_and(|segment| segment.ident == "include")
-        {
-            match literal_argument(&node.tokens) {
-                Some(path) => {
-                    let at = self.dir.join(path);
-                    self.included_code.push((at, self.origin.context));
-                }
-                None => *self.hidden_code = Some(INCLUDE_REASON),
+        // (`concat!(env!("OUT_DIR"), ..)`) names a file we cannot find, and a
+        // file we cannot read may hold the only mention of a dependency.
+        match included_file(node) {
+            Some(Included::At(path)) => {
+                let at = self.dir.join(path);
+                self.included_code.push((at, self.origin.context));
             }
+            Some(Included::Unreadable) => *self.hidden_code = Some(INCLUDE_REASON),
+            None => {}
         }
         self.tokens(&node.tokens, false);
     }
@@ -1263,6 +1302,41 @@ mod tests {
                 .any(|w| w.contains("`platform_gated`") && w.contains("[cfg] target-os")),
             "the platform skip must name the matrix as the reason: {warnings:?}"
         );
+    }
+
+    /// The one reader both this module and [`crate::modtree`] go through, and
+    /// the three answers it has: not an `include!` at all, one naming a file
+    /// we can find, and one naming a file only a build knows. What the two
+    /// callers *do* with the third answer differs — this module skips the
+    /// package, the module tree changes nothing — and that difference is only
+    /// safe while they agree about which form is which.
+    #[test]
+    fn the_include_reader_tells_a_readable_path_from_one_only_a_build_knows() {
+        let read = |source: &str| {
+            let file: syn::File = syn::parse_str(source).expect("the test source parses");
+            let syn::Item::Macro(mac) = &file.items[0] else {
+                panic!("expected a macro invocation");
+            };
+            match included_file(&mac.mac) {
+                None => "not an include".to_string(),
+                Some(Included::At(path)) => format!("at {path}"),
+                Some(Included::Unreadable) => "unreadable".to_string(),
+            }
+        };
+
+        assert_eq!(read("include!(\"generated.rs\");"), "at generated.rs");
+        // `include!` is `core::include!`; a path spelling it out is the same
+        // macro and reads the same way.
+        assert_eq!(read("std::include!(\"generated.rs\");"), "at generated.rs");
+        assert_eq!(
+            read("include!(concat!(env!(\"OUT_DIR\"), \"/generated.rs\"));"),
+            "unreadable"
+        );
+        // `include_str!` splices in text rather than code, and
+        // `include_bytes!` is neither; only the last segment `include` is the
+        // macro this reads.
+        assert_eq!(read("include_str!(\"README.md\");"), "not an include");
+        assert_eq!(read("other!(\"generated.rs\");"), "not an include");
     }
 
     /// The usual `include!` target is generated into `OUT_DIR`, whose path is
