@@ -121,16 +121,30 @@
 //! Two attributions are load bearing enough to state on their own, because
 //! getting either wrong is what would sink the check.
 //!
-//! **`#[cfg(test)]` code is dev code, wherever it sits.** The unit tests of a
+//! **Test-confined code is dev code, wherever it sits.** The unit tests of a
 //! library live in the library target and still link the `[dev-dependencies]`,
 //! so a naive per-target split calls every dev-dependency used by a
 //! `#[cfg(test)] mod tests` misplaced — in essentially every crate that has
-//! one. [`crate::cfg::Gates::test_only`] answers "does this gate confine the
-//! item to a test build?" against the maximal matrix, and anything it answers
-//! yes for moves its whole subtree into the dev context. Judging it against
-//! the maximal matrix rather than the configured one is deliberate: where an
-//! item can be compiled is a property of the code, not of what the user asked
-//! to analyze.
+//! one. [`crate::cfg::Gates::test_only`] answers "is this item confined to a
+//! test build?" against the maximal matrix, and anything it answers yes for
+//! moves its whole subtree into the dev context. Judging it against the
+//! maximal matrix rather than the configured one is deliberate: where an item
+//! can be compiled is a property of the code, not of what the user asked to
+//! analyze.
+//!
+//! Two spellings confine an item and only one of them is a gate. `#[test]` and
+//! `#[bench]` carry no predicate at all, and rustc leaves the function they sit
+//! on out of every build that is not a test build — so a bare `#[test] fn` at
+//! module scope is dev code with no `#[cfg(test)]` anywhere near it.
+//! `clap_builder` names `static_assertions` from three of them and `winnow`
+//! names `term-transcript` from one, and until they counted, both of those
+//! correctly-declared dev-dependencies looked like crates the library itself
+//! uses. The boundary is narrow on purpose: only the built-in, single-segment
+//! attribute, and only where rustc honours it ([`crate::cfg::Site`]). An
+//! attribute macro Deadwood cannot expand — `#[tokio::test]`, or the
+//! `#[core::prelude::v1::test]` the built-in one is also spelled as — leaves a
+//! mention where it was written, which costs a finding rather than inventing
+//! one.
 //!
 //! **A doc comment attributes to nowhere.** Doc examples are compiled as
 //! doctests, and a doctest links the normal *and* the dev dependencies — so a
@@ -169,10 +183,14 @@
 //! is not placed, in any direction. And a `[dev-dependencies]` entry the
 //! library appears to name is left alone: such a manifest does not compile at
 //! all, so the likelier explanation is that we attributed the mention wrongly.
-//! The largest source of that mis-attribution is closed — an out-of-line
+//! Two sources of that mis-attribution are closed — an out-of-line
 //! `#[cfg(test)] mod tests;` now arrives here as the test code it is
-//! ([`ParsedFile::test_only`]) — but the direction stays unreported until it
-//! has evidence of its own rather than the absence of a known gap.
+//! ([`ParsedFile::test_only`]), and so does a bare `#[test] fn` — and with both
+//! closed the claim has **no candidates** anywhere in the local registry, where
+//! it had two before. What keeps it unreported is what is left rather than what
+//! was found: an attribute macro that confines a function without saying so in
+//! any syntax Deadwood reads is the same class of gap in a form no measurement
+//! over this corpus can rule out.
 //!
 //! # Entries that are load bearing without being named
 //!
@@ -209,6 +227,14 @@
 //!   parts only the test-confined declaration compiles. There is one file and
 //!   one answer, and this is the direction that misses findings instead of
 //!   inventing them ([`crate::modtree::resolve`]).
+//! - A function an *attribute macro* confines to a test build is read as
+//!   library code. `#[tokio::test]` expands to the built-in attribute and does
+//!   confine, but nothing before expansion tells it from an attribute macro
+//!   merely named `test`, so neither is matched ([`crate::cfg::Site`]). A
+//!   `[dependencies]` entry named only from such a function is therefore not
+//!   reported as belonging in `[dev-dependencies]` — and the same gap is why a
+//!   `[dev-dependencies]` entry the library appears to name is still not
+//!   reported at all.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;

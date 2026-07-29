@@ -1845,24 +1845,192 @@ wrong there and review found it.
 
 Closes [#37](https://github.com/rlorenzo/deadwood/issues/37).
 
+## Phase 20 — a `#[test]` function is test code (shipped)
+
+`cfg::Gates::test_only` asks "is this item confined to a test build?" and
+answered it by evaluating `cfg` attributes. `#[test]` is not a `cfg` — it carries
+no predicate and names no configuration axis — so the answer was `false` for it,
+and every mention inside a bare `#[test] fn` was read as ordinary library code.
+`src/deps.rs`'s module docs stated the rule as *"`#[cfg(test)]` code is dev code,
+wherever it sits"*, which was true and incomplete. This phase closes the gap:
+`#[test]` and `#[bench]` confine the function they sit on, so what such a
+function names is dev code with no `#[cfg(test)]` anywhere near it.
+
+**This phase is [#44](https://github.com/rlorenzo/deadwood/issues/44), which it
+filed, and it does not close
+[#42](https://github.com/rlorenzo/deadwood/issues/42), which was item 1 on the
+Next list.** #42 asks for a measurement before anything is built and names the
+answer it expects — zero `[dev-dependencies]` entries the library appears to
+name, which would be the argument for closing it. The measurement was taken and
+came back *blocking*. Over the 61 targets at `bc6625f`, with #42's branch added
+to `misplacement`, there are **two candidates and both are false positives**:
+
+| package | entry | `Contexts` | why it fires |
+| --- | --- | --- | --- |
+| `clap_builder-4.6.2` | `static_assertions` | `RUNTIME｜DEV` | 4 mentions: 3 in bare `#[test] fn`s at module scope (`src/parser/error.rs:57`, `src/error/mod.rs:943`, `src/builder/command.rs:5292`), 1 in a `#[cfg(test)] mod tests` |
+| `winnow-1.0.4` | `term-transcript` | `RUNTIME` | 1 mention, `src/combinator/debug/mod.rs:75` — a bare `#[test] fn` carrying `#[cfg(feature = …)]`/`#[cfg(unix)]` and no `#[cfg(test)]` |
+
+So zero survive, and both fired because the class of mis-attribution #42's "What
+has changed" section calls gone was not gone. #14 was one instance; this was
+another, and nothing had filed it. Verified against rustc rather than reasoned
+about: a bare `#[test] fn` naming a crate that does not exist compiles under
+`rustc --crate-type=lib` and fails under `rustc --test` with `E0433`.
+
+### The four decisions
+
+- **Which issue this is for, and it is one phase rather than two.** The
+  prerequisite ships alone and #42 was re-measured afterwards, because a
+  measurement over a known mis-attribution is worth nothing in either direction —
+  building #42 on top of `bc6625f` invents a finding in **2 of 35** registry
+  crates, and closing it on that count repeats the mistake its own text warns
+  against. Re-measured with #44 in, #42 has **zero candidates over all 61
+  targets**. It still is not closed, and the reason is in a comment on the issue
+  rather than in a silent edit: the zero is taken over a mis-attribution that is
+  *known* again, one decision 3 introduces deliberately. An attribute macro that
+  confines a function — `#[tokio::test]`, and the `#[core::prelude::v1::test]`
+  spelling rustc honours — is not matched, so such a function is still read as
+  library code. That is #42's own failure mode in a shape this corpus cannot
+  measure, because it contains no instance of it. #42's entry on the Next list
+  says so.
+- **Where the gate lives, and where it must not.** It lives in
+  `Gates::test_only`, because that is the question being asked and it has three
+  callers; a second predicate beside it is the drift phases 11, 15 and 18 each had
+  to clean up. It does **not** live in the `cfg` evaluator, and that was measured
+  rather than argued (see below): teaching `eval` that a test attribute means
+  `cfg(test)` makes `prune` delete `#[test] fn`s, which takes the only mention of
+  a dev-dependency and the only reference to an item out of every detector's view.
+  What is new beside the predicate is `cfg::Site`, because rustc honours a test
+  attribute on a free function and nowhere else — `#[test] mod tests { .. }` and
+  `#[test]` on an associated function are errors, and on a macro invocation it is
+  a warning with the spliced code compiled anyway. So every caller says which kind
+  of item it is asking about, and `src/modtree.rs`'s two callers — `mod`
+  declarations and `include!` sites — are `Site::Other` by construction rather
+  than by luck.
+- **What the rule matches, and the boundary is narrower than `resolve`'s.** The
+  bare, single-segment `test` and `bench`, with no arguments, on a `fn`.
+  `#[bench]` is in because `cargo bench` is no more a consumer of the crate than
+  `cargo test` is and rustc strips it identically; `#[should_panic]` is out
+  because on its own it confines nothing (rustc resolves the body of a
+  `#[should_panic] fn` under `--crate-type=lib`); a multi-segment path is out
+  because nothing before expansion tells `#[tokio::test]`, which does confine,
+  from an attribute macro merely named `test`, which need not. `crate::resolve`
+  matches the same two names on the *last* path segment, and that is not drift:
+  there an over-eager match keeps an item alive, here it moves a mention out of
+  the library and invents a finding. Two questions, two rules, and both module
+  docs now say why.
+- **The two directions were measured separately, because they move opposite
+  ways.** For the dependency check the change moves silence toward noise: fewer
+  entries look correctly placed, so more get reported. For `unused_pub_item` the
+  question was whether a reference from a `#[test] fn` stops counting — and the
+  answer is that it cannot, structurally: `crate::resolve` has its own rule for
+  `#[test]`/`#[bench]` (`TEST_ENTRY_POINT_ATTRS`, matched generously for the
+  reason above) and reads `ParsedFile::test_only` for nothing else, so this phase
+  changes no value it consumes. Counted rather than asserted: **zero**
+  `unused_pub_item` findings move, on any of the 61 targets.
+
+### What it found
+
+- **The two named cases stop being candidates, and nothing replaces them.** With
+  #44 in and #42's branch added, the corpus reports **zero** `[dev-dependencies]`
+  entries the library appears to name — down from two, both false positives.
+- **`misplaced_dependency` grows by three, all of them in the fixture.** Over the
+  61 targets the corpus goes from **243 findings to 246**, `misplaced_dependency`
+  from **5 to 8**, and every new one is a `depkinds` entry this phase added to
+  pin the behaviour. **Nothing moves in the 35 registry crates, and nothing in
+  Deadwood itself.** The registry crates' two affected entries are both
+  dev-dependencies, so their mentions moved from `RUNTIME` to `DEV` without
+  changing a verdict — which is the whole point of the phase and the reason its
+  output diff is so small.
+- **And nothing else moved at all.** 366 output artefacts were compared against a
+  binary built from `main` at `bc6625f` in a detached worktree — 61 targets ×
+  {text, `--json`} × {stdout, stderr, exit code}. **Two differ, and both are
+  `depkinds`'s own stdout.** Every other artefact is byte-identical, stderr and
+  exit codes included.
+- **The rejected route was built and run, which is how it was rejected.**
+  Teaching `eval_attrs` to read a test attribute as `cfg(test)` — so `compiled`,
+  `prune` and `gate_sites` all obey it — changes **nothing** under the default
+  matrix, because `cfg(test)` is `Either` there and nothing is pruned. Under
+  `[cfg] test = false` it moves **13 of the 61 targets**: **+19
+  `unused_dependency`**, **+18 `unused_pub_item`**, **−4
+  `misplaced_dependency`**, across ten registry crates (`anyhow`, `clap_builder`,
+  `proc-macro2`, `quote`, `serde_json`, `strsim`, `syn` twice, `winnow`, `zmij`)
+  and three fixtures — because a pruned `#[test] fn` was the only thing naming a
+  dev-dependency, or the only thing referencing an item. It is *consistent* with
+  what `test = false` already does to `#[cfg(test)]` code, and that is precisely
+  why it is a separate change with its own measurement rather than a detail of
+  this one.
+- **The generous boundary was measured too.** Matching the last path segment, as
+  `resolve` does, moves exactly **one** finding across all 61 targets, and it is
+  `depkinds`'s own `proc_macro_test_crate` — the boundary case this phase added.
+  Not one library file in the 35 registry crates names a dependency only from a
+  function carrying a multi-segment test attribute, so the narrow rule costs no
+  recall the corpus can see.
+- **The fixture is `depkinds`, extended rather than a new package.** Six entries:
+  a `[dependencies]` entry named only from a bare `#[test] fn` and one named only
+  from a `#[bench] fn` (both reported), a `[dev-dependencies]` entry named the
+  same way (silent — the `clap_builder`/`winnow` shape), a `[dependencies]` entry
+  named only from a `#[should_panic]` function and one named only from a
+  `#[harness::test]` function (both silent), and a `[build-dependencies]` entry
+  named only from a `#[test] fn` inside `build.rs` (silent: a build script has no
+  test harness, so its test functions are build-script code like the rest of the
+  file). A seventh entry, named from a bare `#[test] fn` *inside* the
+  `#[cfg(test)] mod tests`, is the regression guard for the nested case: the
+  module already moved its subtree, so it is reported exactly as it was before
+  `#[test]` counted for anything.
+
+Recall was checked by mutation: thirteen inversions — the test attribute not
+counted at all; `#[bench]` dropped from the list and `#[should_panic]` added to
+it; the match moved to the last path segment, and the bare-attribute requirement
+dropped so `#[test(flavor = "…")]` counts; the site ignored, so any item honours
+a test attribute; a `fn` asked about as if it were anything else, and each of the
+three callers that must answer `Site::Other` — an associated function, a `mod`
+declaration, an `include!` site — flipped to `Site::FreeFn`; the
+dead-by-construction guard dropped, so `#[test] #[cfg(feature = "nope")] fn`
+counts as test code; a test attribute read as a `cfg` predicate, which is the
+rejected route; and the runtime-only restriction on the context shift dropped.
+**All thirteen were caught by a named test**, twelve of them by a test this phase
+added.
+
+The thirteenth is the one worth naming, because it was invisible until a test was
+written for it. Dropping the restriction that only *runtime* code shifts is
+phase 5's rule rather than this phase's, and no test in the repository could see
+it: the only context it can wrongly move is the build script's, and nothing
+named a build-dependency from inside test-confined code. `#[test]` is a second
+spelling of exactly that shape, so
+`a_test_function_in_the_build_script_stays_build_script_code` now pins it from
+both sides — the unit test naming the claim, and a `build.rs` entry in `depkinds`
+that a mutated build reports as belonging in `[dev-dependencies]`. Phase 18's
+lesson stands: an invisible mutation is a reason to write the test.
+
+Closes [#44](https://github.com/rlorenzo/deadwood/issues/44).
+
 ## Next (sequenced, one slice at a time)
 
 1. **Report a `[dev-dependencies]` entry the library itself names**
    ([#42](https://github.com/rlorenzo/deadwood/issues/42)) — the mirror of the
-   claim phase 5 does make, and the one it deliberately refused. The check has
-   never said it, because the likeliest explanation used to be a
-   mis-attribution of ours rather than a manifest that cannot compile. The
-   largest of those, an out-of-line `#[cfg(test)] mod tests;`, is closed
-   ([#14](https://github.com/rlorenzo/deadwood/issues/14)) and phase 14 made
-   the two spellings of a `#[cfg(test)] mod` agree, so the direction is now
-   blocked on evidence of its own rather than on that gap. It was item 2 for
-   as long as the list has had two entries, and it is item 1 because everything
-   above it shipped or was measured and closed — not because anything new
-   argued for it. What it needs first is a measurement, and it is the first
-   item since phase 15 whose failure direction is a finding *invented*: a
-   package told its manifest is broken when it is not.
+   claim phase 5 does make, and the one it deliberately refused. It stays item 1
+   and it stays open, and what it is waiting on has changed: the measurement it
+   asks for has been taken twice. Against `bc6625f` it returned **two candidates
+   and both were false positives**, which is why phase 20 exists; with
+   [#44](https://github.com/rlorenzo/deadwood/issues/44) in it returns **zero
+   candidates over all 61 targets**. By the issue's own text zero is the argument
+   for closing it, and the reason that is not the conclusion is recorded in a
+   comment on the issue: the zero is again taken over a mis-attribution that is
+   known. A function an attribute macro confines — `#[tokio::test]`, or the
+   `#[core::prelude::v1::test]` spelling rustc honours — is still read as library
+   code, deliberately, because nothing before expansion distinguishes it from an
+   attribute macro merely named `test`. That is this issue's own failure mode in a
+   shape the corpus has no instance of, so it cannot be measured here: what the
+   direction needs next is a corpus that contains one, or a way to read such an
+   attribute that is not syntax. Its failure direction is unchanged and is why the
+   bar is where it is — a finding *invented*, a package told its manifest is
+   broken when it is not.
 
-No longer on this list: **a `use` alias claiming both namespaces**
+No longer on this list: **`#[test]` confining an item to a test build**
+([#44](https://github.com/rlorenzo/deadwood/issues/44)) — filed and shipped in
+phase 20, which is where it came from: #42's measurement could not mean anything
+while it was open, and it turned a missed `misplaced_dependency` into a reported
+one on its own account; **a `use` alias claiming both namespaces**
 ([#37](https://github.com/rlorenzo/deadwood/issues/37)) — shipped in phase 19,
 which also corrected three of its claims, including the one its headline
 example rests on: the *kind* already separates an unused re-export from an
