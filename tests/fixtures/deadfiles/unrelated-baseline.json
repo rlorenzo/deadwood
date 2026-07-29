@@ -1,0 +1,6 @@
+{
+  "findings": [
+    { "kind": "dead_file", "file": "src/attic/dropped.rs" },
+    { "kind": "dead_file", "file": "src/deleted.rs" }
+  ]
+}

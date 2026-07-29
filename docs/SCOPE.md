@@ -1342,42 +1342,201 @@ Closes [#30](https://github.com/rlorenzo/deadwood/issues/30), and files the
 residual it leaves: [#37](https://github.com/rlorenzo/deadwood/issues/37), a
 `use` alias claiming both namespaces because resolution does not say which.
 
+## Phase 17 — the identity a moved dead file does not have (measured; #32 closed, behaviour unchanged)
+
+Phase 13 made a baseline entry survive `git mv` for the three kinds that name an
+item. Four kinds have no identity a move preserves — `dead_file`, the two
+dependency kinds, `unsatisfiable_cfg` — and a **package directory** that moves
+defeats even the item kinds, because an entry's package is resolved by
+containment and a path in no package resolves to nothing.
+[#32](https://github.com/rlorenzo/deadwood/issues/32) asked for both. This phase
+measured both and closed it as working as intended. No behaviour changed; the
+boundary moved from prose into fixtures, and the design the next phase would
+start from is written down below rather than dismissed in a line.
+
+Every phase since 10 asked whether an unreachable defect was worth fixing. This
+one is the first where the defect is real, reachable, and reproducible in three
+commands, and the answer is still no. That is a different argument and it is
+made on different evidence.
+
+- **The corpus, re-measured, and which number this argues on.** Against `main`
+  at `2627c75` over the 35 registry crates in `~/.cargo/registry/src/*/*/`, the
+  20 fixtures and Deadwood itself — 56 targets — there are **464** findings, of
+  which **326 (70%)** name no module. That number is one crate's.
+  `windows-sys-0.61.2` is new to the lockfile and contributes **246 dead files
+  by itself**; excluding it leaves **208** findings and **80 (38%)** naming no
+  module — 40 `dead_file`, 31 `unused_dependency`, 5 `misplaced_dependency`, 4
+  `unsatisfiable_cfg` — which is the shape every phase since 13 has quoted. The
+  phase argues on **38%**, and the reason is not that 70% is inconvenient: all
+  246 of `windows-sys`'s dead files are **false**. Its `src/lib.rs` reaches its
+  whole module tree through `include!("Windows/mod.rs")`, which the module tree
+  does not follow, so every file under it is reported unreachable when it is
+  compiled. A population of invented findings cannot be evidence for how often a
+  *real* finding is moved, and quoting 70% without saying so would be the
+  misleading kind of measurement. Filed as its own defect
+  ([#39](https://github.com/rlorenzo/deadwood/issues/39)) — it is the largest
+  single source of false positives the corpus has ever shown, and it was found
+  by measuring for something else. The roadmap's "88 of 219" predates the
+  lockfile change and is replaced by the 80 of 208 above.
+- **Whether the package name is needed at all, which #32 assumed rather than
+  checked.** It is. A manifest-kind entry already records the kind, `file:
+  alpha/Cargo.toml` and `name: serde`; what is missing is which package declared
+  it, and every route to that from what is recorded is a guess rather than an
+  identity. Reading `[package] name` out of the recorded manifest is out by
+  construction — the file is gone, which is the premise. The directory basename
+  is a convention, not an identity, and it is exactly what a move may change
+  (`git mv alpha crates/core`). The `message` does name the package —
+  "…of package `alpha`" — and it is the one place the name is already written
+  down, but it is prose, it is optional on a hand-written entry, and phase 6
+  kept it out of the key precisely so that rewording a finding could not
+  un-baseline it; matching on it would undo that. One thing is free, and worth
+  recording for whoever picks this up: `unsatisfiable_cfg` already carries its
+  package internally — `GateSites::impossible` maps a site to `(package name,
+  gate)` and drops the name when it builds the `Finding` — so if a package name
+  were ever worth recording, one of the four kinds needs no new plumbing for it.
+  Four findings' worth, in this corpus.
+- **How often a package directory moves, versus a file inside one — the two
+  halves #32 treats as one feature.** A package directory only moves *within* a
+  workspace, and a single-package workspace has exactly one package whose
+  directory is the workspace root: the empty path, which contains every path, so
+  nothing can fall outside it. **Zero of the 36 real workspaces in the corpus —
+  the 35 registry crates and Deadwood itself — has a package outside the root.**
+  Only 7 of the 20 fixtures do, and every one was written to ask a multi-member
+  question. So the package half's population is not small, it is empty outside
+  synthetic input, and the item kinds' failure under it is a failure of a case
+  that does not occur here.
+  `every_path_is_inside_the_root_package_of_a_single_package_workspace` puts
+  that in the code rather than in this paragraph.
+- **The price of the field, measured rather than reasoned about.** Phase 16
+  settled `deny_unknown_fields` and it stays; what phase 16 also established is
+  that a door is per *reader version* and the thing that actually matters is
+  which *files* it reaches. `module` and `namespace` are written on exactly the
+  three item kinds, so a baseline recording only dead files, dependency entries
+  and gate sites carries neither and is portable across every Deadwood released.
+  A package name — or a content signal — belongs on the kinds that have neither,
+  so it is the first proposed field to reach that class. Measured against three
+  binaries: a `misplaced_dependency`-only baseline written by `main` is read and
+  applied by `main` and by the pre-`module` binary (`de25aa2~1`) alike, exit 0
+  both times; the same file with one extra key on each entry makes **both** exit
+  2 with ``unknown field `package` ``. That is the bill, and it is paid by every
+  project whose baseline records a dead file — which is most of them — to buy
+  back an event that produces noise.
+- **The direction of failure, which is the reason this is not a close-and-move-on.**
+  Every baseline phase so far moved from silence toward noise or held noise
+  steady. This one would move noise toward silence: a match that fires wrongly
+  suppresses a genuinely new finding. So the invariant on the table was
+  `tests/fixtures/moved/unmoved.toml`'s refusal, and **it is not traded**. What
+  the phase adds instead is the evidence for keeping it, in the fixture set:
+  `tests/fixtures/deadfiles/unrelated.toml` records a dead file that was deleted
+  beside one that still occurs, and reports a dead file that is new. That is one
+  leftover entry and one leftover finding — the exact one-to-one shape the
+  relocation pass accepts for an *item* — and for a dead file it is the whole of
+  the evidence there is: no name, no module, two paths that share nothing. A
+  content-free rule pairs them and silences the new finding. The fixture is what
+  being wrong looks like, and it sits beside `pair.toml`, where both files exist
+  and the exact key answers, so the difference between the two configs is only
+  whether the recorded path is still there.
+- **The `dead_file` half, with the design written down rather than dismissed.**
+  #32 says a content signal means "adding a hashing or similarity crate", and
+  that is not right: `std::collections::hash_map::DefaultHasher` needs no
+  dependency and exact content equality needs no hashing at all. The hard part
+  is elsewhere — **the old file is gone**, so the signal cannot be computed at
+  match time and has to have been recorded when the entry was written. That is a
+  field, on every `dead_file` entry, named for what it holds (`content_hash`: a
+  hash of the file's bytes, not a similarity measure and not the content). The
+  design, and each thing it has to survive:
+  - *An entry that predates it records nothing*, and nothing said cannot pair —
+    pairing on an absent signal is the guess the pass exists not to make. So the
+    field is **inert on every baseline already committed** and starts working
+    after the next `--write-baseline` — which is the command that re-records the
+    moved paths and fixes the problem by itself. `--prune-baseline` does not
+    backfill it: pruning drops entries and rewrites none.
+  - *Two identical dead files hash identically* — two empty `mod.rs` stubs, two
+    generated placeholders — and the pass must decline there, which the existing
+    one-to-one ambiguity guard already does once the signal is part of the
+    identity. Measured: **0 of the corpus's 286 dead files share content with
+    another dead file in the same workspace**, so the guard would be quiet, and
+    that cuts both ways — the rule would mostly work, and mostly is not the
+    standard this pass is held to.
+  - *A file that moved **and** was edited* has a different hash and falls back to
+    noise, which is correct and is also the common shape of a refactor.
+  Nothing in that is unsound. What it is not is worth a one-way door on the one
+  portable class of baseline, for a failure that is noise, when the activation
+  condition is the workaround. If a later phase has an argument the population
+  cannot supply — the way phase 16 had one — it starts here rather than from a
+  one-line dismissal.
+- **The workaround, and its real cost stated rather than waved at.**
+  `--prune-baseline` then `--write-baseline` re-accepts anything else that
+  regressed in between, which is a genuine safety cost and the strongest thing
+  #32 has going for it. The alternative is editing two or three paths by hand in
+  a format built to be hand-edited, and the run prints exactly which entries went
+  stale and which findings are new, so the edit is mechanical and reviewable in a
+  diff. That is what `README.md` documents.
+- **What it found.** Default output — no baseline file — is byte-identical
+  across all 56 pre-existing targets, text report, `--json`, stderr and exit
+  codes alike, against a binary built from `main` in a detached worktree: 112
+  runs, 0 differing. Nothing changed but tests, fixtures and prose, and the
+  measurement is here to prove that rather than to assert it.
+
+Recall was checked by mutation: fourteen inversions — a path in no package given
+a package anyway, and given one by falling back to the first package and by
+matching a package directory's basename against the recorded path (the two
+shapes an actual fix for #32 would take); the module dropped from the relocation
+identity, and the module and the name both dropped, which is what hands a dead
+file an identity; the root package stopped from holding anything; the package
+directories sorted shallowest first; the ambiguity guard loosened to take the
+first candidate; the entry side fed the whole baseline instead of the leftovers;
+the kind dropped from the identity; the namespace check on the proposed pairing
+removed; the second pass removed outright; and suppression and staleness each
+left un-relocated. **All fourteen were caught by a named test.** The honest
+attribution: **none is caught only by a test this phase added**, because phase 13
+already defended every one of these rules at the unit level — what this phase
+adds is the end-to-end pin, and the two mutations shaped like the fix #32
+actually proposes, which had one unit test between them before and now have a
+fixture as well. Reporting that the other way round would be claiming credit for
+phase 13's coverage.
+
+Closes [#32](https://github.com/rlorenzo/deadwood/issues/32) as working as
+intended, and files what measuring for it turned up:
+[#39](https://github.com/rlorenzo/deadwood/issues/39), an `include!`-ed module
+tree reported dead, 246 findings in one crate.
+
 ## Next (sequenced, one slice at a time)
 
-1. **Match a moved dead file, and a moved package's manifest entries**
-   ([#32](https://github.com/rlorenzo/deadwood/issues/32)) — phase 13's
-   residual, and the last of the filed entries because its failure mode is noise
-   and it has a workaround. 88 of the corpus's 219 findings name no module and
-   so have no identity a move preserves — `dead_file` (40), the manifest kinds
-   (44) and `unsatisfiable_cfg` (4); the issue's 86 of 213 was counted before
-   phases 14 and 15 added fixtures, and the fraction is unchanged at 40%. Two
-   halves with different prices: a package that moves keeps its *name*, so
-   recording that name on the entry would close the manifest kinds and extend
-   the item kinds across a package move. Phase 16 answered most of what that
-   costs and the answer is *not* the one #30 was weighing. Strictness stays, so
-   the field is still a one-way door; but a package name belongs on **every**
-   entry, including the dead files, so unlike `module` and `namespace` it would
-   make version-sensitive the one class of baseline that is portable today —
-   files recording only dead files, dependency entries and unsatisfiable gates.
-   That is a strictly larger bill than either additive field has paid, and it is
-   the whole of the question. `dead_file` and `unsatisfiable_cfg` have nothing
-   but a path and want a content signal, which is a different phase with its own
-   argument.
-2. **A `use` alias claims both namespaces, because resolution does not say which**
+1. **A `use` alias claims both namespaces, because resolution does not say which**
    ([#37](https://github.com/rlorenzo/deadwood/issues/37)) — phase 16's
-   residual, and the smallest of the open baseline gaps. A `pub use` records
-   `both`, which overlaps everything, so a reportable re-export of a braced
-   struct beside a `pub fn` of that name in one module — a pair that compiles —
-   still shares one key. Zero groups in the corpus are shaped that way, and the
-   fix is to resolve the target and record what *it* binds, which the symbol
-   table can already answer for a target inside the workspace and cannot for one
-   outside it.
+   residual, and now the last open gap in the baseline sequence: with #32 closed
+   it waits on nothing but a decision to build it. A `pub use` records `both`,
+   which overlaps everything, so a reportable re-export of a braced struct
+   beside a `pub fn` of that name in one module — a pair that compiles — still
+   shares one key. Zero groups in the corpus are shaped that way, and the fix is
+   to resolve the target and record what *it* binds, which the symbol table can
+   already answer for a target inside the workspace and cannot for one outside
+   it. Unlike every other baseline slice it needs no format change: the entries
+   affected already carry a `namespace`.
+2. **Follow an `include!`-ed module tree when deciding what a dead file is**
+   ([#39](https://github.com/rlorenzo/deadwood/issues/39)) — the largest
+   measured source of false positives the corpus has shown, and the first entry
+   on this list that is one. `windows-sys-0.61.2` reaches its whole module tree
+   through `include!("Windows/mod.rs")`, which `src/modtree.rs` does not follow,
+   so **246 files are reported dead in a crate where none is** — 246 of the
+   corpus's 286 `dead_file` findings, in one package. `src/deps.rs` already
+   reads a literal-path `include!` and already declines, out loud, on the
+   `concat!(env!("OUT_DIR"), ...)` form; what is missing is the module tree
+   using it. Found by phase 17 while measuring the corpus for #32.
 3. **Report a `[dev-dependencies]` entry the library itself names.** The
    check has never made that claim, because the likeliest explanation used to
    be a mis-attribution of ours rather than a manifest that cannot compile.
    The largest of those, an out-of-line `#[cfg(test)] mod tests;`, is closed
    ([#14](https://github.com/rlorenzo/deadwood/issues/14)), so the direction
    is now blocked on evidence of its own rather than on that gap.
+
+No longer on this list: **matching a moved dead file, or a moved package's
+entries** ([#32](https://github.com/rlorenzo/deadwood/issues/32)) — measured in
+phase 17 and closed as working as intended, because the fix costs a field on the
+one class of baseline that is portable across every release, converts a noisy
+failure into a silent one, and only starts working after the `--write-baseline`
+that already fixes it.
 
 Everything above except the last is filed; the roadmap and the issue list say
 the same thing, so neither can quietly rot.

@@ -120,9 +120,11 @@
 //!
 //! - **It cannot reach a finding with no module.** [`Relocation`] is built from
 //!   [`Key::relocation`], which answers `None` unless *both* the module and the
-//!   name are recorded. `dead_file` has neither, so the 39 dead files in the
-//!   corpus are structurally out of reach rather than excluded by a kind list
-//!   someone could extend. Two unrelated dead files are indistinguishable
+//!   name are recorded. `dead_file` has neither, so every dead file in the
+//!   corpus is structurally out of reach rather than excluded by a kind list
+//!   someone could extend — 40 of them, counting the corpus the way phase 17 of
+//!   `docs/SCOPE.md` does, with `windows-sys`'s 246 `include!` false positives
+//!   set aside. Two unrelated dead files are indistinguishable
 //!   without a content signal, and this pass does not have one — so it does not
 //!   pretend to. The two dependency kinds and `unsatisfiable_cfg` are out for
 //!   the same reason, and a manifest path moves only when a whole package does,
@@ -168,6 +170,50 @@
 //! rewritten by `--prune-baseline`, which drops entries and edits none.
 //! `--write-baseline` re-records everything from the current run and is how a
 //! baseline picks the new paths up.
+//!
+//! # The four kinds stay out, and that is now an answer rather than a residual
+//!
+//! [#32](https://github.com/rlorenzo/deadwood/issues/32) asked for the two
+//! events this pass declines — a `dead_file` that moved, and a package
+//! directory that moved, which defeats even the item kinds because
+//! [`Packages::holding`] resolves a recorded path by containment and a path in
+//! no package answers `None`. Phase 17 measured both and closed it as working
+//! as intended. What the code owes a reader is why, since "declines" and
+//! "cannot" read the same from inside:
+//!
+//! - **The event has no population for the package half.** A package directory
+//!   moves *within* a workspace, and a single-package workspace has one package
+//!   whose directory is the workspace root — the empty path, which contains
+//!   everything, so no recorded path can fall outside it
+//!   (`every_path_is_inside_the_root_package_of_a_single_package_workspace`).
+//!   Of the 36 real workspaces in the corpus — 35 registry crates and Deadwood
+//!   itself — **none** has a package outside the root, so the failure is not
+//!   expressible in any of them. Only the fixtures written to ask the question
+//!   have members in subdirectories.
+//! - **The dead-file half needs a signal recorded in the file, and the file is
+//!   the thing being upgraded.** The old file is gone by the time the pass
+//!   runs, so a content signal cannot be computed from a recorded path; it has
+//!   to have been *written* when the entry was, which is a new field on every
+//!   `dead_file` entry. That field would be absent from every baseline already
+//!   committed, so it could not pair anything in one of them — an absent signal
+//!   is nothing said, and pairing on nothing said is the guess this pass exists
+//!   not to make. It would begin working only after the next
+//!   `--write-baseline`, which is the command that re-records the moved paths
+//!   and so fixes the problem by itself. `--prune-baseline` would not do it:
+//!   pruning drops entries and rewrites none ([`Baseline::without`]).
+//! - **And the failure it would trade away is the one this pass keeps.** Today
+//!   a move produces noise — the finding is reported at its new location, the
+//!   entry is named stale, and `docs/SCOPE.md` phase 17 has the two-command
+//!   workaround. A rule that paired dead files would produce silence whenever
+//!   it was wrong, and `tests/fixtures/deadfiles/unrelated.toml` is what being
+//!   wrong looks like: a dead file deleted and an unrelated one added leave one
+//!   leftover on each side, which is the same evidence a move leaves.
+//!
+//! The full design for a recorded content signal — what the field would hold,
+//! what it would have to decline on, and what it would still get wrong — is
+//! written down in `docs/SCOPE.md` phase 17 rather than dismissed in a line, so
+//! that a later phase with an argument of its own starts from a design instead
+//! of from this paragraph.
 //!
 //! # An absent qualifier is not a value: the fallback, in every direction
 //!
@@ -312,11 +358,17 @@
 //! attribute, and `namespace_is_recorded_on_exactly_the_entries_module_is`
 //! keeps the property that bounds them.
 //!
-//! That bound is what a later field would have to earn separately. A *package
-//! name*, which [#32](https://github.com/rlorenzo/deadwood/issues/32) wants,
-//! belongs on every entry including the dead files — so it would make the
+//! That bound is what a later field would have to earn separately, and the
+//! first one to be asked did not. A *package name* — or a content signal —
+//! belongs on every entry including the dead files, so it would make the
 //! byte-portable baselines version-sensitive too, which is a strictly larger
-//! cost than either of these paid, and #32 has to weigh it on its own.
+//! cost than either of these paid. Phase 17 measured it rather than reasoning
+//! about it: a `misplaced_dependency`-only baseline written by this binary is
+//! read and applied by `main` and by the pre-`module` binary alike, and the
+//! same file with one extra key on each entry makes both of them exit 2 with
+//! ``unknown field `package` ``. That is the bill
+//! [#32](https://github.com/rlorenzo/deadwood/issues/32) was closed rather than
+//! pay.
 //!
 //! Relaxing the strictness would not fix any of it — the strict reader is the
 //! one already released — and it would cost the protection outright. "A setting
@@ -1740,6 +1792,94 @@ mod tests {
         let (kept, report) = applied_in(&baseline(&[recorded]), vec![now], &Packages::default());
         assert_eq!(reported(&kept), ["vendor/alpha/src/legacy.rs"]);
         assert_eq!(stale_of(&report).len(), 1, "{:?}", stale_of(&report));
+    }
+
+    /// The manifest half of the same event, which is the half
+    /// [#32](https://github.com/rlorenzo/deadwood/issues/32) called the cheap
+    /// one — and whose refusal has a *different cause* than the item kinds'
+    /// above, which is worth pinning because the issue's proposed fix turns on
+    /// it.
+    ///
+    /// For an item, a moved package directory takes the **package** away, and
+    /// that is the field [`Key::relocation`] cannot do without. A manifest
+    /// entry never gets that far: it names no module, so the identity is `None`
+    /// whatever the path resolves to. The second case below is what says so —
+    /// both paths resolve to package `alpha`, containment is satisfied on both
+    /// sides, and the pass still declines. Recording the package name would
+    /// therefore not be enough on its own for these two kinds: the identity #32
+    /// describes (package name, table, crate name) is not the identity this
+    /// pass compares, and a test that only moved the directory would pass with
+    /// [`Packages::holding`] entirely broken.
+    #[test]
+    fn a_manifest_entry_whose_package_directory_moved_is_not_relocated() {
+        let moved_out = Packages::new([(PathBuf::from("alpha"), "alpha".to_string())]);
+        // The same workspace with the *recorded* path inside a package too, so
+        // containment answers on both sides and cannot be what refuses.
+        let both_resolve = Packages::new([
+            (PathBuf::from("alpha"), "alpha".to_string()),
+            (PathBuf::from("vendor/alpha"), "alpha".to_string()),
+        ]);
+        for kind in [
+            FindingKind::UnusedDependency,
+            FindingKind::MisplacedDependency,
+        ] {
+            for (packages, when) in [(&moved_out, "in no package"), (&both_resolve, "in one")] {
+                let before = finding(kind, "vendor/alpha/Cargo.toml", None, Some("serde"));
+                let after = finding(kind, "alpha/Cargo.toml", None, Some("serde"));
+
+                let (kept, report) = applied_in(&baseline(&[before]), vec![after], packages);
+                assert_eq!(reported(&kept), ["alpha/Cargo.toml"], "{kind:?}, {when}");
+                assert_eq!(stale_of(&report).len(), 1, "{kind:?}, {when}");
+            }
+        }
+    }
+
+    /// What bounds that event's population, and the reason #32's package half
+    /// was measured at zero outside a synthetic fixture: a package directory
+    /// only moves *within* a workspace, and a single-package workspace has one
+    /// package whose directory is the workspace root. The root is the empty
+    /// path, every path is inside it, and no recorded path can fall outside
+    /// every package — so the failure above is not expressible there at all.
+    #[test]
+    fn every_path_is_inside_the_root_package_of_a_single_package_workspace() {
+        let packages = one_package();
+        for path in [
+            "src/lib.rs",
+            "Cargo.toml",
+            "vendor/alpha/src/legacy.rs",
+            "anywhere/at/all.rs",
+        ] {
+            assert_eq!(
+                packages.holding(Path::new(path)),
+                Some("only"),
+                "`{path}` is inside the root package"
+            );
+        }
+    }
+
+    /// The case a content-free rule for a moved dead file gets wrong, stated as
+    /// the pass sees it. A dead file that was deleted and an unrelated one that
+    /// appeared leave exactly one leftover entry and exactly one leftover
+    /// finding — the one-to-one shape a move has — and a dead file records
+    /// nothing but a path, so there is no evidence that separates the two
+    /// readings. Both stand: the finding is reported and the entry is stale.
+    #[test]
+    fn an_unrelated_dead_file_is_not_paired_with_a_baselined_one_that_is_gone() {
+        let staying = finding(FindingKind::DeadFile, "src/attic/dropped.rs", None, None);
+        let deleted = finding(FindingKind::DeadFile, "src/deleted.rs", None, None);
+        let arrived = finding(FindingKind::DeadFile, "src/spare.rs", None, None);
+
+        let (kept, report) = applied(
+            &baseline(&[staying.clone(), deleted]),
+            vec![staying, arrived],
+        );
+        assert_eq!(reported(&kept), ["src/spare.rs"]);
+        assert_eq!(stale_of(&report), ["src/deleted.rs: dead_file"]);
+        assert_eq!(
+            report.suppressed, 1,
+            "the dead file that stayed is matched by the exact key, which is \
+             what leaves one leftover on each side"
+        );
     }
 
     /// A finding the exact key already matched is not a candidate for anyone's

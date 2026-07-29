@@ -1,0 +1,8 @@
+# One of two dead files baselined, the other reported.
+#
+# Both files are where the baseline says they are, so the exact key answers and
+# the second pass never sees either side. This is the half that has always
+# worked, and it is here because the case below is only interesting against it:
+# the difference between the two configs is whether the recorded path still
+# exists, and nothing else.
+baseline = "pair-baseline.json"

@@ -298,6 +298,14 @@ deliberate:
   signal Deadwood does not compute, and a rule that appeared to handle them
   would be guessing. The two dependency kinds and `unsatisfiable_cfg` are out
   for the same reason; a manifest path moves only when a whole package does.
+  That boundary was re-examined and kept, with the measurement in
+  [`docs/SCOPE.md`](docs/SCOPE.md) phase 17: the fix needs a signal *recorded*
+  in the baseline, and that field would land on the one class of baseline that
+  is portable across every Deadwood released — a file recording only dead files,
+  dependency entries and gate sites carries no `module` and no `namespace`, so
+  every version reads it today. Adding the field ends that: it makes an older
+  Deadwood exit 2 on a file it read yesterday, to buy back a failure that is
+  noise.
 - **It never overrules the file.** Two items with the same kind, name and module
   in two different files are both matched by the key, so baselining one still
   leaves the other reported.
@@ -742,7 +750,17 @@ toolchain is pinned to `stable` with `clippy` and `rustfmt` via
   a move preserves and guessing would suppress a genuinely new finding.
   `--prune-baseline` then `--write-baseline` is the workaround, at the cost of
   re-accepting anything else that regressed in between. So is editing the two or
-  three paths by hand, which the format is meant to allow.
+  three paths by hand, which the format is meant to allow. This is a settled
+  decision rather than a pending one: the alternative was measured in phase 17
+  and costs a new field on every entry of the one baseline shape that is
+  portable across releases, to convert a noisy failure into a silent one.
+- A **whole package directory** moving defeats the second pass for the *item*
+  kinds too, not just the four above: an entry's package is resolved by
+  containment against the workspace's manifest directories, and a path in no
+  package resolves to nothing. It takes a workspace with a member outside the
+  root to happen at all — a single-package workspace's package directory *is*
+  the workspace root — and none of the 35 registry crates the corpus measures on
+  is one.
 - The second pass that survives a move is scoped to the package but not to the
   *target*, because no finding carries one and one file can belong to several.
   Within a package every target's crate root is spelled `crate`, so two binaries

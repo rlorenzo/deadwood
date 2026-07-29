@@ -1,0 +1,17 @@
+# The case any content-free rule for a moved `dead_file` gets wrong, which is
+# why there is no such rule.
+#
+# The baseline records two dead files. `src/attic/dropped.rs` still occurs and
+# is matched by the exact key, so it and its entry are both out of the second
+# pass. What is left is exactly one entry — `src/deleted.rs`, a dead file that
+# was deleted — and exactly one finding, `src/spare.rs`, a dead file that is
+# new. One of each is the shape the relocation pass accepts for an item, and for
+# a dead file it is the whole of the evidence there is: no name, no module, and
+# two paths that share nothing.
+#
+# So a rule that paired them would be matching on "there is one of each", and
+# the run it silenced would be the one where a developer deleted a dead file and
+# a different one appeared. Today both stand: the entry is stale and the finding
+# is reported, which is noise. That is the trade #32 asks to invert, and the
+# measurement in `docs/SCOPE.md` phase 17 is why it was not taken.
+baseline = "unrelated-baseline.json"
