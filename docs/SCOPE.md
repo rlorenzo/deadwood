@@ -1188,39 +1188,190 @@ alone.
 
 Closes [#28](https://github.com/rlorenzo/deadwood/issues/28).
 
+## Phase 16 — a baseline entry that names one of two same-named neighbours (shipped)
+
+Phase 12 made the match key `(kind, file, name, module)` and filed what it could
+not separate. `pub struct Group { .. }` and the `#[allow(non_snake_case)] pub fn
+Group(..)` beside it agree in all four, so one entry covered both and a third
+same-named item added to that module was suppressed before it existed. The key
+now carries the **namespace** the definition binds its name in, which is what
+Rust separates those two by.
+
+- **The decision was whether to build it, and it is the third zero in a row.**
+  #27 and #28 were measured at zero and built anyway, each on an argument that
+  was not the count — two spellings of one construct disagreeing. #30 has no
+  such argument: nothing here is inconsistent with itself, the key is simply
+  coarser than the language. So the frame is what the measurement can and cannot
+  see. Like #27 and unlike #28 the failure is a *missed* finding, and its trigger
+  — a third same-named item added to that module later — appears in no output, so
+  "zero findings today" is not evidence of harmlessness the way an output
+  measurement of a false-positive gap is. What decided it is the second
+  measurement below: the field turns out to make the key exactly as fine as
+  rustc's own rule for one module, so the defect is closed rather than narrowed,
+  and the cost is bounded by where the field is written. Closing #30 on the
+  population would have been legitimate; this is the stronger outcome for the
+  same one-way door.
+- **The population, re-measured against `SymbolTable`.** The corpus resolves to
+  **35** registry crates today rather than the 34 phases 12–15 measured on, plus
+  the fixtures and Deadwood itself. Across it there are **3254** reportable `pub`
+  definitions and **26** groups sharing a file and a name; the module path
+  separates **16** and cannot separate **10**. (Phase 15 counted 27 and 17 on a
+  corpus one crate older; the residual **10** is identical, item for item, and it
+  is the only half this phase turns on.) Those ten are the six the issue lists —
+  `serde_json`'s `Limb`, `POW5_LIMB` and `POW10_LIMB`, `anstream`'s `RawStream`,
+  `anstyle-parse`'s `DefaultCharAccumulator`, `clap_builder`'s two `pub use ...
+  as DefaultFormatter` — and four type-and-value pairs, `syn` 2.0.119 and 3.0.3's
+  `token::Group` and `tests/debug::Lite`. **The namespace separates four of four
+  and leaves six of six joined.** None of the ten produces a finding today.
+- **The type-and-value count is four, not six, and the two extra are not
+  reachable.** `syn`'s `pub mod parse;` at `src/lib.rs:474` and its `pub fn
+  parse` at `:909` are a genuine namespace collision, and both versions have it —
+  but a `mod` declaration is not *reportable* in Deadwood (`Def::reportable` is
+  `false` for every one of them, deliberately, since a `mod` is a leaf in the
+  edge graph), so it produces no finding, and a key needs two findings to be
+  shared. `a_pub_mod_is_not_reported_so_it_shares_no_key_with_a_same_named_fn`
+  puts that in the fixtures rather than in prose.
+- **The third value, and why it does not make the fix partial.** A `namespace`
+  cannot be one value per struct: of the **448** `pub` structs the corpus's
+  module trees reach, **315** are braced and in the type namespace alone, while
+  **76** tuple and **57** unit structs — **133**, 29.7% — bind a constructor
+  *value* of the same name too. So the field has three values, `Both` is one of
+  them, and matching is set **overlap** rather than equality: `Both` covers
+  either half, which is the forgiving direction and the one that does not
+  un-baseline a `pub struct Foo;` the day it gains a field. The obvious cost is
+  that a `Both` definition and a `Value` one in a module still share a key — and
+  that cost is zero, because rustc will not compile them together: `pub struct
+  Foo;` beside `pub fn Foo()` is E0428, "`Foo` must be defined only once in the
+  value namespace of this module", verified with `rustc` rather than asserted.
+  Every pair that *can* be compiled together is a pair the field separates, and
+  every pair it does not separate cannot be, which makes it two `cfg`-alternative
+  spellings of one item — the case one entry is right for. The measurement agrees
+  with the argument: not one of the four type-and-value pairs involves a tuple or
+  unit struct, and all six of the joined pairs are `cfg` alternatives.
+- **The half that must not move, verified rather than assumed.** All six
+  `cfg`-alternative pairs have both halves in one namespace — four type aliases
+  or traits (`Type`), two constants (`Value`), and `clap_builder`'s two `pub use`
+  aliases (`Both` on each side, since a `use` binds whatever its target does).
+  So none of them is split, and the fixture carries the same claim twice: two
+  `pub type Limb`, and a unit struct opposite a function of its name, which is
+  the `Both`-versus-`Value` shape written the only way that compiles.
+- **The one-way door, which is the real cost, and the answer phase 12
+  deferred.** `deny_unknown_fields` **stays**. The objection to it for a data
+  file is fair for a decoration, and this is not one: an entry whose `namespace`
+  a typo turned into an unknown field would fall back to the broad shared key and
+  suppress the neighbour the field exists to stop suppressing — silence, in the
+  exact place the phase is about, which is the same reasoning that kept `module`
+  strict. A door is per *reader version*, so this is genuinely a second door: a
+  Deadwood from between phase 12 and this one reads `module` and exits 2 on
+  ``unknown field `namespace` ``. What it is not is a second *class of file*.
+  Both fields are written on exactly the three kinds that name an item, so every
+  baseline carrying a `namespace` carries a `module` and was already unreadable
+  by anything older than phase 12, while a baseline recording only dead files,
+  dependency entries and unsatisfiable gates carries neither and round-trips
+  through all three. Measured, not read off the serde attribute: a `namespace`
+  baseline written by this binary makes the pre-`module` binary (built from
+  `de25aa2~1`) fail on ``unknown field `module` `` and `main` fail on ``unknown
+  field `namespace` ``, and a `misplaced_dependency` baseline written by this
+  binary is read and applied by all three.
+  `namespace_is_recorded_on_exactly_the_entries_module_is` keeps the property
+  that bounds it.
+- **Phase 13's relocation pass: the field is not in the identity, and it reaches
+  the pass twice anyway.** The relocation identity is still `(kind, package, module,
+  name)`. Putting the namespace in it would answer `None` for every entry in
+  every baseline already committed — a moved file would un-baseline for all of
+  them — and a forgiving comparison is not available there, because a relocation
+  is a hash key and "these might be the same definition" is not an equivalence.
+  What the field does reach is (1) the **ambiguity guard**, which now counts
+  distinct *keys* rather than distinct *files*: those were the same measurement
+  until this phase, since two keys sharing a relocation and a file agreed in
+  kind, name and module and so *were* one key, and counting files would have let
+  one entry for the struct pair with both findings the moment the file moved —
+  pass two quietly undoing what pass one was changed to do; and (2) a **check on
+  the one pairing** the identity proposes, so a struct that went away and a
+  function of its name that appeared are read as two events rather than one move.
+  An entry that records no namespace passes both, which is what keeps every
+  committed baseline relocating exactly as it did.
+- **Conservatism, in the direction the phase can only lose in.** Adding to the
+  key can only make entries match less, so the failure to avoid is a project that
+  upgrades, touches nothing, and finds its baseline quieter than yesterday. Every
+  fallback here is the forgiving one — an absent namespace is *nothing said*,
+  never a namespace of its own; `Both` overlaps both halves; the relocation guard
+  waves through an entry that records nothing — and
+  `tests/fixtures/namespace/legacy-baseline.json` is checked in as the previous
+  release wrote it: four entries naming modules and no namespaces, covering all
+  seven of the fixture's findings with no edit. The module and the namespace are
+  compared as a *pair* rather than as two independent sets, because an entry is
+  one claim and a finding that matched one entry's module and another entry's
+  namespace has been matched by neither.
+- **What it found.** Default output is byte-identical across all 55 targets — the
+  35 registry crates, the 19 pre-existing fixtures and Deadwood itself — text
+  report, stderr and exit codes alike, against a binary built from `main` in a
+  detached worktree. `--json` gained **131** lines across the same 55 and lost
+  none, every one of them a `namespace` key: one per finding that already carried
+  a `module`. The only behaviour that moved is in the fixture written to produce
+  it, where `token::Group`'s value half is reported once its type half is
+  recorded. One thing a reader sees change without changing their code: a stale
+  entry that records a namespace now names it, because two stale entries under
+  one name in one module were otherwise the same line printed twice.
+- **What it leaves.** A `use` alias claims `Both` because nothing here resolves
+  which namespaces its target occupies, so a reportable `pub use` of a braced
+  struct beside a `pub fn` of that name in one module — which compiles — still
+  shares a key. Zero occurrences in the corpus, and filed rather than guessed at
+  ([#37](https://github.com/rlorenzo/deadwood/issues/37)).
+
+Recall was checked by mutation: twenty-two inversions — the namespace dropped
+from the finding's key, from the entry's key and from what is written; the field
+recorded and never compared; an absent namespace made a value of its own and an
+absent module likewise; overlap replaced by equality and by "always true"; a
+struct classified by neither of its shapes, and a tuple struct made a value
+alone; a `use` alias made a type; a `mod` made a value; a `fn` made a type; the
+module and the namespace matched independently, and an entry made to match every
+recorded qualifier rather than any; the relocation guard reverted to counting
+files; the relocation pairing accepted without the namespace check; the namespace
+put *into* the relocation identity; the namespace left off the stale description;
+the absent namespace serialized as `null`; and the unknown-field strictness
+relaxed. **All twenty-two were caught by a named test.** Two are honestly not
+this phase's catch and are reported as such: the absent module is phase 12's rule
+and is caught by nine tests including phase 12's own, and the unknown-field
+strictness is phase 6's and is caught by three. One more is worth naming from the
+other side: "a `mod` declaration binds a value" is invisible in every output,
+because a `mod` is never reportable, and the only thing that catches it is the
+kind-to-namespace table test written for exactly that reason.
+
+Closes [#30](https://github.com/rlorenzo/deadwood/issues/30), and files the
+residual it leaves: [#37](https://github.com/rlorenzo/deadwood/issues/37), a
+`use` alias claiming both namespaces because resolution does not say which.
+
 ## Next (sequenced, one slice at a time)
 
-1. **Separate two definitions that share a file, a name and a module**
-   ([#30](https://github.com/rlorenzo/deadwood/issues/30)) — phase 12's
-   residual. `pub struct Group` beside `#[allow(non_snake_case)] pub fn
-   Group(..)` differ by Rust's namespaces, which the key does not model; two
-   `cfg`-alternative definitions of one item differ by nothing at all, and
-   suppressing those together is correct. Ten groups in the corpus are at risk
-   this way and none of them produces a finding today. Phase 13 did not move it:
-   the second pass compares a *relocation* built from the same fields, so a key
-   two definitions share is a relocation they share, and the argument there is
-   unchanged. Phase 15 re-measured the population against `SymbolTable`, since
-   phase 14 changed what counts as test code and the entry is owed a number
-   that is current: **27** groups of `pub` items share a file and a name, the
-   module path separates **17**, and the same **10** it cannot are the six
-   `cfg`-alternative pairs and the four type-and-value pairs the issue lists.
-   None produces a finding. Phase 14 could not have moved any of it —
-   `reportable` and `is_pub` do not read the test context — and the measurement
-   says so rather than the reasoning alone.
-2. **Match a moved dead file, and a moved package's manifest entries**
+1. **Match a moved dead file, and a moved package's manifest entries**
    ([#32](https://github.com/rlorenzo/deadwood/issues/32)) — phase 13's
-   residual, and last of the filed entries because its failure mode is noise
+   residual, and the last of the filed entries because its failure mode is noise
    and it has a workaround. 88 of the corpus's 219 findings name no module and
    so have no identity a move preserves — `dead_file` (40), the manifest kinds
    (44) and `unsatisfiable_cfg` (4); the issue's 86 of 213 was counted before
    phases 14 and 15 added fixtures, and the fraction is unchanged at 40%. Two
-   halves with different prices: a
-   package that moves keeps its *name*, so recording that name on the entry
-   would close the manifest kinds and extend the item kinds across a package
-   move — at the cost of a second additive field and a second one-way door,
-   which is the same bill #30 is weighing. `dead_file` and `unsatisfiable_cfg`
-   have nothing but a path and want a content signal, which is a different phase
-   with its own argument.
+   halves with different prices: a package that moves keeps its *name*, so
+   recording that name on the entry would close the manifest kinds and extend
+   the item kinds across a package move. Phase 16 answered most of what that
+   costs and the answer is *not* the one #30 was weighing. Strictness stays, so
+   the field is still a one-way door; but a package name belongs on **every**
+   entry, including the dead files, so unlike `module` and `namespace` it would
+   make version-sensitive the one class of baseline that is portable today —
+   files recording only dead files, dependency entries and unsatisfiable gates.
+   That is a strictly larger bill than either additive field has paid, and it is
+   the whole of the question. `dead_file` and `unsatisfiable_cfg` have nothing
+   but a path and want a content signal, which is a different phase with its own
+   argument.
+2. **A `use` alias claims both namespaces, because resolution does not say which**
+   ([#37](https://github.com/rlorenzo/deadwood/issues/37)) — phase 16's
+   residual, and the smallest of the open baseline gaps. A `pub use` records
+   `both`, which overlaps everything, so a reportable re-export of a braced
+   struct beside a `pub fn` of that name in one module — a pair that compiles —
+   still shares one key. Zero groups in the corpus are shaped that way, and the
+   fix is to resolve the target and record what *it* binds, which the symbol
+   table can already answer for a target inside the workspace and cannot for one
+   outside it.
 3. **Report a `[dev-dependencies]` entry the library itself names.** The
    check has never made that claim, because the likeliest explanation used to
    be a mis-attribution of ours rather than a manifest that cannot compile.
