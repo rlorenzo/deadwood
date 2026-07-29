@@ -1490,12 +1490,16 @@ fn dependencies_declared_in_the_wrong_table_are_reported() {
         names,
         // A normal entry only `tests/it.rs` names, one only `examples/demo.rs`
         // names — both link `[dev-dependencies]` — one only the out-of-line
-        // body of a `#[cfg(test)] mod` names, and a build-dependency the build
-        // script never touches.
+        // body of a `#[cfg(test)] mod` names, three named only from a function
+        // a test attribute confines, and a build-dependency the build script
+        // never touches.
         vec![
+            "bench_fn_crate",
             "example_only_crate",
+            "nested_test_fn_crate",
             "outline_test_crate",
             "stale_build_crate",
+            "test_fn_crate",
             "test_only_crate",
         ],
         "{:?}",
@@ -1520,6 +1524,19 @@ fn dependencies_declared_in_the_wrong_table_are_reported() {
         // The same, one level further down, through a child declaration that
         // carries no gate of its own.
         "shared_view_child_crate",
+        // A dev-dependency named only from a bare `#[test] fn` at module
+        // scope, which is the shape that made `clap_builder`'s
+        // `static_assertions` look like library code.
+        "test_fn_dev_crate",
+        // `#[should_panic]` on its own leaves the function in the library
+        // build, and an attribute macro Deadwood cannot expand says nothing
+        // about where its function is compiled.
+        "should_panic_crate",
+        "proc_macro_test_crate",
+        // A `[build-dependencies]` entry named only from a `#[test] fn` inside
+        // `build.rs`. A build script has no test harness, so its test
+        // functions are build-script code like the rest of the file.
+        "build_test_crate",
     ] {
         assert!(
             !analysis
@@ -1635,6 +1652,111 @@ fn a_test_only_module_in_its_own_file_is_still_test_code() {
     assert!(
         reported(&analysis, FindingKind::DeadFile).is_empty(),
         "every file here is declared by something: {:?}",
+        analysis.findings
+    );
+}
+
+/// `#[test]` confines a function to a test build as completely as
+/// `#[cfg(test)]` does, and it is not a `cfg` — so the gate machinery could not
+/// see it, and every mention inside a bare `#[test] fn` read as library code.
+///
+/// The finding that cost: a `[dependencies]` entry named only from one is a
+/// `[dev-dependencies]` entry with the wrong table written above it, and until
+/// now the check said nothing about it. Verified against rustc rather than
+/// assumed — `rustc --crate-type=lib` compiles a bare `#[test] fn` naming a
+/// crate that does not exist, and `rustc --test` fails on it with `E0433`.
+#[test]
+fn a_dependency_named_only_from_a_test_function_belongs_in_dev_dependencies() {
+    let analysis = analyze_fixture("depkinds");
+    let reported_names: Vec<&str> = reported(&analysis, FindingKind::MisplacedDependency)
+        .into_iter()
+        .map(|(_, name)| name)
+        .collect();
+
+    for entry in [
+        // A bare `#[test] fn` at module scope in `src/lib.rs`.
+        "test_fn_crate",
+        // `#[bench]`, which confines a function identically.
+        "bench_fn_crate",
+    ] {
+        assert!(
+            reported_names.contains(&entry),
+            "`{entry}` is named only from a function no non-test build compiles: {:?}",
+            analysis.findings
+        );
+    }
+}
+
+/// The direction the same answer has to move in for a `[dev-dependencies]`
+/// entry, and the reason this had to land before any claim about one: the
+/// manifest is correct, and the mention that made it look broken is test code.
+///
+/// Measured on the corpus, this is `clap_builder`'s `static_assertions` (four
+/// mentions, three of them in bare `#[test] fn`s) and `winnow`'s
+/// `term-transcript` (one, in a bare `#[test] fn` carrying `cfg` gates that
+/// hold outside a test build). Both were candidates for that claim before this;
+/// neither is now.
+#[test]
+fn a_dev_dependency_named_only_from_a_test_function_is_left_alone() {
+    let analysis = analyze_fixture("depkinds");
+    assert!(
+        !analysis
+            .findings
+            .iter()
+            .any(|f| f.name.as_deref() == Some("test_fn_dev_crate")),
+        "the entry is declared in the only table its mention can see: {:?}",
+        analysis.findings
+    );
+}
+
+/// The boundary. `#[should_panic]` accompanies a test attribute and confines
+/// nothing by itself — rustc resolves the body of a `#[should_panic] fn` under
+/// `--crate-type=lib` — and an attribute macro Deadwood cannot expand is a
+/// guess in both directions: `#[tokio::test]` really does confine, an attribute
+/// merely *named* `test` need not, and nothing before expansion tells them
+/// apart. So only the built-in, single-segment `test` and `bench` count, and
+/// everything else leaves a mention attributed exactly as it was.
+///
+/// [`crate::resolve`] matches the same two names the opposite way — on the last
+/// path segment, so `#[tokio::test]` is the test entry point it is — because
+/// there an over-eager match can only keep an item alive. Here it would move a
+/// mention out of the library and invent a finding against a manifest that
+/// compiles.
+#[test]
+fn an_attribute_deadwood_cannot_expand_does_not_confine_a_dependency_to_the_tests() {
+    let analysis = analyze_fixture("depkinds");
+    for entry in ["should_panic_crate", "proc_macro_test_crate"] {
+        assert!(
+            !analysis
+                .findings
+                .iter()
+                .any(|f| f.name.as_deref() == Some(entry)),
+            "`{entry}` is named by code the library compiles: {:?}",
+            analysis.findings
+        );
+    }
+}
+
+/// The nested case, which the module already answered: a `#[cfg(test)] mod
+/// tests` moves its whole subtree, so a bare `#[test] fn` inside one adds
+/// nothing and must not be a second, separate answer about the same mention.
+/// `nested_test_fn_crate` is reported here exactly as it was before `#[test]`
+/// counted for anything.
+#[test]
+fn a_test_function_inside_a_cfg_test_module_is_attributed_once() {
+    let analysis = analyze_fixture("depkinds");
+    let reported_names: Vec<&str> = reported(&analysis, FindingKind::MisplacedDependency)
+        .into_iter()
+        .map(|(_, name)| name)
+        .collect();
+    assert!(
+        reported_names.contains(&"nested_test_fn_crate"),
+        "{:?}",
+        analysis.findings
+    );
+    assert!(
+        !reported_names.contains(&"cfg_test_crate"),
+        "and the dev-dependency the same module names is still correctly placed: {:?}",
         analysis.findings
     );
 }
