@@ -33,5 +33,11 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
+      # Only the broken-link lint is denied: the module docs deliberately link
+      # to crate-private items, which rustdoc also warns about.
+      - name: Doc links
+        run: cargo doc --no-deps --document-private-items --quiet
+        env:
+          RUSTDOCFLAGS: -D rustdoc::broken_intra_doc_links
       - name: Test
         run: cargo test --all-targets

@@ -260,13 +260,26 @@ line says how many there were. The report is for what you have to act on, and
 reprinting the accepted list would reproduce exactly the noise the baseline was
 adopted to remove.
 
-**Matching survives line drift.** An entry is matched on kind, file, item name
-and the module the item is written in — not the line, which moves with every
-edit above it, and not the severity, which is a `deadwood.toml` decision:
-putting it in the key would mean that turning a check down from `deny` to
-`warn` un-baselines every finding of that kind at once. The module path is in
-the key for the same reason the line is not: it tells `alpha::twin` from
-`beta::twin` in one file, and it does not move when code above it does.
+**Matching survives line drift.** An entry is matched on kind, file, item name,
+the module the item is written in and the namespace it binds that name in — not
+the line, which moves with every edit above it, and not the severity, which is a
+`deadwood.toml` decision: putting it in the key would mean that turning a check
+down from `deny` to `warn` un-baselines every finding of that kind at once. The
+module path is in the key for the same reason the line is not: it tells
+`alpha::twin` from `beta::twin` in one file, and it does not move when code
+above it does.
+
+**And it tells a type from a value of the same name.** `pub struct Group { .. }`
+and the `#[allow(non_snake_case)] pub fn Group(..)` beside it share a kind, a
+file, a name *and* a module; Rust tells them apart by namespace, and so does the
+key. The namespace is `type`, `value`, or `both` — a unit or tuple struct binds
+a constructor value of its own name, and so does a `use` alias — and two entries
+match when the namespaces they stand for overlap, so `both` covers either half.
+That leaves two definitions sharing a key in exactly one case, and it is the
+case where one entry is right: Rust will not compile two definitions of one name
+in one module unless they are in different namespaces and neither is in both, so
+whatever the key still joins is two `#[cfg]`-alternative spellings of one item —
+one item, one place to open, one fix.
 
 **And it survives a moved file, for the kinds that name an item.** `git mv
 src/legacy.rs src/legacy/mod.rs` changes no code and no item, so the findings
@@ -304,29 +317,31 @@ keeps its drifted line. `--prune-baseline` drops entries and rewrites none;
 
 ```json
 { "kind": "unused_pub_item", "severity": "deny", "file": "src/lib.rs",
-  "line": 11, "name": "twin", "module": "crate::alpha",
+  "line": 11, "name": "twin", "module": "crate::alpha", "namespace": "value",
   "message": "pub fn `twin` is never referenced by any resolved path in this workspace" }
 ```
 
-Only the three item kinds have a module: a dead file is not an item, the two
-dependency kinds name an entry in a manifest, and an unsatisfiable gate names
-the site the gate is written at. **An entry with no `module` is not an entry in
-the crate root** — it is an entry that says nothing about modules, and modules
-are compared only when both sides name one. That is what keeps a baseline
-written by an older Deadwood matching exactly what it always matched, with no
-edit: the crate root is spelled `crate`, never omitted, so the two cases can
-never be confused.
+Only the three item kinds have a module and a namespace: a dead file is not an
+item, the two dependency kinds name an entry in a manifest, and an unsatisfiable
+gate names the site the gate is written at. **An entry with no `module` is not
+an entry in the crate root**, and one with no `namespace` is not an entry in
+some default namespace — each is an entry that says nothing about that field,
+and each field is compared only when both sides record it. That is what keeps a
+baseline written by an older Deadwood matching exactly what it always matched,
+with no edit: the crate root is spelled `crate`, never omitted, so the two cases
+can never be confused.
 
-The compatibility runs one way, and only as far as the field reaches. `module`
-is written only for the kinds that have one — `unused_pub_item`,
+The compatibility runs one way, and only as far as those fields reach. Both are
+written only for the kinds that have them — `unused_pub_item`,
 `unused_reexport`, `test_only_item` — so a baseline recording none of those
-carries no `module` anywhere and an older Deadwood still reads it. Record one
-item finding and it does not: that file makes an older Deadwood exit 2 with
-``unknown field `module` ``, on a file it read yesterday. That is the same
-strictness that turns a typo'd key into an error rather than a silently ignored
-one, and the reason a field that decides matching may not be quietly dropped.
-Downgrading after rewriting such a baseline means deleting the field by hand, or
-regenerating the file with the older binary.
+carries neither and every Deadwood that ever shipped still reads it. Record one
+item finding and it does not: that file makes a Deadwood older than the field it
+carries exit 2 with ``unknown field `module` `` or ``unknown field `namespace`
+``, on a file it read yesterday. That is the same strictness that turns a typo'd
+key into an error rather than a silently ignored one, and the reason a field
+that decides matching may not be quietly dropped. Downgrading after rewriting
+such a baseline means deleting the fields by hand, or regenerating the file with
+the older binary.
 
 **Fixed findings are reported, not forgotten.** An entry nothing matches any
 more is stale, and every run says so; `--prune-baseline` rewrites the file
@@ -342,9 +357,13 @@ Unused public items:
 1 finding(s) in workspace `/path/to/workspace`.
 
 Stale baseline entries in `deadwood-baseline.json` (no longer occur; rerun with --prune-baseline to drop them):
-  src/old.rs: unused_pub_item `finally_deleted`
+  src/old.rs: unused_pub_item `finally_deleted` in `crate::old` (value namespace)
 33 finding(s) suppressed by baseline `deadwood-baseline.json`.
 ```
+
+A stale line names the module and the namespace the entry recorded, when it
+recorded them, because two entries that differ only in those are two different
+items and the reader has to know which one to go and find.
 
 Two rules keep the file from lying:
 
@@ -357,15 +376,14 @@ Two rules keep the file from lying:
   in it — that is a project that has not adopted a baseline, and it behaves
   exactly like a Deadwood without the feature.
 
-One entry covers every finding that shares its key, so two items that share a
-file, a name *and* a module are still suppressed together — a `pub struct Group`
-beside a `pub fn Group(..)`, or two `#[cfg]`-alternative definitions of one item
-([#30](https://github.com/rlorenzo/deadwood/issues/30)). Within one package the
-module path is shared by every target's crate root, so two binaries or examples
-each defining `pub const X` at `crate` are one relocation identity as well: if
-one disappears and the other appears in the same run, the second pass reads it
-as a move. That shape occurs once in the 2659 reportable `pub` definitions of
-the corpus every phase measures on, and produces no finding today.
+One entry covers every finding that shares its key, so two `#[cfg]`-alternative
+definitions of one item are still suppressed together — which is what should
+happen, since they are one item with one fix. Within one package the module path
+is shared by every target's crate root, so two binaries or examples each defining
+`pub const X` at `crate` are one relocation identity as well: if one disappears
+and the other appears in the same run, the second pass reads it as a move. That
+shape occurs once in the reportable `pub` definitions of the corpus every phase
+measures on, and produces no finding today.
 
 ## Configuration
 
@@ -581,8 +599,8 @@ toolchain is pinned to `stable` with `clippy` and `rustfmt` via
    (`src/config.rs`); `public-api`, the dependency allowlist, and the `cfg`
    matrix are consulted by the detectors they belong to.
 8. **Baseline** — last of all, and after the configuration: recorded findings
-   are subtracted by kind, file and name, and recorded entries that matched
-   nothing are reported stale (`src/baseline.rs`).
+   are subtracted by kind, file, name, module and namespace, and recorded
+   entries that matched nothing are reported stale (`src/baseline.rs`).
 9. **Reporting** — grouped text or JSON (`src/report.rs`).
 
 ## Known limitations (tracked, not hidden)
@@ -709,15 +727,14 @@ toolchain is pinned to `stable` with `clippy` and `rustfmt` via
   than a `cfg(...)` expression is not modelled, so narrowing `target-os` does
   not reach its entries; they are judged as if always built.
 - A baseline entry suppresses *every* finding that shares its key. The item's
-  module is part of that key, so two same-named items in one file are two
-  entries — but two definitions sharing a file, a name *and* a module are not
-  ([#30](https://github.com/rlorenzo/deadwood/issues/30)). That is `pub struct
-  Group` beside `#[allow(non_snake_case)] pub fn Group(..)`, which Rust
-  separates by namespace and the key does not model, and two
-  `#[cfg]`-alternative definitions of one item, where covering both with one
-  entry is the right answer. Since the key deliberately ignores the line, there
-  is no way to say which occurrence is the new one, and pointing at a baselined
-  line would be a wrong finding rather than a missed one.
+  module and namespace are both part of that key, so two same-named items in one
+  file are two entries and so are a type and a value of one name in one module.
+  What is left sharing a key is two `#[cfg]`-alternative definitions of one item,
+  where covering both with one entry is the right answer — and nothing else, because
+  Rust does not compile two definitions of one name in one module unless the
+  namespaces separate them. Since the key deliberately ignores the line, there is
+  no way to say which occurrence is the new one, and pointing at a baselined line
+  would be a wrong finding rather than a missed one.
 - Moving a file un-baselines the findings in it for the four kinds that name no
   module: a `dead_file`, an `unsatisfiable_cfg` gate site, and a `Cargo.toml`
   entry of either dependency kind whose whole package moved. The item kinds

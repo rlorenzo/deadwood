@@ -1,0 +1,6 @@
+{
+  "findings": [
+    { "kind": "unused_pub_item", "file": "src/lib.rs", "line": 28, "name": "Limb", "module": "crate", "namespace": "type" },
+    { "kind": "unused_pub_item", "file": "src/lib.rs", "line": 39, "name": "Shape", "module": "crate", "namespace": "both" }
+  ]
+}

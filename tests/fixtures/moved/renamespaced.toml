@@ -1,0 +1,7 @@
+# The same file with one entry's namespace changed: `alpha`'s `gone` is recorded
+# as a type, and the `gone` that occurs is a `pub fn`. A struct that went away
+# and a function of its name that appeared are two events, not one move, so the
+# pairing the relocation identity proposes is refused — the finding is reported
+# and the entry is named stale, which is the noise this pass falls back to
+# whenever the evidence runs out.
+baseline = "renamespaced-baseline.json"

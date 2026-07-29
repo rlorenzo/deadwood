@@ -1,0 +1,31 @@
+# Test fixture: the namespace half of the baseline match key.
+#
+# Every shape the key has to tell apart, and every shape it must *not*, in one
+# small library:
+#
+# - a type and a value of one name in one module, which Rust compiles and which
+#   nothing but the namespace separates;
+# - two `cfg`-alternative spellings of one item, which are one item and must
+#   stay under one entry;
+# - a `cfg` alternative between a unit struct and a value, which is the pair the
+#   namespace field deliberately does *not* separate — a unit struct binds a
+#   value of its own name, so the two overlap;
+# - a `pub mod` beside a `pub fn` of one name, which is a namespace collision
+#   Deadwood never has to key on because a `mod` declaration is not reportable.
+#
+# Each `*.toml` beside this file names a `*-baseline.json` and is applied with
+# `--config`. There is deliberately no `deadwood.toml` and no
+# `deadwood-baseline.json` here: the unconfigured run is what the other cases
+# are measured against, and a discoverable baseline would quietly change it.
+[package]
+name = "namespace"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+# Declared so the gates below are satisfiable in some build and the
+# `unsatisfiable_cfg` check stays quiet. Deadwood's matrix is the union of every
+# build, so both halves of each alternative are analyzed.
+wide = []
+
+[workspace]

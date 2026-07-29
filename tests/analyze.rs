@@ -1665,7 +1665,14 @@ fn suppressed(analysis: &Analysis) -> usize {
 /// A copy of the `baseline` fixture in a scratch directory, so a test may
 /// write to it. The fixture itself is never modified by any test.
 fn scratch_fixture(test: &str) -> PathBuf {
-    let dir = scratch_copy("baseline", test);
+    scratch_unconfigured("baseline", test)
+}
+
+/// The same, for any fixture whose `*.toml` files each name a baseline: the
+/// copies come along with the tree and would only confuse a reader of a run
+/// that uses the default location.
+fn scratch_unconfigured(fixture: &str, test: &str) -> PathBuf {
+    let dir = scratch_copy(fixture, test);
     // The `*.toml` config files beside the fixture each name a baseline of
     // their own. These tests run without `--config` and against the default
     // location, so the copies come along only to confuse a future reader.
@@ -2866,4 +2873,319 @@ fn a_test_only_finding_is_baselineable_like_any_other() {
     assert_eq!(code, Some(0), "{stdout}");
     assert!(stdout.contains("No issues found."), "{stdout}");
     assert!(stdout.contains("9 finding(s) suppressed"), "{stdout}");
+}
+
+// ---------------------------------------------------------------------------
+// The namespace half of the match key (#30).
+// ---------------------------------------------------------------------------
+
+/// Every namespace a finding can name, as `(name, namespace)` in report order.
+fn namespaces(analysis: &Analysis) -> Vec<(&str, &str)> {
+    analysis
+        .findings
+        .iter()
+        .map(|f| {
+            (
+                f.name.as_deref().unwrap_or_default(),
+                match f.namespace {
+                    Some(deadwood::Namespace::Type) => "type",
+                    Some(deadwood::Namespace::Value) => "value",
+                    Some(deadwood::Namespace::Both) => "both",
+                    None => "",
+                },
+            )
+        })
+        .collect()
+}
+
+/// The population the whole phase is about, at the top: a braced struct and a
+/// function of its name in one module are two findings that agree in every
+/// other field the key looks at.
+#[test]
+fn a_type_and_a_value_of_one_name_in_one_module_are_two_findings() {
+    let analysis = analyze_fixture("namespace");
+    assert_eq!(
+        namespaces(&analysis),
+        vec![
+            ("Group", "type"),
+            ("Group", "value"),
+            ("Limb", "type"),
+            ("Limb", "type"),
+            ("Shape", "both"),
+            ("Shape", "value"),
+            ("parse", "value"),
+        ]
+    );
+    let groups: Vec<_> = analysis
+        .findings
+        .iter()
+        .filter(|f| f.name.as_deref() == Some("Group"))
+        .collect();
+    assert_eq!(groups.len(), 2);
+    assert_eq!(groups[0].file, groups[1].file);
+    assert_eq!(groups[0].module, groups[1].module);
+    assert_eq!(groups[0].kind, groups[1].kind);
+    assert_ne!(
+        groups[0].namespace, groups[1].namespace,
+        "and the namespace is the only field left that separates them"
+    );
+}
+
+/// The headline case of #30: baseline one of the two and the other is news.
+#[test]
+fn an_entry_naming_a_namespace_leaves_its_same_named_neighbour_reported() {
+    let analysis = analyze_configured("namespace", "separated.toml");
+    assert_eq!(
+        all_reported(&analysis),
+        vec![(
+            FindingKind::UnusedPubItem,
+            "src/lib.rs".to_string(),
+            "Group".to_string()
+        )]
+    );
+    assert_eq!(
+        analysis.findings[0].namespace,
+        Some(deadwood::Namespace::Value),
+        "the half that was not recorded"
+    );
+    assert!(analysis.has_denied(), "so it fails the run");
+    assert_eq!(suppressed(&analysis), 6);
+    assert!(
+        stale_keys(&analysis).is_empty(),
+        "and nothing went stale: {:?}",
+        stale_keys(&analysis)
+    );
+}
+
+/// The half that must not move, and the acceptance criterion #30 names: two
+/// `cfg`-alternative spellings of one item are in one namespace, so one entry
+/// still covers both. Splitting them would report a second finding about one
+/// item with one fix.
+#[test]
+fn two_cfg_alternative_definitions_of_one_item_stay_covered_by_one_entry() {
+    let analysis = analyze_configured("namespace", "alternatives.toml");
+    let limbs = namespaces(&analysis)
+        .into_iter()
+        .filter(|(name, _)| *name == "Limb")
+        .count();
+    assert_eq!(limbs, 0, "both halves of `Limb` are covered by one entry");
+}
+
+/// The decision `Namespace::Both` is: a unit or tuple struct binds a value of
+/// its own name, so it *overlaps* the value opposite it and one entry covers
+/// both. That is deliberate rather than a gap — the two cannot be compiled
+/// together (E0428), so what the key leaves joined is two spellings of one
+/// item, which is the case one entry is right for.
+#[test]
+fn a_unit_struct_and_the_value_it_alternates_with_stay_covered_by_one_entry() {
+    let analysis = analyze_configured("namespace", "alternatives.toml");
+    let shapes = namespaces(&analysis)
+        .into_iter()
+        .filter(|(name, _)| *name == "Shape")
+        .count();
+    assert_eq!(
+        shapes, 0,
+        "the `both` entry covers the value half as well as the struct"
+    );
+    assert_eq!(
+        all_reported(&analysis)
+            .into_iter()
+            .map(|(_, _, name)| name)
+            .collect::<Vec<_>>(),
+        vec!["Group", "Group", "parse"],
+        "and only the pairs nothing joins are left"
+    );
+    assert_eq!(suppressed(&analysis), 4);
+    assert!(stale_keys(&analysis).is_empty());
+}
+
+/// The upgrade path, from a file checked in as the previous release wrote it:
+/// every entry names a module, none names a namespace, and all seven findings
+/// stay suppressed with no edit. A round trip through one binary would prove
+/// nothing about the binary that wrote the file last week.
+#[test]
+fn a_baseline_written_before_the_namespace_field_still_matches() {
+    let recorded =
+        std::fs::read_to_string(fixtures().join("namespace/legacy-baseline.json")).unwrap();
+    assert!(recorded.contains("\"module\""), "{recorded}");
+    assert!(!recorded.contains("namespace"), "{recorded}");
+
+    let analysis = analyze_configured("namespace", "legacy.toml");
+    assert!(analysis.findings.is_empty(), "{:?}", analysis.findings);
+    assert!(!analysis.has_denied(), "so the run exits 0");
+    assert_eq!(
+        suppressed(&analysis),
+        7,
+        "four entries, and between them they cover both namespaces of every name"
+    );
+    assert!(
+        stale_keys(&analysis).is_empty(),
+        "{:?}",
+        stale_keys(&analysis)
+    );
+}
+
+/// A `mod` declaration is in the type namespace and is never reportable, so
+/// `pub mod parse;` beside `pub fn parse()` is a namespace collision that
+/// produces one finding rather than two — and no key for two findings to share.
+/// This is why the type-and-value population is the size it is.
+#[test]
+fn a_pub_mod_is_not_reported_so_it_shares_no_key_with_a_same_named_fn() {
+    let analysis = analyze_fixture("namespace");
+    let parses: Vec<_> = namespaces(&analysis)
+        .into_iter()
+        .filter(|(name, _)| *name == "parse")
+        .collect();
+    assert_eq!(parses, vec![("parse", "value")]);
+}
+
+/// The compatibility claim the second additive field rests on: it is written on
+/// exactly the entries `module` is written on, so no baseline gains a field
+/// that would newly break an older Deadwood — every file it appears in already
+/// carried a `module` that did.
+#[test]
+fn every_finding_that_names_a_module_names_a_namespace() {
+    let mut seen = 0;
+    for entry in std::fs::read_dir(fixtures()).unwrap() {
+        let path = entry.unwrap().path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Ok(analysis) = analyze(&path, None) else {
+            continue;
+        };
+        for finding in &analysis.findings {
+            assert_eq!(
+                finding.module.is_some(),
+                finding.namespace.is_some(),
+                "{finding:?}"
+            );
+            seen += finding.namespace.is_some() as usize;
+        }
+    }
+    assert!(seen > 0, "and some fixture has to produce one");
+}
+
+/// A relocation is the identity a move preserves, and the namespace is
+/// deliberately not part of it: an entry written before the field existed has
+/// none, and requiring one would un-baseline every moved file in every baseline
+/// already committed. An entry that *does* name one relocates exactly as its
+/// namespace-free twin beside it does.
+#[test]
+fn an_entry_naming_a_namespace_relocates_across_a_moved_file() {
+    let analysis = analyze_configured("moved", "namespaced.toml");
+    assert!(
+        analysis.findings.is_empty(),
+        "{:?}",
+        all_reported(&analysis)
+    );
+    assert_eq!(suppressed(&analysis), 6);
+    assert!(
+        stale_keys(&analysis).is_empty(),
+        "{:?}",
+        stale_keys(&analysis)
+    );
+}
+
+/// Where the namespace does reach the second pass: on the one pairing the
+/// identity proposes. A struct that went away and a function of its name that
+/// appeared are two events, not one move, so the pass declines — noise, which
+/// is what it falls back to whenever the evidence runs out.
+#[test]
+fn a_moved_entry_whose_namespace_disagrees_is_not_read_as_a_move() {
+    let analysis = analyze_configured("moved", "renamespaced.toml");
+    assert_eq!(
+        all_reported(&analysis),
+        vec![(
+            FindingKind::UnusedPubItem,
+            "alpha/src/legacy/mod.rs".to_string(),
+            "gone".to_string()
+        )]
+    );
+    assert_eq!(
+        stale_keys(&analysis),
+        vec!["alpha/src/legacy.rs: unused_pub_item `gone` in `crate::legacy` (type namespace)"]
+    );
+    assert_eq!(suppressed(&analysis), 5);
+}
+
+/// Both writing flags carry the new field through the file, and a baseline the
+/// tool wrote is a baseline it reads back with nothing changed.
+#[test]
+fn both_writing_flags_round_trip_the_namespace_of_every_entry() {
+    let dir = scratch_unconfigured("namespace", "namespace-round-trip");
+    let baseline = dir.join("deadwood-baseline.json");
+
+    let (code, _) = run_binary(&dir, &["--write-baseline"]);
+    assert_eq!(code, Some(0));
+
+    let recorded = |path: &Path| -> Vec<(String, String)> {
+        let file: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        file["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| {
+                (
+                    entry["name"].as_str().unwrap().to_string(),
+                    entry["namespace"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect()
+    };
+    assert_eq!(
+        recorded(&baseline),
+        vec![
+            ("Group".to_string(), "type".to_string()),
+            ("Group".to_string(), "value".to_string()),
+            ("Limb".to_string(), "type".to_string()),
+            ("Limb".to_string(), "type".to_string()),
+            ("Shape".to_string(), "both".to_string()),
+            ("Shape".to_string(), "value".to_string()),
+            ("parse".to_string(), "value".to_string()),
+        ]
+    );
+
+    // Drop the value half of `Group`, as a developer accepting the struct and
+    // not the shim beside it would. Only that half comes back.
+    let mut file: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&baseline).unwrap()).unwrap();
+    file["findings"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|entry| !(entry["name"] == "Group" && entry["namespace"] == "value"));
+    std::fs::write(&baseline, serde_json::to_string(&file).unwrap()).unwrap();
+
+    let (code, stdout) = run_binary(&dir, &[]);
+    assert_eq!(
+        code,
+        Some(1),
+        "the un-recorded half fails the run: {stdout}"
+    );
+    assert!(stdout.contains("1 finding(s) in workspace"), "{stdout}");
+    assert!(stdout.contains("src/lib.rs:19:"), "{stdout}");
+    assert!(
+        stdout.contains("6 finding(s) suppressed"),
+        "and the struct is still covered:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("Stale baseline entries"),
+        "nothing went stale:\n{stdout}"
+    );
+
+    let (code, stdout) = run_binary(&dir, &["--prune-baseline"]);
+    assert_eq!(code, Some(1), "{stdout}");
+    assert_eq!(
+        recorded(&baseline),
+        vec![
+            ("Group".to_string(), "type".to_string()),
+            ("Limb".to_string(), "type".to_string()),
+            ("Limb".to_string(), "type".to_string()),
+            ("Shape".to_string(), "both".to_string()),
+            ("Shape".to_string(), "value".to_string()),
+            ("parse".to_string(), "value".to_string()),
+        ],
+        "pruning re-serializes, and every surviving namespace survives it"
+    );
 }
