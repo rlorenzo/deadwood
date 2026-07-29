@@ -1,0 +1,16 @@
+# Test fixture: a chain of nine `include!`s, one deeper than either reader
+# follows. Not the corpus's shape — `windows-sys` has exactly one `include!`
+# — but the guard both readers need, and the place their shared
+# `MAX_INCLUDE_DEPTH` is pinned to one value.
+#
+# Written to compile; rustc has no such cap and builds all nine:
+#
+#   cargo build --manifest-path tests/fixtures/includedeep/Cargo.toml
+#
+# The empty [workspace] table keeps it out of any enclosing workspace.
+[package]
+name = "includedeep"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]

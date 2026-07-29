@@ -1,0 +1,17 @@
+# Test fixture: the `include!` form Deadwood cannot follow — a path only the
+# build knows. `serde` and `serde_core` in the corpus are written this way,
+# and between them they account for 36 of its dead files, which must go on
+# being reported: a file we could not read is not evidence that anything
+# beside it is alive.
+#
+# Written to compile, build script and all:
+#
+#   cargo build --manifest-path tests/fixtures/includegen/Cargo.toml
+#
+# The empty [workspace] table keeps it out of any enclosing workspace.
+[package]
+name = "includegen"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]

@@ -3510,3 +3510,72 @@ fn an_include_the_matrix_rules_out_is_not_followed() {
          the two files that were dead before still are"
     );
 }
+
+/// A chain of `include!`s is followed as deep as `src/deps.rs` follows one and
+/// no deeper, because one crate read to two depths is two readers that
+/// disagree about the same file. Nine deep is not the corpus's shape —
+/// `windows-sys` has exactly one `include!` — it is the guard.
+///
+/// Stopping short costs a finding rather than inventing an exemption: the file
+/// past the cap goes on being reported, which is the direction this phase's
+/// risk runs in.
+#[test]
+fn an_include_chain_is_followed_as_deep_as_the_dependency_reader_follows_one() {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/includedeep");
+    let analysis = analyze(&fixture, None).expect("analysis should succeed on the fixture");
+
+    assert_eq!(
+        reported(&analysis, FindingKind::DeadFile),
+        vec![("src/chain/i9.rs".to_string(), "")],
+        "eight `include!`s deep is followed, the ninth is not"
+    );
+    // The other reader stops in the same place, and says so out loud.
+    assert!(
+        analysis.warnings.iter().any(|w| {
+            w.contains("unused-dependency check skipped")
+                && w.contains("code is pulled in with `include!`")
+        }),
+        "the cap is one constant, and `src/deps.rs` warns on it: {:?}",
+        analysis.warnings
+    );
+}
+
+/// `include!(concat!(env!("OUT_DIR"), "/generated.rs"))` names a file only a
+/// build knows. `src/deps.rs` already answers that construct — skip with a
+/// warning rather than guess — and the module tree adds no second policy for
+/// it: no warning of its own, and no exemption either.
+///
+/// The direction matters. A package whose `include!` we cannot read must keep
+/// reporting the dead files it reports today, not start suppressing them on
+/// the suspicion that the file we could not read might name them. `serde` and
+/// `serde_core` are written this way and contribute 36 of the corpus's dead
+/// files.
+#[test]
+fn an_include_whose_path_only_a_build_knows_still_reports_the_packages_dead_files() {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/includegen");
+    let analysis = analyze(&fixture, None).expect("analysis should succeed on the fixture");
+
+    assert_eq!(
+        reported(&analysis, FindingKind::DeadFile),
+        vec![("src/orphan.rs".to_string(), "")],
+        "an unreadable `include!` spares nothing"
+    );
+    for check in ["unused-dependency", "misplaced-dependency"] {
+        assert!(
+            analysis.warnings.iter().any(|w| {
+                w.contains(&format!("{check} check skipped"))
+                    && w.contains("code is pulled in with `include!`")
+            }),
+            "the skip is surfaced rather than silent: {:?}",
+            analysis.warnings
+        );
+    }
+    assert!(
+        !analysis
+            .warnings
+            .iter()
+            .any(|w| w.contains("dead-file check skipped")),
+        "and it is not a reason to stop reporting dead files: {:?}",
+        analysis.warnings
+    );
+}
