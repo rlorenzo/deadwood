@@ -1,0 +1,8 @@
+{
+  "findings": [
+    { "kind": "test_only_item", "file": "src/shared/inner.rs", "line": 900, "name": "Braced", "module": "crate::shared::inner", "namespace": "type" },
+    { "kind": "test_only_item", "file": "src/shared/inner.rs", "line": 901, "name": "Sole", "module": "crate::shared::inner", "namespace": "both" },
+    { "kind": "test_only_item", "file": "src/shared.rs", "line": 902, "name": "Braced", "module": "crate::shared", "namespace": "value" },
+    { "kind": "test_only_item", "file": "src/shared.rs", "line": 903, "name": "Sole", "module": "crate::shared", "namespace": "both" }
+  ]
+}
