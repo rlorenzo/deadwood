@@ -1,0 +1,34 @@
+# Test fixture: what a `use` alias binds, which is whatever its target binds.
+#
+# Phase 16 gave a baseline entry the namespace its item binds its name in, and
+# left one value it could not answer: an alias's namespace is in another item,
+# and nothing had resolved that when the definition was indexed. Every alias
+# recorded `both`, which overlaps everything.
+#
+# Two modules, for the two halves of the claim:
+#
+# - `hidden` is one dead re-export per answer the resolving pass can give — a
+#   braced struct, a unit struct, a fn, a module, a name binding a type *and* a
+#   value, a group, and the two refusals that keep `both` — so the table is
+#   visible in the report rather than only in a unit test;
+# - `shared` is the collision itself, on `test_only_item`. That is the one
+#   finding kind a re-export and a definition of its name share, so it is the
+#   one place the namespace is all that separates them: `unused_reexport` and
+#   `unused_pub_item` are two kinds and so two keys whatever the namespace says.
+#
+# Each `*.toml` beside this file names a `*-baseline.json` and is applied with
+# `--config`. There is deliberately no `deadwood.toml` and no
+# `deadwood-baseline.json` here: the unconfigured run is what the other cases
+# are measured against, and a discoverable baseline would quietly change it.
+[package]
+name = "aliases"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+# Declared so the alternatives in `shared` are satisfiable in some build and the
+# `unsatisfiable_cfg` check stays quiet. Deadwood's matrix is the union of every
+# build, so both halves are analyzed; `cargo check` compiles the `not(wide)` one.
+wide = []
+
+[workspace]

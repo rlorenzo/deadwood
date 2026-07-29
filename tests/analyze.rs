@@ -3579,3 +3579,183 @@ fn an_include_whose_path_only_a_build_knows_still_reports_the_packages_dead_file
         analysis.warnings
     );
 }
+
+// ---------------------------------------------------------------------------
+// What a `use` alias binds (#37).
+// ---------------------------------------------------------------------------
+
+/// Every finding of `kind` in the fixture, as `(name, namespace)` in report
+/// order.
+fn named_namespaces(analysis: &Analysis, kind: FindingKind) -> Vec<(&str, deadwood::Namespace)> {
+    analysis
+        .findings
+        .iter()
+        .filter(|finding| finding.kind == kind)
+        .map(|finding| {
+            (
+                finding.name.as_deref().unwrap_or_default(),
+                finding
+                    .namespace
+                    .expect("an item finding names a namespace"),
+            )
+        })
+        .collect()
+}
+
+/// The resolving table end to end: one dead re-export per shape of target, and
+/// the namespace each one records printed in the report rather than only
+/// asserted in a unit test.
+///
+/// Before this phase every line here said `both`.
+#[test]
+fn a_reported_re_export_names_the_namespaces_its_target_binds() {
+    use deadwood::Namespace::{Both, Type, Value};
+
+    let analysis = analyze_fixture("aliases");
+    assert_eq!(
+        named_namespaces(&analysis, FindingKind::UnusedReexport),
+        vec![
+            // A braced struct is a type alone, and a rename does not change it.
+            ("Braced", Type),
+            ("Renamed", Type),
+            // A unit struct binds a constructor value of its own name.
+            ("Sole", Both),
+            ("plain", Value),
+            // A module, which is the corpus's only narrowing instance.
+            ("sub", Type),
+            // A name binding a type *and* a value: the union, not a pick.
+            ("Twinned", Both),
+            // A group is a question per leaf, and these two share a line.
+            ("Listed", Type),
+            ("tallied", Value),
+            // The two refusals, which keep the value every alias had before.
+            ("Outside", Both),
+            ("Veiled", Both),
+        ]
+    );
+}
+
+/// The corpus's only instance, and the only finding this phase changes: `pub
+/// use tucked::inner;` in the `globs` fixture, which names a module.
+///
+/// It is here rather than only in the new fixture because it is the one place
+/// in the corpus where the phase moves a value a user could already have
+/// baselined.
+#[test]
+fn the_one_re_export_of_a_module_in_the_corpus_narrows_to_the_type_namespace() {
+    let analysis = analyze_fixture("globs");
+    let inner: Vec<_> = named_namespaces(&analysis, FindingKind::UnusedReexport)
+        .into_iter()
+        .filter(|(name, _)| *name == "inner")
+        .collect();
+    assert_eq!(inner, vec![("inner", deadwood::Namespace::Type)]);
+}
+
+/// The headline, on the one finding kind that has this collision.
+///
+/// `unused_reexport` and `unused_pub_item` are two kinds and so two keys
+/// whatever the namespace says, so a `pub use` and a `pub fn` of one name are
+/// already separate entries there. `test_only_item` is the single kind both are
+/// reported under — and there the alias claiming `both` overlapped the
+/// function's `value`, so an entry naming one covered the other.
+///
+/// The entry records the *value* half; the re-export beside it binds a braced
+/// struct, so it is in the type namespace and is news. Under the release before
+/// this phase the same file and the same fixture report nothing at all.
+#[test]
+fn an_entry_naming_the_value_half_leaves_the_re_export_beside_it_reported() {
+    let analysis = analyze_configured("aliases", "collision.toml");
+    assert_eq!(
+        all_reported(&analysis),
+        vec![(
+            FindingKind::TestOnlyItem,
+            "src/shared.rs".to_string(),
+            "Braced".to_string()
+        )]
+    );
+    assert_eq!(
+        analysis.findings[0].namespace,
+        Some(deadwood::Namespace::Type),
+        "the alias binds what its target binds, and its target is braced"
+    );
+    assert!(
+        analysis.findings[0]
+            .message
+            .contains("`pub use` re-export of `Braced`"),
+        "and it is the re-export rather than the struct: {}",
+        analysis.findings[0].message
+    );
+    assert_eq!(suppressed(&analysis), 5);
+    assert!(
+        stale_keys(&analysis).is_empty(),
+        "{:?}",
+        stale_keys(&analysis)
+    );
+}
+
+/// The half that must not move, and the shape four of the corpus's five
+/// re-export findings have: an alias to a *unit* struct really does bind both
+/// namespaces, so one entry still covers the value opposite it.
+///
+/// A regression that narrowed every alias — to its target's type half, say —
+/// would report `Sole` here and un-baseline a re-export already accepted, which
+/// is the loud failure the whole design is shaped around.
+#[test]
+fn a_re_export_of_a_unit_struct_stays_covered_by_one_entry() {
+    let analysis = analyze_configured("aliases", "collision.toml");
+    assert!(
+        !analysis
+            .findings
+            .iter()
+            .any(|finding| finding.name.as_deref() == Some("Sole")),
+        "the `both` entry covers the function opposite the alias: {:?}",
+        all_reported(&analysis)
+    );
+}
+
+/// The upgrade path, from a file the previous release wrote with
+/// `--write-baseline` and checked in unedited.
+///
+/// Twelve of its entries record `both` for an alias and seven of those are
+/// aliases this phase narrows — so the file is exactly the case that would bite
+/// if narrowing were not absorbed by the overlap rule. Nothing is stale and
+/// nothing is reported: a recorded `both` covers a reported `type` or `value`,
+/// which is why this phase can change what the tool writes without touching
+/// what it already accepted.
+#[test]
+fn a_baseline_written_before_aliases_resolved_still_matches() {
+    let recorded: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(fixtures().join("aliases/legacy-baseline.json")).unwrap(),
+    )
+    .unwrap();
+    let entry = recorded["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["name"] == "sub")
+        .expect("the module re-export is in the file");
+    assert_eq!(
+        entry["namespace"], "both",
+        "the old binary could say nothing else about an alias"
+    );
+
+    let analysis = analyze_configured("aliases", "legacy.toml");
+    assert_eq!(
+        named_namespaces(&analyze_fixture("aliases"), FindingKind::UnusedReexport)
+            .into_iter()
+            .find(|(name, _)| *name == "sub"),
+        Some(("sub", deadwood::Namespace::Type)),
+        "and this binary says `type` about the same alias"
+    );
+    assert!(
+        analysis.findings.is_empty(),
+        "which changes nothing about what the file covers: {:?}",
+        all_reported(&analysis)
+    );
+    assert_eq!(suppressed(&analysis), 23);
+    assert!(
+        stale_keys(&analysis).is_empty(),
+        "{:?}",
+        stale_keys(&analysis)
+    );
+}

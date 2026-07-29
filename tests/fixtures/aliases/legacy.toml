@@ -1,0 +1,20 @@
+# A baseline as the release before this phase wrote it, with `--write-baseline`
+# and no edit afterwards. Every alias entry in it records `both`, because that
+# is all an alias could record then — including the two the resolving pass now
+# narrows, `crate::shared`'s `Braced` (to `type`) and `crate::hidden`'s `sub`,
+# `Braced`, `Renamed`, `plain`, `Listed` and `tallied`.
+#
+# All of them still match, and that is the upgrade path: a recorded `both`
+# overlaps a reported `type` or `value`, so narrowing what the tool writes
+# cannot un-baseline what a user already accepted. Nothing here is stale either
+# — a stale line would mean an entry stopped matching, which is the same failure
+# read from the other end.
+#
+# Checked in as the older binary wrote it rather than round-tripped through this
+# one, which would prove nothing about the file a project committed last week.
+baseline = "legacy-baseline.json"
+
+[severity]
+# On, so the collision in `shared` is in the report and so in the file: it is
+# the one kind whose entries this phase can change the meaning of.
+test_only_item = "deny"

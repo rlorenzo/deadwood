@@ -1,0 +1,33 @@
+# The collision this phase is about, and the pair it must leave alone, in one
+# run.
+#
+# `test_only_item` is the single finding kind a re-export and a definition of
+# its name are both reported under — `unused_reexport` and `unused_pub_item` are
+# two kinds and so two keys whatever the namespace says — so `crate::shared` is
+# the one place where the namespace is the whole of what tells a `pub use` from
+# the `pub fn` beside it.
+#
+# Four entries, six findings, and the direction is deliberate:
+#
+# - `Braced` is recorded in the *value* namespace, which is the `pub fn Braced()`
+#   and not the `pub use inner::Braced;` above it. The alias binds a braced
+#   struct, so it is in the type namespace, so it is *news* and is reported.
+#   Recorded the other way round this file would prove nothing: an entry naming
+#   the type half is covered by an alias claiming `both` just as well as by one
+#   that narrowed, and a run against the release before this phase would answer
+#   identically. Recorded this way it does not — an alias claiming `both`
+#   overlaps `value` and the re-export vanishes.
+# - `Sole` is recorded in *both*, which is what its target binds: a unit
+#   struct's constructor is a value of its own name. So the one entry covers the
+#   `pub fn Sole()` opposite it as well, and that is right — the two are `cfg`
+#   alternatives, one item with one fix. This is the shape four of the corpus's
+#   five re-export findings have, so it is the one a regression hits first.
+#
+# The other two kinds are off so this file is about one collision rather than
+# about the seventeen dead re-exports in `hidden`.
+baseline = "collision-baseline.json"
+
+[severity]
+unused_pub_item = "off"
+unused_reexport = "off"
+test_only_item = "deny"

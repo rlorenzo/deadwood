@@ -1672,41 +1672,213 @@ defend, because nothing else does.
 
 Closes [#39](https://github.com/rlorenzo/deadwood/issues/39).
 
+## Phase 19 — what a `use` alias actually binds (shipped)
+
+Phase 16 put the namespace a definition binds its name in into the baseline
+match key and left one value it could not answer. An alias's namespace is not in
+its own syntax — it is whatever the path it names binds — and `describe` decides
+a namespace from the `syn::Item` alone while the table is still being filled. So
+`DefKind::Import` and `DefKind::Reexport` recorded `Both`, which overlaps
+everything. A second pass over alias definitions, after the table exists, now
+walks each target with the same walker the marking pass uses and records what
+the target binds. Everything it cannot be certain of keeps `Both`.
+
+**Three of [#37](https://github.com/rlorenzo/deadwood/issues/37)'s claims were
+wrong and one was stale. All four were checked before anything was built, and
+the third is the reason this phase's fixture is not the one the issue asks
+for.**
+
+- *"`SymbolTable::walk_path` already answers this — an alias could take the
+  target's `Def`."* It answers it, but not where the issue puts the fix. The
+  namespace is decided by the free function `describe()`, from the `syn::Item`
+  alone, at *index* time — before the symbol table exists, and nothing at that
+  point can resolve a path. So this is a second pass over alias definitions
+  after the table is built, structurally the move phase 13 made for
+  relocations, and not an edit to `describe()`.
+- *"A `use` group ... genuinely is `both`, and would keep recording it."* No.
+  `flatten_use` splits `use inner::{Braced, plain};` into a definition per leaf
+  before anything is resolved, so a group is not one question — it is one
+  question per leaf, and each leaf records its own namespace.
+  `every_leaf_of_a_use_group_is_resolved_on_its_own` puts that in the tests. A
+  *glob* is not a question at all: it binds no name, so it is no definition and
+  carries no namespace.
+- **The headline example does not share a baseline key today, and the *kind* is
+  why.** `pub use inner::Bar;` beside `#[allow(non_snake_case)] pub fn Bar()` is
+  an `unused_reexport` finding and an `unused_pub_item` one, and the kind is the
+  first field of the match key. Verified rather than reasoned about: an entry
+  recording the re-export leaves the function reported on `main` at `a9dd93a`,
+  unchanged. The collision is real, but it is on **`test_only_item`** — the one
+  kind under which both a re-export and a definition of its name are reported —
+  where an alias claiming `both` overlaps the function's `value` and one entry
+  covers them both. Three commands reproduce it, and the fixture makes the claim
+  there rather than where the issue points.
+- *"26 groups of reportable `pub` items share a file and a name; the module
+  separates 16."* One phase stale. Re-derived against `a9dd93a`: **3263**
+  reportable `pub` definitions, **29** groups, the module separates **16** and
+  cannot separate **13**. The three new ones are phase 16's own `namespace`
+  fixture, which it added after taking the measurement it quotes; the registry
+  crates' ten are identical, item for item, to phase 16's ten. Of the thirteen,
+  one is a pair of `pub use ... as DefaultFormatter` aliases in `clap_builder` —
+  the only alias pair in the corpus, and this phase resolves **both** of them to
+  `Both`, because both targets are unit structs. It stays one entry, which is
+  right: they are `cfg` alternatives.
+
+### The four decisions
+
+- **Whether to build it, for the fifth time the answer was not obvious, and the
+  argument is not the count.** Measured, this phase narrows **one** finding's
+  namespace in the whole corpus and changes no finding's text anywhere. #27, #28
+  and #30 were each measured at zero and built anyway; #32 was measured and
+  closed as working as intended in phase 17. Closing #37 the same way was a
+  legitimate outcome and the population would have supported it. What decided it
+  is that phase 17's two reasons for closing #32 both fail here, and one reason
+  for building is new. #32 cost a field on the one class of baseline that is
+  portable across every release, and converted a noisy failure into a silent
+  one. This changes **which value** an existing field holds — the first slice in
+  the sequence that adds no field and opens no door — and it moves silence
+  *toward* noise, which is the direction every baseline phase before #32 moved
+  in. And the fallback is the value an alias has today, so unlike #32 there is
+  no new failure mode to weigh against it: the pass can only refuse back to
+  where it started. Phase 16 shipped on the argument that the key should be
+  exactly as fine as Rust's own rule for one module, and wrote down the one
+  place where that was not yet true. This is that place, and nothing else was
+  left in it.
+- **What the second pass may conclude, and what it must refuse.** The direction
+  is not symmetric and that is the whole design: narrowing an alias that really
+  binds both halves un-baselines a finding a user has already accepted, while
+  staying `Both` is exactly the behaviour they have today. So every uncertainty
+  refuses, and each refusal has a test named for it — a target outside the
+  workspace (`Outcome::Foreign`), one behind a glob that leads outside it
+  (`Outcome::Opaque`), a chain past `MAX_ALIAS_DEPTH`, and a final segment
+  naming nothing indexed (`use crate as alias;`). The depth cap is also what
+  makes a cycle of mutual re-exports terminate on the conservative answer rather
+  than recur, and `a_cycle_of_mutual_re_exports_stays_both` is what catches its
+  removal — by aborting the test binary on a stack overflow.
+- **The union, which is the trap #37's own design walks into.**
+  `terminal_def` ends with `self.terminal_def_of(*reached.last()?.last()?,
+  depth)`: `reached.last()` is every definition the final segment names and
+  `.last()` takes one. That is right for a question any of them answers, and
+  wrong here — a name binding a struct **and** a fn is the collision this phase
+  exists for, and an alias to it binds both halves. Taking either end records a
+  narrow namespace for an alias that is genuinely broad, which is the
+  un-baselining the whole design avoids. `owner_defs` already had the right
+  shape; the pass maps the whole group and combines, and
+  `a_use_alias_of_a_name_binding_a_type_and_a_value_binds_both` fails on either
+  pick.
+- **A re-exported module is the general case, not a special one.** `pub use
+  tucked::inner;` ends at `Outcome::Module`, where there is no item definition to
+  read a namespace off — but the `mod` declaration the walk went *through* is
+  itself a `Def`, with `DefKind::Mod` and `Namespace::Type`, so the ordinary rule
+  answers it and no second route is written. Two answers for one construct is
+  the drift phases 11, 15 and 18 each had to clean up, and the alternative here
+  is worse than redundant: a rule reading `Outcome::Module` also fires for `use
+  crate as alias;`, which names a crate root — no `mod` declaration, nothing
+  indexed, and so a refusal. The test asserts against `DefKind::Mod::namespace`
+  rather than against `Type`, so the two cannot be changed apart.
+
+### What it found
+
+- **The corpus, re-measured against `a9dd93a`.** 35 registry crates in
+  `~/.cargo/registry/src/*/*/`, 24 fixtures and Deadwood itself — **60 targets,
+  226 findings, 46 dead files**. 140 of those are item findings carrying a module
+  and a namespace: **90** `value`, **32** `both`, **18** `type`. All five
+  `unused_reexport` findings record `both`, and resolving their targets by hand
+  says four of them are already right — `config`'s `Buried`, `globs`'s `Stale`
+  and `paths`'s `Ignored` and `Alias` all name **unit** structs, which bind a
+  constructor value of their own name. The fifth, `globs`'s `pub use
+  tucked::inner;`, names a **module**. So the population this phase narrows is
+  **one**, and it is the module case — not the braced struct the issue is named
+  for, which occurs nowhere in the corpus.
+- **And nothing else moved.** 360 output artefacts were compared against a
+  binary built from `main` in a detached worktree — the 60 pre-existing targets ×
+  {text, `--json`} × {stdout, stderr, exit code}. **One differs**, and it is one
+  line of one `--json`: `globs`'s `inner`, `both` → `type`. Every text report is
+  byte-identical, stderr and exit codes included. One finding's namespace
+  changed; no finding's text did.
+- **The upgrade path is absorbed by phase 16's overlap rule, and it is pinned
+  from a file the previous release wrote.** A recorded `both` overlaps a reported
+  `type`, so an entry a user accepted before this phase still matches the
+  narrower finding — and so does the relocation pass's namespace check, which
+  compares the same way. `tests/fixtures/aliases/legacy-baseline.json` is
+  `a9dd93a`'s `--write-baseline` output, checked in unedited: twelve of its
+  entries record `both` for an alias and **seven** of those are aliases this
+  phase narrows. All 23 findings stay suppressed, nothing goes stale, and the
+  file is read by the binary that did not write it.
+- **The fixture the phase adds** brings the corpus to 61 targets, 243 findings
+  and 46 dead files. `hidden` is one dead re-export per answer the pass can give
+  — braced, unit, fn, module, a name binding a type *and* a value, a group, and
+  the two refusals — so the table is in the report rather than only in a unit
+  test. `shared` is the collision, on `test_only_item`, and `collision.toml`
+  records the **value** half deliberately: an entry naming the type half is
+  covered by an alias claiming `both` just as well, so recorded that way the file
+  would answer identically on `a9dd93a` and prove nothing. Recorded this way
+  `a9dd93a` reports nothing at all and this binary reports the re-export.
+
+Recall was checked by mutation: seventeen inversions — the pass removed
+outright, and computed but never written; a foreign target and an opaque one
+each narrowed instead of refused; the alias-depth cap removed; the union
+replaced by the last definition the final segment names and by the first (the
+two shapes #37's own design takes), and two namespaces behind one name combined
+to the first instead of to both; a link read off the namespace it currently
+records instead of re-resolved; only a `pub use` narrowed and a plain `use` left
+alone; a re-exported module refused, and answered by a route of its own; the
+edition-2015 `use` fallback dropped from the walk; a refusal recorded as a narrow
+namespace rather than left at `both`; the pass rewriting a concrete definition's
+namespace too; and the overlap rule replaced by equality. **All seventeen were
+caught by a named test.**
+
+Two are worth naming from the other side. The depth cap's removal is caught by
+`a_cycle_of_mutual_re_exports_stays_both` *aborting* — a stack overflow rather
+than a failed assertion — as well as by the cap's own test failing. And the
+overlap rule is honestly not this phase's catch: it is phase 16's, defended by
+two of phase 16's unit tests, and this phase adds two integration tests to the
+five that fail with it inverted. Everything else is caught by a test written
+here.
+
+One value in the phase is invisible in every output and is pinned anyway: a
+plain `use` is narrowed exactly as a `pub use` is, and an `Import` is never
+reportable, so no finding carries its namespace. It is computed because one rule
+for both alias kinds leaves no second rule to drift, and
+`a_plain_use_import_is_narrowed_like_a_pub_use` is the only thing that can
+defend it. Phase 18's lesson is the precedent: a value no output could see was
+wrong there and review found it.
+
+Closes [#37](https://github.com/rlorenzo/deadwood/issues/37).
+
 ## Next (sequenced, one slice at a time)
 
-1. **A `use` alias claims both namespaces, because resolution does not say which**
-   ([#37](https://github.com/rlorenzo/deadwood/issues/37)) — phase 16's
-   residual, and the last open gap in the baseline sequence: with #32 closed and
-   #39 shipped it waits on nothing but a decision to build it. It was item 1
-   before phase 18 as well, and for the wrong reason — that phase says why it
-   was overtaken, and why the swap is recorded rather than done quietly. A
-   `pub use` records `both`, which overlaps everything, so a reportable
-   re-export of a braced struct beside a `pub fn` of that name in one module —
-   a pair that compiles — still shares one key. Zero groups in the corpus are
-   shaped that way, and the fix is to resolve the target and record what *it*
-   binds, which the symbol table can already answer for a target inside the
-   workspace and cannot for one outside it. Unlike every other baseline slice
-   it needs no format change: the entries affected already carry a
-   `namespace`.
-2. **Report a `[dev-dependencies]` entry the library itself names.** The
-   check has never made that claim, because the likeliest explanation used to
-   be a mis-attribution of ours rather than a manifest that cannot compile.
-   The largest of those, an out-of-line `#[cfg(test)] mod tests;`, is closed
-   ([#14](https://github.com/rlorenzo/deadwood/issues/14)), so the direction
-   is now blocked on evidence of its own rather than on that gap.
+1. **Report a `[dev-dependencies]` entry the library itself names**
+   ([#42](https://github.com/rlorenzo/deadwood/issues/42)) — the mirror of the
+   claim phase 5 does make, and the one it deliberately refused. The check has
+   never said it, because the likeliest explanation used to be a
+   mis-attribution of ours rather than a manifest that cannot compile. The
+   largest of those, an out-of-line `#[cfg(test)] mod tests;`, is closed
+   ([#14](https://github.com/rlorenzo/deadwood/issues/14)) and phase 14 made
+   the two spellings of a `#[cfg(test)] mod` agree, so the direction is now
+   blocked on evidence of its own rather than on that gap. It was item 2 for
+   as long as the list has had two entries, and it is item 1 because everything
+   above it shipped or was measured and closed — not because anything new
+   argued for it. What it needs first is a measurement, and it is the first
+   item since phase 15 whose failure direction is a finding *invented*: a
+   package told its manifest is broken when it is not.
 
-No longer on this list: **following an `include!`-ed module tree when deciding
-what a dead file is** ([#39](https://github.com/rlorenzo/deadwood/issues/39)) —
-shipped in phase 18, out of turn and for the reason recorded there; and
-**matching a moved dead file, or a moved package's entries**
+No longer on this list: **a `use` alias claiming both namespaces**
+([#37](https://github.com/rlorenzo/deadwood/issues/37)) — shipped in phase 19,
+which also corrected three of its claims, including the one its headline
+example rests on: the *kind* already separates an unused re-export from an
+unused item of that name, so the collision is on `test_only_item` and nowhere
+else; **following an `include!`-ed module tree when deciding what a dead file
+is** ([#39](https://github.com/rlorenzo/deadwood/issues/39)) — shipped in phase
+18, out of turn and for the reason recorded there; and **matching a moved dead
+file, or a moved package's entries**
 ([#32](https://github.com/rlorenzo/deadwood/issues/32)) — measured in phase 17
 and closed as working as intended, because the fix costs a field on the
 one class of baseline that is portable across every release, converts a noisy
 failure into a silent one, and only starts working after the `--write-baseline`
 that already fixes it.
 
-Everything above except the last is filed; the roadmap and the issue list say
-the same thing, so neither can quietly rot.
+Everything above is filed; the roadmap and the issue list say the same thing,
+so neither can quietly rot.
 
 ## Explicitly out of scope for now
 

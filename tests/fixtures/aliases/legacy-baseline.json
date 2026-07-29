@@ -1,0 +1,234 @@
+{
+  "findings": [
+    {
+      "kind": "unused_pub_item",
+      "severity": "deny",
+      "file": "src/hidden/inner.rs",
+      "line": 6,
+      "name": "Braced",
+      "module": "crate::hidden::inner",
+      "namespace": "type",
+      "message": "pub struct `Braced` is referenced only from items that nothing reaches"
+    },
+    {
+      "kind": "unused_pub_item",
+      "severity": "deny",
+      "file": "src/hidden/inner.rs",
+      "line": 11,
+      "name": "Sole",
+      "module": "crate::hidden::inner",
+      "namespace": "both",
+      "message": "pub struct `Sole` is referenced only from items that nothing reaches"
+    },
+    {
+      "kind": "unused_pub_item",
+      "severity": "deny",
+      "file": "src/hidden/inner.rs",
+      "line": 14,
+      "name": "plain",
+      "module": "crate::hidden::inner",
+      "namespace": "value",
+      "message": "pub fn `plain` is referenced only from items that nothing reaches"
+    },
+    {
+      "kind": "unused_pub_item",
+      "severity": "deny",
+      "file": "src/hidden/inner.rs",
+      "line": 21,
+      "name": "Twinned",
+      "module": "crate::hidden::inner",
+      "namespace": "type",
+      "message": "pub struct `Twinned` is referenced only from items that nothing reaches"
+    },
+    {
+      "kind": "unused_pub_item",
+      "severity": "deny",
+      "file": "src/hidden/inner.rs",
+      "line": 26,
+      "name": "Twinned",
+      "module": "crate::hidden::inner",
+      "namespace": "value",
+      "message": "pub fn `Twinned` is referenced only from items that nothing reaches"
+    },
+    {
+      "kind": "unused_pub_item",
+      "severity": "deny",
+      "file": "src/hidden/inner.rs",
+      "line": 31,
+      "name": "Listed",
+      "module": "crate::hidden::inner",
+      "namespace": "type",
+      "message": "pub enum `Listed` is referenced only from items that nothing reaches"
+    },
+    {
+      "kind": "unused_pub_item",
+      "severity": "deny",
+      "file": "src/hidden/inner.rs",
+      "line": 36,
+      "name": "tallied",
+      "module": "crate::hidden::inner",
+      "namespace": "value",
+      "message": "pub fn `tallied` is referenced only from items that nothing reaches"
+    },
+    {
+      "kind": "unused_reexport",
+      "severity": "deny",
+      "file": "src/hidden.rs",
+      "line": 11,
+      "name": "Braced",
+      "module": "crate::hidden",
+      "namespace": "both",
+      "message": "`pub use` re-export of `Braced` is never referenced through this module"
+    },
+    {
+      "kind": "unused_reexport",
+      "severity": "deny",
+      "file": "src/hidden.rs",
+      "line": 15,
+      "name": "Renamed",
+      "module": "crate::hidden",
+      "namespace": "both",
+      "message": "`pub use` re-export of `Renamed` is never referenced through this module"
+    },
+    {
+      "kind": "unused_reexport",
+      "severity": "deny",
+      "file": "src/hidden.rs",
+      "line": 19,
+      "name": "Sole",
+      "module": "crate::hidden",
+      "namespace": "both",
+      "message": "`pub use` re-export of `Sole` is never referenced through this module"
+    },
+    {
+      "kind": "unused_reexport",
+      "severity": "deny",
+      "file": "src/hidden.rs",
+      "line": 22,
+      "name": "plain",
+      "module": "crate::hidden",
+      "namespace": "both",
+      "message": "`pub use` re-export of `plain` is never referenced through this module"
+    },
+    {
+      "kind": "unused_reexport",
+      "severity": "deny",
+      "file": "src/hidden.rs",
+      "line": 27,
+      "name": "sub",
+      "module": "crate::hidden",
+      "namespace": "both",
+      "message": "`pub use` re-export of `sub` is never referenced through this module"
+    },
+    {
+      "kind": "unused_reexport",
+      "severity": "deny",
+      "file": "src/hidden.rs",
+      "line": 33,
+      "name": "Twinned",
+      "module": "crate::hidden",
+      "namespace": "both",
+      "message": "`pub use` re-export of `Twinned` is never referenced through this module"
+    },
+    {
+      "kind": "unused_reexport",
+      "severity": "deny",
+      "file": "src/hidden.rs",
+      "line": 38,
+      "name": "Listed",
+      "module": "crate::hidden",
+      "namespace": "both",
+      "message": "`pub use` re-export of `Listed` is never referenced through this module"
+    },
+    {
+      "kind": "unused_reexport",
+      "severity": "deny",
+      "file": "src/hidden.rs",
+      "line": 38,
+      "name": "tallied",
+      "module": "crate::hidden",
+      "namespace": "both",
+      "message": "`pub use` re-export of `tallied` is never referenced through this module"
+    },
+    {
+      "kind": "unused_reexport",
+      "severity": "deny",
+      "file": "src/hidden.rs",
+      "line": 42,
+      "name": "Outside",
+      "module": "crate::hidden",
+      "namespace": "both",
+      "message": "`pub use` re-export of `Outside` is never referenced through this module"
+    },
+    {
+      "kind": "unused_reexport",
+      "severity": "deny",
+      "file": "src/hidden.rs",
+      "line": 47,
+      "name": "Veiled",
+      "module": "crate::hidden",
+      "namespace": "both",
+      "message": "`pub use` re-export of `Veiled` is never referenced through this module"
+    },
+    {
+      "kind": "test_only_item",
+      "severity": "deny",
+      "file": "src/shared/inner.rs",
+      "line": 4,
+      "name": "Braced",
+      "module": "crate::shared::inner",
+      "namespace": "type",
+      "message": "pub struct `Braced` is reached only from test code: make it `pub(crate)`, or move it behind `#[cfg(test)]`"
+    },
+    {
+      "kind": "test_only_item",
+      "severity": "deny",
+      "file": "src/shared/inner.rs",
+      "line": 9,
+      "name": "Sole",
+      "module": "crate::shared::inner",
+      "namespace": "both",
+      "message": "pub struct `Sole` is reached only from test code: make it `pub(crate)`, or move it behind `#[cfg(test)]`"
+    },
+    {
+      "kind": "test_only_item",
+      "severity": "deny",
+      "file": "src/shared.rs",
+      "line": 15,
+      "name": "Braced",
+      "module": "crate::shared",
+      "namespace": "both",
+      "message": "`pub use` re-export of `Braced` is reached only from test code: make it `pub(crate) use`, or move it behind `#[cfg(test)]`"
+    },
+    {
+      "kind": "test_only_item",
+      "severity": "deny",
+      "file": "src/shared.rs",
+      "line": 22,
+      "name": "Braced",
+      "module": "crate::shared",
+      "namespace": "value",
+      "message": "pub fn `Braced` is reached only from test code: make it `pub(crate)`, or move it behind `#[cfg(test)]`"
+    },
+    {
+      "kind": "test_only_item",
+      "severity": "deny",
+      "file": "src/shared.rs",
+      "line": 31,
+      "name": "Sole",
+      "module": "crate::shared",
+      "namespace": "both",
+      "message": "`pub use` re-export of `Sole` is reached only from test code: make it `pub(crate) use`, or move it behind `#[cfg(test)]`"
+    },
+    {
+      "kind": "test_only_item",
+      "severity": "deny",
+      "file": "src/shared.rs",
+      "line": 39,
+      "name": "Sole",
+      "module": "crate::shared",
+      "namespace": "value",
+      "message": "pub fn `Sole` is reached only from test code: make it `pub(crate)`, or move it behind `#[cfg(test)]`"
+    }
+  ]
+}
