@@ -277,13 +277,18 @@ impl DefKind {
         self == DefKind::Reexport
     }
 
-    /// Which of Rust's namespaces a definition of this kind binds its name in.
+    /// Which of Rust's namespaces a definition of this kind binds its name in,
+    /// as far as the kind alone can say.
     ///
-    /// [`DefKind::Struct`] is the one kind this cannot answer for, because the
-    /// answer is in the *fields*: a unit or tuple struct binds a value of the
-    /// same name and a braced one does not. [`describe`] is where that is read,
-    /// and it is why the namespace travels beside the kind rather than being
-    /// derived from it at every use.
+    /// Two kinds cannot be answered from the kind, and they are unanswerable in
+    /// different places. [`DefKind::Struct`]'s answer is in the *fields* — a
+    /// unit or tuple struct binds a value of the same name and a braced one
+    /// does not — and [`describe`] has them, which is why the namespace travels
+    /// beside the kind rather than being derived from it at every use. The two
+    /// alias kinds' answer is in another *item* entirely, which nothing has
+    /// until the whole table exists: [`SymbolTable::resolve_alias_namespaces`]
+    /// is the pass that goes back and narrows them, and what is answered here
+    /// is the fallback it falls back to.
     fn namespace(self) -> Namespace {
         match self {
             DefKind::Fn | DefKind::Const | DefKind::Static => Namespace::Value,
@@ -297,7 +302,10 @@ impl DefKind {
             // want anyway.
             DefKind::Struct => Namespace::Both,
             // `use` imports every namespace the path it names resolves in, and
-            // resolution here does not track which those are.
+            // at index time there is no table to resolve it against. `Both`
+            // overlaps everything, so it is the reading that can only make a
+            // baseline entry cover *more* — and it is what an alias keeps
+            // whenever the pass above cannot do better.
             DefKind::Import | DefKind::Reexport => Namespace::Both,
         }
     }
@@ -341,7 +349,10 @@ struct Def {
     name: String,
     kind: DefKind,
     /// Which namespace this definition binds `name` in. Read off the kind for
-    /// everything but a `struct`, whose fields decide it ([`describe`]).
+    /// everything but a `struct`, whose fields decide it ([`describe`]), and a
+    /// `use` alias, whose *target* decides it — the one answer that is not in
+    /// the item's own syntax, and so the one a second pass writes
+    /// ([`SymbolTable::resolve_alias_namespaces`]).
     ///
     /// Nothing in resolution reads this: a path is resolved against every
     /// definition of a name whatever namespace it is in, which is the
@@ -608,7 +619,126 @@ impl SymbolTable {
         }
 
         table.resolve_globs();
+        // Last, because it is the only step that asks the finished table a
+        // question: an alias's namespace is its target's, and no target can be
+        // resolved before every module and every glob is in place.
+        table.resolve_alias_namespaces();
         table
+    }
+
+    /// Record, on every `use` alias, the namespaces its target actually binds.
+    ///
+    /// A second pass, and it has to be one. [`describe`] decides a namespace
+    /// from the `syn::Item` alone while the table is being filled, and an
+    /// alias's answer is not in its own syntax — it is whatever the path it
+    /// names binds, in another item, possibly in another crate. Structurally
+    /// this is the move phase 13 made for relocations: build the thing, then
+    /// ask it what the building walk could not.
+    ///
+    /// It runs for every alias rather than only the reportable ones. A plain
+    /// `use` binds a name in exactly the namespaces its target does whether or
+    /// not a finding is ever made about it, and one rule for both kinds leaves
+    /// no second rule to drift out of step with this one — see phases 11, 15
+    /// and 18 for what two answers to one question cost. The `Import` half is
+    /// invisible in every output today, which is a reason to compute it
+    /// correctly and pin it with a test, not a reason to skip it.
+    ///
+    /// Nothing in resolution reads a namespace ([`Def::namespace`]), so this
+    /// pass cannot change which definitions are reached, which are reported, or
+    /// what any finding says. All it can change is the namespace a finding
+    /// carries, and so the baseline key it falls under.
+    fn resolve_alias_namespaces(&mut self) {
+        // Collected first and written after, because the answer for one alias
+        // is read from the definitions around it: writing as we go would make
+        // a chain's answer depend on the order the chain was indexed in. Every
+        // read below re-resolves an alias rather than reading what it currently
+        // records, so a chain gives one answer whichever end it is asked from.
+        let resolved: Vec<(usize, Namespace)> = (0..self.defs.len())
+            .filter(|&id| self.defs[id].kind.is_alias())
+            .filter_map(|id| Some((id, self.alias_namespace_of(id, 0)?)))
+            .collect();
+        for (id, namespace) in resolved {
+            self.defs[id].namespace = namespace;
+        }
+    }
+
+    /// The namespaces one definition binds its name in, following it through
+    /// when it is itself an alias.
+    ///
+    /// `None` is a refusal, and every caller reads it as "keep
+    /// [`Namespace::Both`]" — see [`SymbolTable::alias_namespace_at`] for why the
+    /// refusals are the load-bearing half of this pass.
+    fn alias_namespace_of(&self, id: usize, depth: usize) -> Option<Namespace> {
+        let def = &self.defs[id];
+        if !def.kind.is_alias() {
+            // A concrete definition already knows, from its own syntax. This
+            // pass never rewrites one.
+            return Some(def.namespace);
+        }
+        let target = def.target.as_ref()?;
+        self.alias_namespace_at(def.module, target, depth + 1)
+    }
+
+    /// The namespaces `path`, written as the target of a `use` in `module`,
+    /// binds its final name in — or `None` where the answer is not certain.
+    ///
+    /// The direction here is not symmetric, and that is the whole design.
+    /// Narrowing an alias that really does bind both halves would un-baseline a
+    /// finding a user has already accepted; staying `Both` is exactly the
+    /// behaviour they have today. So every uncertainty answers `None`, and each
+    /// one has a name:
+    ///
+    /// - **Outside the workspace** — [`Outcome::Foreign`]. `pub use
+    ///   some_crate::Thing;` leads somewhere the table cannot see, and nothing
+    ///   here can say what `Thing` is.
+    /// - **Opaque** — [`Outcome::Opaque`]. A glob we could not follow may be
+    ///   what brings the name into scope, so the target might be an item we
+    ///   never indexed.
+    /// - **Past the alias-depth cap** — [`MAX_ALIAS_DEPTH`], which is also what
+    ///   makes a cycle of mutual re-exports terminate here rather than recur.
+    /// - **A final segment naming nothing we indexed** — `use crate as alias;`
+    ///   names a crate root, which has no `mod` declaration and so no
+    ///   definition to read a namespace off.
+    ///
+    /// What is deliberately *not* a refusal is a final segment naming more than
+    /// one definition. That is the collision this whole pass exists for — a
+    /// name binding a struct and a fn resolves to two definitions, and an alias
+    /// to it binds both halves — so the group is combined rather than picked
+    /// from. Taking one of them, as [`SymbolTable::terminal_def`] does for a
+    /// question where any of them will do, would record a narrow namespace for
+    /// an alias that genuinely binds both, which is the un-baselining this pass
+    /// must not do. [`SymbolTable::owner_defs`] is the shape to copy.
+    ///
+    /// A `use` group is not a refusal either, and it is not one question:
+    /// `flatten_use` splits `use inner::{Braced, plain};` into a definition per
+    /// leaf before this pass sees anything, so each leaf is resolved on its own
+    /// and records its own namespace. A glob is not a question at all — it
+    /// binds no name, so it has no definition and makes no finding.
+    fn alias_namespace_at(&self, module: usize, path: &RefPath, depth: usize) -> Option<Namespace> {
+        if depth > MAX_ALIAS_DEPTH {
+            return None;
+        }
+        let mut reached = Vec::new();
+        // The same walk the marking pass makes over the same path, `in_use`
+        // included, so this pass cannot disagree with it about where an alias
+        // leads: one walker, asked a second question.
+        match self.walk_path(module, path, true, 0, &mut reached) {
+            Outcome::Item | Outcome::Module(_) => {}
+            Outcome::Opaque(_) | Outcome::Foreign => return None,
+        }
+        // An empty `reached` is the crate-root case above: nothing was named,
+        // so there is nothing to read a namespace from.
+        let mut union: Option<Namespace> = None;
+        for &id in reached.last()? {
+            let one = self.alias_namespace_of(id, depth)?;
+            union = Some(match union {
+                None => one,
+                Some(so_far) if so_far == one => so_far,
+                // Two namespaces behind one name: the alias binds both.
+                Some(_) => Namespace::Both,
+            });
+        }
+        union
     }
 
     /// Resolve every path in `crates`, marking the definitions they name.
@@ -2671,6 +2801,12 @@ mod tests {
     /// `mod` declaration is never reportable, so its namespace reaches no
     /// finding and no output test can see it. It is written down anyway: the
     /// claim is about Rust, not about what Deadwood currently reports.
+    ///
+    /// The two alias kinds are here as the *fallback* rather than as the
+    /// answer. What an alias binds is what its target binds, which nothing
+    /// knows at index time; `a_use_alias_binds_exactly_the_namespaces_its_target_binds`
+    /// is the table for that, and the refusals below are when this value is
+    /// what survives.
     #[test]
     fn every_def_kind_binds_the_namespace_rust_binds_it_in() {
         for (kind, namespace) in [
@@ -2682,8 +2818,9 @@ mod tests {
             (DefKind::TypeAlias, Namespace::Type),
             (DefKind::Union, Namespace::Type),
             (DefKind::Mod, Namespace::Type),
-            // A `use` binds every namespace its target does, and nothing here
-            // resolves which those are, so it claims both.
+            // A `use` binds every namespace its target does, and nothing at
+            // index time resolves which those are, so it starts by claiming
+            // both and keeps that wherever the second pass refuses.
             (DefKind::Import, Namespace::Both),
             (DefKind::Reexport, Namespace::Both),
         ] {
@@ -2725,6 +2862,311 @@ mod tests {
             file.path = PathBuf::from(format!("/ws/{name}/src/{module}.rs"));
         }
         unit
+    }
+
+    // -- what a `use` alias binds (#37) ------------------------------------
+
+    /// Every `use` alias in `sources`, as `(name, namespace)` in the order the
+    /// files were indexed, once the table has resolved what each target binds.
+    fn alias_namespaces(sources: &[(&str, &str)]) -> Vec<(String, Namespace)> {
+        let crates = [unit(sources)];
+        let table = SymbolTable::build(&crates);
+        table
+            .defs
+            .iter()
+            .filter(|def| def.kind.is_alias())
+            .map(|def| (def.name.clone(), def.namespace))
+            .collect()
+    }
+
+    /// The same for one crate-root file.
+    fn alias_namespaces_in_root(source: &str) -> Vec<(String, Namespace)> {
+        alias_namespaces(&[("", source)])
+    }
+
+    /// The table this phase adds: one alias per shape of target, answered from
+    /// the same walk the marking pass makes over the same path.
+    ///
+    /// The three struct spellings are the reason a namespace is not a function
+    /// of the kind, and an alias inherits all three. A `mod` is here because a
+    /// re-exported module is the *general* case rather than a special one —
+    /// see `a_use_alias_of_a_module_takes_the_mod_declarations_namespace`.
+    #[test]
+    fn a_use_alias_binds_exactly_the_namespaces_its_target_binds() {
+        let aliases = alias_namespaces(&[
+            (
+                "",
+                "mod inner;
+                 pub use inner::Braced;
+                 pub use inner::Unit;
+                 pub use inner::Tupled;
+                 pub use inner::plain;
+                 pub use inner::VALUE;
+                 pub use inner::Aliased;
+                 pub use inner::Marked;
+                 pub use inner::Listed;
+                 pub use inner::sub;
+                 pub use inner::Braced as Renamed;",
+            ),
+            (
+                "inner",
+                "pub struct Braced { pub field: usize }
+                 pub struct Unit;
+                 pub struct Tupled(pub usize);
+                 pub fn plain() {}
+                 pub const VALUE: usize = 0;
+                 pub type Aliased = usize;
+                 pub trait Marked {}
+                 pub enum Listed { One }
+                 pub mod sub {}",
+            ),
+        ]);
+        assert_eq!(
+            aliases,
+            [
+                ("Braced", Namespace::Type),
+                ("Unit", Namespace::Both),
+                ("Tupled", Namespace::Both),
+                ("plain", Namespace::Value),
+                ("VALUE", Namespace::Value),
+                ("Aliased", Namespace::Type),
+                ("Marked", Namespace::Type),
+                ("Listed", Namespace::Type),
+                ("sub", Namespace::Type),
+                // A rename changes what the alias is called, never what it
+                // binds.
+                ("Renamed", Namespace::Type),
+            ]
+            .map(|(name, namespace)| (name.to_string(), namespace))
+        );
+    }
+
+    /// A re-exported module is the general case and not a special one, which is
+    /// the whole of the decision.
+    ///
+    /// `pub use inner::sub;` ends at [`Outcome::Module`], where there is no
+    /// item definition to read a namespace off — but the `mod` declaration the
+    /// walk went *through* is itself a [`Def`], in the type namespace, so the
+    /// ordinary rule answers it. Reading the outcome instead would be a second
+    /// route to one answer, and two answers for one construct is the drift
+    /// phases 11, 15 and 18 each had to clean up. The assertion is written
+    /// against `DefKind::Mod::namespace` rather than against `Type` so that the
+    /// two cannot be changed apart.
+    #[test]
+    fn a_use_alias_of_a_module_takes_the_mod_declarations_namespace() {
+        assert_eq!(
+            alias_namespaces(&[
+                ("", "mod inner; pub use inner::sub;"),
+                ("inner", "pub mod sub {}")
+            ]),
+            [("sub".to_string(), DefKind::Mod.namespace())]
+        );
+    }
+
+    /// The union, and the trap it exists for. A name binding a struct *and* a
+    /// function resolves to two definitions, and an alias to it binds both
+    /// halves — so the whole group is combined rather than picked from.
+    ///
+    /// Taking one of them, the way [`SymbolTable::terminal_def`] does for a
+    /// question any of them answers, would record `Type` or `Value` here for an
+    /// alias that is genuinely `Both`, and that un-baselines a re-export a user
+    /// has already accepted. This test fails on either pick.
+    #[test]
+    fn a_use_alias_of_a_name_binding_a_type_and_a_value_binds_both() {
+        assert_eq!(
+            alias_namespaces(&[
+                ("", "mod inner; pub use inner::Twin;"),
+                (
+                    "inner",
+                    "pub struct Twin { pub field: usize }
+                     #[allow(non_snake_case)]
+                     pub fn Twin() {}",
+                ),
+            ]),
+            [("Twin".to_string(), Namespace::Both)]
+        );
+    }
+
+    /// A `use` group is not one question and is not a refusal. `flatten_use`
+    /// splits it into a definition per leaf before anything is resolved, so
+    /// each leaf is walked on its own and records its own namespace.
+    #[test]
+    fn every_leaf_of_a_use_group_is_resolved_on_its_own() {
+        assert_eq!(
+            alias_namespaces(&[
+                ("", "mod inner; pub use inner::{Braced, plain};"),
+                (
+                    "inner",
+                    "pub struct Braced { pub field: usize }
+                     pub fn plain() {}",
+                ),
+            ]),
+            [
+                ("Braced".to_string(), Namespace::Type),
+                ("plain".to_string(), Namespace::Value),
+            ]
+        );
+    }
+
+    /// A chain is re-resolved from each end rather than read off the link
+    /// before it, so the answer does not depend on the order the files were
+    /// indexed in.
+    ///
+    /// The outer alias is indexed first here, so an implementation that read
+    /// the namespace already recorded on the link it names would find `Both` —
+    /// the value every alias starts with — and narrow only the inner one.
+    #[test]
+    fn an_alias_chain_is_re_resolved_rather_than_read_off_the_link_before_it() {
+        assert_eq!(
+            alias_namespaces(&[
+                ("", "mod mid; pub use mid::Braced;"),
+                ("mid", "mod inner; pub use inner::Braced;"),
+                ("mid/inner", "pub struct Braced { pub field: usize }"),
+            ]),
+            [
+                ("Braced".to_string(), Namespace::Type),
+                ("Braced".to_string(), Namespace::Type),
+            ]
+        );
+    }
+
+    /// A plain `use` is narrowed exactly as a `pub use` is, and no output shows
+    /// it: an `Import` is never reportable, so no finding carries its
+    /// namespace.
+    ///
+    /// It is computed anyway — one rule for both alias kinds leaves no second
+    /// rule to drift — and it is pinned here because that is the only thing
+    /// that can defend a value nothing prints. Phase 18 found such a value
+    /// wrong in review; an invisible mutation is a reason to write the test,
+    /// not a reason to shrug.
+    #[test]
+    fn a_plain_use_import_is_narrowed_like_a_pub_use() {
+        assert_eq!(
+            alias_namespaces(&[
+                ("", "mod inner; use inner::Braced;"),
+                ("inner", "pub struct Braced { pub field: usize }"),
+            ]),
+            [("Braced".to_string(), Namespace::Type)]
+        );
+    }
+
+    /// The pass walks the alias's path exactly as the marking pass walks it,
+    /// `in_use` included, so the two cannot disagree about where an alias
+    /// leads.
+    ///
+    /// An edition 2015 `use` path starts at the crate root wherever it is
+    /// written, and that fallback lives in [`SymbolTable::walk_path`] behind
+    /// that flag. Resolving this path without it finds nothing in `outer`,
+    /// reads the target as foreign, and refuses — a namespace this pass could
+    /// have had, given up because it asked the question a different way from
+    /// everything else that asks it.
+    #[test]
+    fn an_edition_2015_use_path_is_walked_the_way_the_marking_pass_walks_it() {
+        assert_eq!(
+            alias_namespaces(&[
+                ("", "mod inner; mod outer;"),
+                ("inner", "pub struct Braced { pub field: usize }"),
+                ("outer", "pub use inner::Braced;"),
+            ]),
+            [("Braced".to_string(), Namespace::Type)]
+        );
+    }
+
+    /// Refusal: the target is outside the workspace, so nothing in the table
+    /// can say what it is.
+    #[test]
+    fn a_use_alias_leading_outside_the_workspace_stays_both() {
+        assert_eq!(
+            alias_namespaces_in_root("pub use other_crate::Thing;"),
+            [("Thing".to_string(), Namespace::Both)]
+        );
+    }
+
+    /// Refusal: a glob we could not follow may be what brings the name into
+    /// scope, so the target might be an item that was never indexed.
+    #[test]
+    fn a_use_alias_behind_an_unfollowable_glob_stays_both() {
+        assert_eq!(
+            alias_namespaces_in_root(
+                "mod veiled { pub use other_crate::*; }
+                 pub use veiled::Thing;",
+            ),
+            [("Thing".to_string(), Namespace::Both)]
+        );
+    }
+
+    /// Refusal: past [`MAX_ALIAS_DEPTH`], which is a cap and not an off switch
+    /// — everything inside it still narrows.
+    #[test]
+    fn a_use_alias_past_the_alias_depth_cap_stays_both() {
+        let namespaces: Vec<Namespace> = alias_namespaces_in_root(
+            "pub use l0::Far;
+             mod l0 { pub use super::l1::Far; }
+             mod l1 { pub use super::l2::Far; }
+             mod l2 { pub use super::l3::Far; }
+             mod l3 { pub use super::l4::Far; }
+             mod l4 { pub use super::l5::Far; }
+             mod l5 { pub use super::l6::Far; }
+             mod l6 { pub use super::l7::Far; }
+             mod l7 { pub use super::l8::Far; }
+             mod l8 { pub use super::l9::Far; }
+             mod l9 { pub struct Far { pub field: usize } }",
+        )
+        .into_iter()
+        .map(|(_, namespace)| namespace)
+        .collect();
+        assert_eq!(namespaces.len(), 10, "the root alias and `l0` through `l8`");
+        assert_eq!(
+            &namespaces[..2],
+            [Namespace::Both, Namespace::Both],
+            "the two outermost are more than {MAX_ALIAS_DEPTH} hops from the struct"
+        );
+        assert!(
+            namespaces[2..].iter().all(|&ns| ns == Namespace::Type),
+            "and everything inside the cap narrows: {namespaces:?}"
+        );
+    }
+
+    /// Refusal, and the reason the cap is not only about depth: a cycle of
+    /// mutual re-exports terminates here rather than recurring, and terminates
+    /// on the conservative answer.
+    #[test]
+    fn a_cycle_of_mutual_re_exports_stays_both() {
+        assert_eq!(
+            alias_namespaces(&[
+                ("", "mod a; mod b;"),
+                ("a", "pub use crate::b::Ring;"),
+                ("b", "pub use crate::a::Ring;"),
+            ]),
+            [
+                ("Ring".to_string(), Namespace::Both),
+                ("Ring".to_string(), Namespace::Both),
+            ]
+        );
+    }
+
+    /// Refusal: `use crate as here;` names a crate root, which has no `mod`
+    /// declaration and so no definition to read a namespace off.
+    #[test]
+    fn a_use_alias_naming_a_crate_root_stays_both() {
+        assert_eq!(
+            alias_namespaces_in_root("pub use crate as here;"),
+            [("here".to_string(), Namespace::Both)]
+        );
+    }
+
+    /// A glob is not a refusal because it is not a question: it binds no name,
+    /// so it is no definition, so there is nothing for a namespace to be about
+    /// and no finding to carry one.
+    #[test]
+    fn a_glob_binds_no_name_and_so_records_no_namespace() {
+        assert_eq!(
+            alias_namespaces(&[
+                ("", "mod inner; pub use inner::*;"),
+                ("inner", "pub struct Braced { pub field: usize }"),
+            ]),
+            []
+        );
     }
 
     /// The reportable definitions in `sources` that no resolved path reaches,
