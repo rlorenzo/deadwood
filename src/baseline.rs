@@ -122,9 +122,12 @@
 //!   [`Key::relocation`], which answers `None` unless *both* the module and the
 //!   name are recorded. `dead_file` has neither, so every dead file in the
 //!   corpus is structurally out of reach rather than excluded by a kind list
-//!   someone could extend — 40 of them, counting the corpus the way phase 17 of
-//!   `docs/SCOPE.md` does, with `windows-sys`'s 246 `include!` false positives
-//!   set aside. Two unrelated dead files are indistinguishable
+//!   someone could extend — 46 of them, counting the corpus the way phase 18
+//!   of `docs/SCOPE.md` does. That number carried a qualifier until phase 18:
+//!   `windows-sys` contributed 246 more, every one of them an `include!`-ed
+//!   file reported dead, and they had to be set aside by hand to say anything
+//!   about the population. They are gone rather than set aside now.
+//!   Two unrelated dead files are indistinguishable
 //!   without a content signal, and this pass does not have one — so it does not
 //!   pretend to. The two dependency kinds and `unsatisfiable_cfg` are out for
 //!   the same reason, and a manifest path moves only when a whole package does,

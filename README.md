@@ -17,7 +17,7 @@ this project was bootstrapped from.
 
 | Check | What it finds | Why rustc doesn't |
 | --- | --- | --- |
-| **Dead files** | `.rs` files under `src/` not reachable from any target root via `mod` declarations | Files outside the module tree are never compiled, so no lint ever sees them |
+| **Dead files** | `.rs` files under `src/` not reachable from any target root via `mod` declarations, or through an `include!` naming a file we can read | Files outside the module tree are never compiled, so no lint ever sees them |
 | **Unused pub items** | Fully-`pub` fns, structs, enums, traits, type aliases, consts, statics, and unions that nothing live in the workspace reaches — either no path resolves to them, or every path that does is written inside something itself unreachable | `dead_code` assumes `pub` items have external consumers |
 | **Unused re-exports** | `pub use` re-exports nothing live in the workspace goes through, where outside code cannot reach them either | `unused_imports` only sees imports the crate itself does not use, not ones re-exported for nobody |
 | **Unused dependencies** | `Cargo.toml` entries — normal, dev, or build — whose crate name the declaring package's code never mentions | Cargo has no reason to look, and an unused entry still costs build time and supply-chain surface |
@@ -595,8 +595,8 @@ toolchain is pinned to `stable` with `clippy` and `rustfmt` via
    something live names it (`src/resolve.rs`). The same walk runs a second
    time over the same edges with the test entry points removed, and what only
    the first reaches is the `test_only_item` finding.
-6. **Detectors** — dead files are `src/**.rs` minus the reachable set and the
-   `cfg`-excluded set; unused pub items and re-exports are the definitions
+6. **Detectors** — dead files are `src/**.rs` minus the reachable set, the
+   spliced-in set and the `cfg`-excluded set; unused pub items and re-exports are the definitions
    nothing live reached, and test-only items the ones only the first walk
    reached (`src/unused.rs`); unused dependencies are the
    manifest entries whose crate name appears nowhere in the package, reachable
@@ -692,7 +692,22 @@ toolchain is pinned to `stable` with `clippy` and `rustfmt` via
   unread. An orphan file inside that subtree is therefore not reported as
   dead: Deadwood did not resolve that module tree, and claiming a file is
   unreachable from a tree it never read is the failure mode it refuses.
-- `include!()`-ed files are not tracked and may be reported as dead.
+- An `include!` is followed when its path is a string literal and the chain of
+  them is no more than eight deep: the file it names is not dead, and neither is
+  anything a `mod` chain from that file reaches. Two forms are not followed, and
+  both cost noise rather than silence — a path only the build knows
+  (`include!(concat!(env!("OUT_DIR"), ...))`), and one more than eight `include!`s
+  from a crate root. Files they would reach are still reported dead, because a
+  file Deadwood could not read is not evidence that anything beside it is alive.
+- A file reached **only** through an `include!` has its *items* take no part in
+  resolution: nothing in one is reported as an unused public item, and nothing
+  in one keeps another item alive. The file is evidence that it was reached and
+  evidence of nothing else. A file a `mod` chain also reaches is analyzed
+  exactly as it always was — the exemption is for files the module tree would
+  otherwise never have seen, not for a file that happens to be spliced as well.
+  Admitting the items would be a finding population of its own — measured at
+  132,414 unused public items in `windows-sys-0.61.2` alone, against the 10 it
+  reports today.
 - A `pub` item with consumers outside the workspace looks identical to a dead
   one; for library crates, these findings are advisory until the crate or its
   item paths are listed under `[public-api]`. Re-exports on a library's public

@@ -1,0 +1,24 @@
+# Test fixture: a crate root that reaches its module tree through `include!`,
+# which is the shape `windows-sys` has and the one issue #39 was filed for.
+#
+# Every layout question here was checked against `rustc`, and the crate is
+# written to compile so that the answers are rustc's rather than ours:
+#
+#   cargo build --manifest-path tests/fixtures/included/Cargo.toml
+#
+# The empty [workspace] table keeps it out of any enclosing workspace.
+[package]
+name = "included"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Named nowhere but `src/tree/branch.rs`, which is reached only through the
+# `include!`. The name has to reach the dependency check anyway, or a package
+# like this one gains an invented `unused_dependency` finding.
+splicedep = { path = "splicedep" }
+
+# A path dependency would otherwise join the workspace as a member and be
+# analyzed as a package of its own; it is here to be *named*, not checked.
+[workspace]
+exclude = ["splicedep"]

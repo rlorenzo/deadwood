@@ -1,0 +1,4 @@
+# One platform, so the `#[cfg(windows)] include!` in `src/lib.rs` is not part
+# of the build being analyzed and is not followed.
+[cfg]
+target-os = ["linux"]

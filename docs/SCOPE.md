@@ -1377,7 +1377,12 @@ made on different evidence.
   ([#39](https://github.com/rlorenzo/deadwood/issues/39)) — it is the largest
   single source of false positives the corpus has ever shown, and it was found
   by measuring for something else. The roadmap's "88 of 219" predates the
-  lockfile change and is replaced by the 80 of 208 above.
+  lockfile change and is replaced by the 80 of 208 above. **Phase 18 closed
+  it**, and with it the qualifier: the corpus this bullet had to describe twice
+  — once whole, once with `windows-sys` set aside — now has one number, 42 dead
+  files of 220 findings, with nothing set aside. The 246 are not excluded, they
+  are gone. The 286/40 split above is a measurement of `2627c75` and stays as
+  one; it is no longer the shape of the tool.
 - **Whether the package name is needed at all, which #32 assumed rather than
   checked.** It is. A manifest-kind entry already records the kind, `file:
   alpha/Cargo.toml` and `name: serde`; what is missing is which package declared
@@ -1501,39 +1506,201 @@ intended, and files what measuring for it turned up:
 [#39](https://github.com/rlorenzo/deadwood/issues/39), an `include!`-ed module
 tree reported dead, 246 findings in one crate.
 
+## Phase 18 — the module tree an `include!` splices in (shipped)
+
+`include!("Windows/mod.rs")` is not a `mod` declaration, so `src/modtree.rs`
+never followed one, and every file a crate splices into its build that way was
+counted unreachable and reported dead. In `windows-sys-0.61.2` that is **246
+files in a crate where none is dead** — the largest single source of false
+positives this corpus has ever shown, and the first entry on the roadmap that
+was findings *invented* rather than missed. The module tree now follows a
+literal-path `include!`, and the file it names plus everything a `mod` chain
+from that file reaches is not a dead file.
+
+**This phase went before [#37](https://github.com/rlorenzo/deadwood/issues/37),
+and the roadmap said the opposite.** #39 was item 2 on the Next list and #37 was
+item 1, which contradicts the rule phase 15 stated — *"#27 lost findings; this
+one invents them, which is the direction this project cares about most, so a
+small population is worth more here than a large one was there."* By that
+rule #39 outranks #37 on both axes at once: it invents 246 findings in one
+crate, while #37 misses one, in a shape that occurs **zero** times in the
+corpus and needs a third same-named item in a module before it costs
+anything. #37 was item 1 because it inherited the baseline sequence's
+position, not because anything weighed it against #39. The list below is
+resequenced, and this paragraph is why — the roadmap's ordering is a claim
+like any other and it was wrong.
+
+**Two of #39's claims were wrong, and one of its acceptance criteria rested on
+one of them.** Both were checked before anything was built:
+
+- *"A nested `include!` chain, since the real case is two deep."* It is not.
+  `grep -rn 'include!' src/` in `windows-sys-0.61.2` returns exactly one line,
+  `src/lib.rs:17`. The other 245 files hang off `src/Windows/mod.rs` by
+  ordinary `#[cfg(feature = "Wdk")] pub mod Wdk;` declarations. The shape the
+  corpus needs handled is **one `include!`, then a normal module tree under
+  it** — and a fix that only marked the named file reached would have left 245
+  of the 246 still reported. The nested-chain fixture is still here, because
+  `src/deps.rs` caps depth and this reader has to cap it identically, but it is
+  justified as a guard and not as the corpus's shape.
+- *"Mark the file it names reached, with the module path of the item the
+  `include!` was written in."* The second half is right and the first is not
+  enough, because an included file is also a **directory-ownership root**.
+  Verified against rustc, not assumed: with `include!("a/mod.rs")` in
+  `src/lib.rs` and `pub mod b;` inside it, a child at `src/a/b.rs` compiles and
+  a child at `src/b.rs` is `error[E0583]: file not found for module 'b'`. The
+  same holds for `include!("a/gen.rs")`: the child is `src/a/b.rs`, *not*
+  `src/a/gen/b.rs`, so this is a third rule and not the `mod.rs` rule wearing
+  another hat.
+
+A third number in #39 is stale rather than wrong. Its table is `2627c75`'s —
+464 findings, 286 dead files — and `main` at `3eb6cfb` is **466 and 288**,
+because phase 17 added the `deadfiles` fixture after taking the measurement it
+quotes. Everything below is measured against `3eb6cfb`.
+
+### The four decisions
+
+- **What "reached" means for a spliced file, and where the two answers part.**
+  An included file has two answers and they differ. *Was it reached* — yes, and
+  that is what the dead-file check asks. *What module are its items in* — the
+  **including** module's, because the tokens land there, so
+  `include!("Windows/mod.rs")` at a crate root gives `crate::Wdk` and not
+  `crate::Windows::Wdk` (rustc resolves the first and rejects the second). The
+  answers part again for the file's *children*, which resolve beside the
+  included file whatever it is named — so `child_base` treats every `include!`
+  target as owning its directory, while `Pending::module` carries the
+  includer's path. `src/modtree.rs`'s module docs say which caller wants which.
+- **How far to take it, and the safe stopping point — measured before choosing.**
+  Reachability only, and only for a file nothing else reaches. A file reached
+  **only** through an `include!` has its items take no part in resolution:
+  nothing in one is reported as an unused public item, and nothing in one keeps
+  another item alive; a file a `mod` chain also reaches is analyzed exactly as
+  it always was. The alternative was measured rather than reasoned about,
+  by building it and running it: admitting the spliced items turns
+  `windows-sys`'s **10 findings into 132,414**, all `unused_pub_item`, over a
+  generated Windows API surface. That is a finding population this phase would
+  have created while removing another, and it is not this phase's to create.
+  The boundary is one filter in `analyze_with` rather than a missing answer —
+  spliced files are parsed, gated and given their module paths exactly like the
+  rest — and it is named by a test,
+  `an_included_files_items_take_no_part_in_resolution`, whose control is
+  `reached_both_ways`: a file both an `include!` and a `mod` chain reach *is*
+  analyzed, so the test cannot pass by resolution simply not running.
+- **The unreadable form stays unreadable, under one policy and not two.**
+  `include!(concat!(env!("OUT_DIR"), ...))` cannot be resolved without
+  building. `src/deps.rs` already answers it — skip the package with a warning
+  (`INCLUDE_REASON`) rather than guess — and the module tree adds nothing: no
+  warning of its own, and no exemption either. Both callers now go through one
+  reader, `deps::included_file`, which returns `Included::At` or
+  `Included::Unreadable` and leaves the *policy* to each; a second copy of
+  "which forms are readable" is exactly the drift phases 11 and 15 had to clean
+  up. A warning from the module tree would have done worse than nothing: an
+  incomplete module tree skips the whole package's dead-file check, so it would
+  have turned an unreadable `include!` into silence. `serde` and `serde_core`
+  are written this way and contribute 36 of the corpus's dead files, every one
+  of which still reports.
+- **This phase removes findings, which is the opposite of the usual risk.**
+  Every dead-file change so far could only add noise; this one takes 246 away,
+  so the failure to avoid is exonerating a file that really is dead. A file is
+  spared only when an `include!` Deadwood actually read names it, or a `mod`
+  chain from such a file does. Everything the reader stops at keeps reporting:
+  past the depth cap, behind a `cfg` the matrix rules out, or named by a path
+  only a build knows. `tests/fixtures/included/src/attic.rs` is a plain dead
+  file sitting beside a spliced tree, and it is reported.
+
+### What it found
+
+- **The corpus, re-measured.** Against `3eb6cfb` over the 57 targets phase 17's
+  corpus has grown to — 35 registry crates in `~/.cargo/registry/src/*/*/`, 21
+  fixtures and Deadwood itself — findings fall from **466 to 220** and
+  `dead_file` from **288 to 42**. `windows-sys-0.61.2` reports **no dead
+  file**: 256 findings become 10, and those 10 are the `unused_pub_item`
+  findings it already had, unchanged.
+- **And nothing else moved.** 342 output artefacts were compared against a
+  binary built from `main` in a detached worktree — 57 targets × {text,
+  `--json`} × {stdout, stderr, exit code}. **Two differ, and both are
+  `windows-sys`'s stdout.** Every other target is byte-identical, stderr and
+  exit codes included. The dead-file message itself was deliberately left
+  alone: "not reachable … via `mod` declarations" is still true of every file
+  that gets it, and rewording it would have changed 42 findings' text to prove
+  nothing.
+- **The three fixtures this phase adds** bring the corpus to 60 targets, 226
+  findings and 46 dead files. Four of those dead files are boundaries being
+  pinned: the wrong directory-ownership layout, a plain dead file beside a
+  spliced tree, the file one past the depth cap, and the orphan beside an
+  unreadable `include!`.
+
+Recall was checked by mutation: thirteen inversions — the dead-file check
+ignoring the spliced set; only the named file reached and its `mod` children
+not, which is the naive fix #39 describes; an `include!` target nesting its
+children in a stem-named directory, and resolving its own path from the
+declaring module's base instead of the file's directory; the depth cap removed;
+the module tree warning about an `include!` it cannot read, which is the second
+policy the third decision exists to prevent; the spliced items admitted to
+resolution; `include!` targets followed as found instead of after the `mod`
+walk drains; a `cfg`-excluded `include!` followed anyway; the spliced items
+placed under a module named after their file; spliced files counted as already
+read by the dependency check; `include_str!` read as an `include!` by the
+shared reader; and the test-build confinement of an `include!` site dropped.
+**Twelve of the thirteen were caught by a named test**, all but one of them a
+test this phase added — the exception is `include_str!`, which phase 2's
+`unused_dependencies_are_reported_and_every_reference_channel_counts` catches
+as well, because the `deps` fixture's README is spliced in that way.
+
+The thirteenth is honest and worth naming: **dropping the test-build
+confinement of an `include!` site is invisible to every output there is.** A
+spliced file's `ParsedFile::test_only` is consumed by nothing, because
+reachability is all a spliced file is used for and the dead-file check does not
+read it. It is computed correctly anyway, so that the answer is already right
+on the day the second decision's boundary moves.
+
+**Review found a case where it was not**, which is the argument for pinning a
+value no output can see. When a file is reached twice — once by a declaration
+that confines it to a test build and once by one that does not — the second
+reach lifts the confinement and re-walks the file to lift it from the file's
+children too. That re-walk discarded its `include!` targets, on the reasoning
+that the first walk had already queued them; true, but it had queued them
+*confined*, and dropping the second queueing left a spliced file holding a
+`test_only` its includer no longer had. The `mod` children were already
+re-queued for exactly this reason — the two queues are drained through the
+same repeat-reach check, and only one of them was being used. Both are now.
+`lifting_a_files_test_confinement_lifts_it_from_what_the_file_includes` pins
+it against `depkinds`, the fixture phase 7 built for the three-declaration
+case, whose `shared_view.rs` now splices a file in beside the one it declares.
+Output is unchanged — 360 artefacts over the 60 targets, byte-identical — and
+that is the point: this is the one value in the phase that a test has to
+defend, because nothing else does.
+
+Closes [#39](https://github.com/rlorenzo/deadwood/issues/39).
+
 ## Next (sequenced, one slice at a time)
 
 1. **A `use` alias claims both namespaces, because resolution does not say which**
    ([#37](https://github.com/rlorenzo/deadwood/issues/37)) — phase 16's
-   residual, and now the last open gap in the baseline sequence: with #32 closed
-   it waits on nothing but a decision to build it. A `pub use` records `both`,
-   which overlaps everything, so a reportable re-export of a braced struct
-   beside a `pub fn` of that name in one module — a pair that compiles — still
-   shares one key. Zero groups in the corpus are shaped that way, and the fix is
-   to resolve the target and record what *it* binds, which the symbol table can
-   already answer for a target inside the workspace and cannot for one outside
-   it. Unlike every other baseline slice it needs no format change: the entries
-   affected already carry a `namespace`.
-2. **Follow an `include!`-ed module tree when deciding what a dead file is**
-   ([#39](https://github.com/rlorenzo/deadwood/issues/39)) — the largest
-   measured source of false positives the corpus has shown, and the first entry
-   on this list that is one. `windows-sys-0.61.2` reaches its whole module tree
-   through `include!("Windows/mod.rs")`, which `src/modtree.rs` does not follow,
-   so **246 files are reported dead in a crate where none is** — 246 of the
-   corpus's 286 `dead_file` findings, in one package. `src/deps.rs` already
-   reads a literal-path `include!` and already declines, out loud, on the
-   `concat!(env!("OUT_DIR"), ...)` form; what is missing is the module tree
-   using it. Found by phase 17 while measuring the corpus for #32.
-3. **Report a `[dev-dependencies]` entry the library itself names.** The
+   residual, and the last open gap in the baseline sequence: with #32 closed and
+   #39 shipped it waits on nothing but a decision to build it. It was item 1
+   before phase 18 as well, and for the wrong reason — that phase says why it
+   was overtaken, and why the swap is recorded rather than done quietly. A
+   `pub use` records `both`, which overlaps everything, so a reportable
+   re-export of a braced struct beside a `pub fn` of that name in one module —
+   a pair that compiles — still shares one key. Zero groups in the corpus are
+   shaped that way, and the fix is to resolve the target and record what *it*
+   binds, which the symbol table can already answer for a target inside the
+   workspace and cannot for one outside it. Unlike every other baseline slice
+   it needs no format change: the entries affected already carry a
+   `namespace`.
+2. **Report a `[dev-dependencies]` entry the library itself names.** The
    check has never made that claim, because the likeliest explanation used to
    be a mis-attribution of ours rather than a manifest that cannot compile.
    The largest of those, an out-of-line `#[cfg(test)] mod tests;`, is closed
    ([#14](https://github.com/rlorenzo/deadwood/issues/14)), so the direction
    is now blocked on evidence of its own rather than on that gap.
 
-No longer on this list: **matching a moved dead file, or a moved package's
-entries** ([#32](https://github.com/rlorenzo/deadwood/issues/32)) — measured in
-phase 17 and closed as working as intended, because the fix costs a field on the
+No longer on this list: **following an `include!`-ed module tree when deciding
+what a dead file is** ([#39](https://github.com/rlorenzo/deadwood/issues/39)) —
+shipped in phase 18, out of turn and for the reason recorded there; and
+**matching a moved dead file, or a moved package's entries**
+([#32](https://github.com/rlorenzo/deadwood/issues/32)) — measured in phase 17
+and closed as working as intended, because the fix costs a field on the
 one class of baseline that is portable across every release, converts a noisy
 failure into a silent one, and only starts working after the `--write-baseline`
 that already fixes it.
