@@ -1,0 +1,11 @@
+# A baseline as the previous release wrote it: every entry names its module and
+# none of them names a namespace, because the field did not exist yet. Four
+# entries for seven findings, and all seven stay suppressed — an entry that says
+# nothing about namespaces has not said the namespaces differ.
+#
+# This is the upgrade path in one file, and it is checked in rather than written
+# by the binary that reads it: a round trip through one version proves nothing
+# about the version that wrote the file last week. The line numbers are
+# deliberately wrong, as the file's neighbours' are, so nothing here can quietly
+# start comparing them.
+baseline = "legacy-baseline.json"

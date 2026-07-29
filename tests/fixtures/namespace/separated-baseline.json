@@ -1,0 +1,8 @@
+{
+  "findings": [
+    { "kind": "unused_pub_item", "file": "src/lib.rs", "line": 6, "name": "Group", "module": "crate::token", "namespace": "type" },
+    { "kind": "unused_pub_item", "file": "src/lib.rs", "line": 28, "name": "Limb", "module": "crate", "namespace": "type" },
+    { "kind": "unused_pub_item", "file": "src/lib.rs", "line": 39, "name": "Shape", "module": "crate", "namespace": "both" },
+    { "kind": "unused_pub_item", "file": "src/lib.rs", "line": 54, "name": "parse", "module": "crate", "namespace": "value" }
+  ]
+}

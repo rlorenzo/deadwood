@@ -1,0 +1,11 @@
+# The half of the key that must *not* move: one entry per `cfg`-alternative
+# pair, and each covers both halves of its pair.
+#
+# `Limb` is two type aliases, so both halves are in the type namespace and the
+# field cannot separate them. `Shape` is a unit struct opposite a function: the
+# struct binds a value of its own name and so is in *both* namespaces, which
+# overlaps the function — the deliberately forgiving reading, and the one that
+# leaves two spellings of one item under one entry.
+#
+# Only `token::Group` and `parse` are left to report.
+baseline = "alternatives-baseline.json"

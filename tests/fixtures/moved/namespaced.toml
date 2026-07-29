@@ -1,0 +1,5 @@
+# `moved.toml`'s baseline, rewritten by a Deadwood that records the namespace.
+# The relocation identity is built from the fields a move preserves and the
+# namespace is deliberately not one of them, so this must behave exactly as its
+# neighbour does: both moves matched, nothing reported, nothing stale.
+baseline = "namespaced-baseline.json"

@@ -1,0 +1,8 @@
+# Everything except the *value* half of `token::Group`. The struct beside it is
+# recorded, shares a kind, a file, a name and a module with it, and does not
+# cover it: the namespace is the only thing that can tell the two apart, and
+# this file is the whole point of the field.
+#
+# An implementation that recorded the namespace and never compared it would
+# suppress the function too and report nothing at all.
+baseline = "separated-baseline.json"
