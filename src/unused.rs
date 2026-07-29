@@ -41,6 +41,7 @@
 
 use std::path::PathBuf;
 
+use crate::Namespace;
 use crate::config::PublicApi;
 use crate::resolve::{CrateUnit, SymbolTable};
 
@@ -49,6 +50,10 @@ pub struct UnusedItem {
     pub name: String,
     /// Item kind for display: "fn", "struct", "re-export", ...
     pub kind: &'static str,
+    /// Which of Rust's namespaces the name is bound in, which is what tells a
+    /// `pub struct Group` from the `pub fn Group(..)` beside it — the one thing
+    /// the module path cannot separate. See [`crate::Namespace`].
+    pub namespace: Namespace,
     pub file: PathBuf,
     pub line: usize,
     /// The module the item is written in, `crate`-rooted: `crate::alpha`. It is
@@ -76,6 +81,9 @@ pub struct TestOnlyItem {
     pub name: String,
     /// Item kind for display: "fn", "struct", "re-export", ...
     pub kind: &'static str,
+    /// Which of Rust's namespaces the name is bound in. See
+    /// [`crate::Namespace`].
+    pub namespace: Namespace,
     pub file: PathBuf,
     pub line: usize,
     /// The module the item is written in, `crate`-rooted: `crate::alpha`.
@@ -128,6 +136,7 @@ pub fn find_items(
             .map(|def| UnusedItem {
                 name: def.name,
                 kind: def.kind.label(),
+                namespace: def.namespace,
                 file: def.file,
                 line: def.line,
                 module: def.module,
@@ -141,6 +150,7 @@ pub fn find_items(
             .map(|def| TestOnlyItem {
                 name: def.name,
                 kind: def.kind.label(),
+                namespace: def.namespace,
                 file: def.file,
                 line: def.line,
                 module: def.module,
@@ -267,6 +277,66 @@ mod tests {
         assert_eq!(unused.len(), 1, "only b::helper is dead");
         assert_eq!(unused[0].name, "helper");
         assert_eq!(unused[0].file, PathBuf::from("/ws/src/b.rs"));
+    }
+
+    /// The namespace is what tells two same-named items in one *module* apart,
+    /// and it is read off the kind for everything but a struct — where the
+    /// fields decide, because a unit or tuple struct binds a constructor value
+    /// of its own name and a braced one does not.
+    #[test]
+    fn each_reported_item_carries_the_namespace_its_name_is_bound_in() {
+        let unit = crate_of(&[
+            (
+                "",
+                "mod inner;\n\
+                 mod facade { mod hidden; pub use hidden::Thing; }\n\
+                 pub struct Braced { pub field: u8 }\n\
+                 pub struct Tuple(pub u8);\n\
+                 pub struct Unit;\n\
+                 pub enum Choice { One }\n\
+                 pub trait Marker {}\n\
+                 pub type Alias = u8;\n\
+                 pub union Pair { pub a: u8 }\n\
+                 pub const K: u8 = 0;\n\
+                 pub static S: u8 = 0;\n\
+                 pub fn f() {}\n",
+            ),
+            ("inner", "pub fn buried() {}\n"),
+            ("facade/hidden", "pub struct Thing;\n"),
+        ]);
+
+        let mut warnings = Vec::new();
+        let found = find_items(&[unit], &PublicApi::default(), &mut warnings);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let mut bound: Vec<(String, Namespace)> = found
+            .unused
+            .into_iter()
+            .map(|item| (item.name, item.namespace))
+            .collect();
+        bound.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            bound,
+            vec![
+                ("Alias".to_string(), Namespace::Type),
+                ("Braced".to_string(), Namespace::Type),
+                ("Choice".to_string(), Namespace::Type),
+                ("K".to_string(), Namespace::Value),
+                ("Marker".to_string(), Namespace::Type),
+                ("Pair".to_string(), Namespace::Type),
+                ("S".to_string(), Namespace::Value),
+                // Twice: the unit struct itself, and — out of public reach,
+                // so reported in its own right — the `pub use` naming it. A
+                // `use` binds every namespace its target does, and nothing
+                // here tracks which those are, so it claims both.
+                ("Thing".to_string(), Namespace::Both),
+                ("Thing".to_string(), Namespace::Both),
+                ("Tuple".to_string(), Namespace::Both),
+                ("Unit".to_string(), Namespace::Both),
+                ("buried".to_string(), Namespace::Value),
+                ("f".to_string(), Namespace::Value),
+            ],
+            "a braced struct is a type alone; a tuple or unit struct is both"
+        );
     }
 
     /// The module path is what tells two same-named items in one file apart, so

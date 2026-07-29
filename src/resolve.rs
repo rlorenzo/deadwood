@@ -149,6 +149,7 @@ use std::path::PathBuf;
 use proc_macro2::{TokenStream, TokenTree};
 use syn::visit::Visit;
 
+use crate::Namespace;
 use crate::config::PublicApi;
 use crate::modtree::ParsedFile;
 
@@ -276,6 +277,31 @@ impl DefKind {
         self == DefKind::Reexport
     }
 
+    /// Which of Rust's namespaces a definition of this kind binds its name in.
+    ///
+    /// [`DefKind::Struct`] is the one kind this cannot answer for, because the
+    /// answer is in the *fields*: a unit or tuple struct binds a value of the
+    /// same name and a braced one does not. [`describe`] is where that is read,
+    /// and it is why the namespace travels beside the kind rather than being
+    /// derived from it at every use.
+    fn namespace(self) -> Namespace {
+        match self {
+            DefKind::Fn | DefKind::Const | DefKind::Static => Namespace::Value,
+            DefKind::Enum | DefKind::Trait | DefKind::TypeAlias | DefKind::Union | DefKind::Mod => {
+                Namespace::Type
+            }
+            // A braced struct is a type alone; the other two spellings are
+            // both, and only `describe` can tell which this is. Answering
+            // `Both` here is the forgiving reading, and it is what the two
+            // sites that build a `Def` without a `syn::Item` in hand would
+            // want anyway.
+            DefKind::Struct => Namespace::Both,
+            // `use` imports every namespace the path it names resolves in, and
+            // resolution here does not track which those are.
+            DefKind::Import | DefKind::Reexport => Namespace::Both,
+        }
+    }
+
     fn is_alias(self) -> bool {
         matches!(self, DefKind::Import | DefKind::Reexport)
     }
@@ -314,6 +340,15 @@ impl RefPath {
 struct Def {
     name: String,
     kind: DefKind,
+    /// Which namespace this definition binds `name` in. Read off the kind for
+    /// everything but a `struct`, whose fields decide it ([`describe`]).
+    ///
+    /// Nothing in resolution reads this: a path is resolved against every
+    /// definition of a name whatever namespace it is in, which is the
+    /// deliberately forgiving reading [`SymbolTable::lookup`] describes. It
+    /// travels with the definition so a *finding* can carry it, and the only
+    /// consumer is the baseline's match key.
+    namespace: Namespace,
     file: PathBuf,
     line: usize,
     /// The module the definition is written in.
@@ -441,6 +476,8 @@ pub(crate) struct SymbolTable {
 pub(crate) struct UnusedDef {
     pub name: String,
     pub kind: DefKind,
+    /// Which namespace the name is bound in, for the baseline's match key.
+    pub namespace: Namespace,
     pub file: PathBuf,
     pub line: usize,
     /// The module the definition is written in, as
@@ -460,6 +497,8 @@ pub(crate) struct UnusedDef {
 pub(crate) struct TestOnlyDef {
     pub name: String,
     pub kind: DefKind,
+    /// Which namespace the name is bound in, for the baseline's match key.
+    pub namespace: Namespace,
     pub file: PathBuf,
     pub line: usize,
     /// The module the definition is written in, as
@@ -661,6 +700,7 @@ impl SymbolTable {
             .map(|def| UnusedDef {
                 name: def.name.clone(),
                 kind: def.kind,
+                namespace: def.namespace,
                 file: def.file.clone(),
                 line: def.line,
                 module: self.module_path(def),
@@ -735,6 +775,7 @@ impl SymbolTable {
             .map(|def| TestOnlyDef {
                 name: def.name.clone(),
                 kind: def.kind,
+                namespace: def.namespace,
                 file: def.file.clone(),
                 line: def.line,
                 module: self.module_path(def),
@@ -1133,6 +1174,7 @@ impl SymbolTable {
                     self.add_def(Def {
                         name: m.ident.to_string(),
                         kind: DefKind::Mod,
+                        namespace: DefKind::Mod.namespace(),
                         file: file.path.clone(),
                         line: m.ident.span().start().line,
                         module,
@@ -1170,6 +1212,7 @@ impl SymbolTable {
                         self.add_def(Def {
                             name,
                             kind: DefKind::Mod,
+                            namespace: DefKind::Mod.namespace(),
                             file: file.path.clone(),
                             line: e.ident.span().start().line,
                             module,
@@ -1182,7 +1225,7 @@ impl SymbolTable {
                     }
                 }
                 other => {
-                    if let Some((ident, kind, attrs, vis)) = describe(other) {
+                    if let Some((ident, kind, namespace, attrs, vis)) = describe(other) {
                         let name = ident.to_string();
                         let is_pub = matches!(vis, syn::Visibility::Public(_));
                         // `fn main` is the binary and build-script entry point
@@ -1197,6 +1240,7 @@ impl SymbolTable {
                         self.add_def(Def {
                             name,
                             kind,
+                            namespace,
                             file: file.path.clone(),
                             line: ident.span().start().line,
                             module,
@@ -1258,6 +1302,7 @@ impl SymbolTable {
             self.add_def(Def {
                 name,
                 kind,
+                namespace: kind.namespace(),
                 file: file.path.clone(),
                 line: leaf.line,
                 module,
@@ -2413,21 +2458,73 @@ fn flatten_use(tree: &syn::UseTree, prefix: &mut Vec<String>, out: &mut Vec<UseL
     }
 }
 
-/// The name, kind, attributes, and visibility of an item that can be defined
-/// at module level and reported. Items with no name of their own (`impl`,
-/// `use`, `extern crate`, macro definitions) return `None`.
+/// The name, kind, namespace, attributes, and visibility of an item that can
+/// be defined at module level and reported. Items with no name of their own
+/// (`impl`, `use`, `extern crate`, macro definitions) return `None`.
+///
+/// The namespace comes from [`DefKind::namespace`] for every kind but a
+/// `struct`, and a struct is the reason this returns it at all: `struct S;`
+/// and `struct S(u8);` bind a constructor value of the same name and `struct S
+/// { .. }` does not, so the fields decide, and this is the only place they are
+/// in hand.
 fn describe(
     item: &syn::Item,
-) -> Option<(&syn::Ident, DefKind, &[syn::Attribute], &syn::Visibility)> {
+) -> Option<(
+    &syn::Ident,
+    DefKind,
+    Namespace,
+    &[syn::Attribute],
+    &syn::Visibility,
+)> {
+    let of = |kind: DefKind| kind.namespace();
     match item {
-        syn::Item::Fn(i) => Some((&i.sig.ident, DefKind::Fn, &i.attrs, &i.vis)),
-        syn::Item::Struct(i) => Some((&i.ident, DefKind::Struct, &i.attrs, &i.vis)),
-        syn::Item::Enum(i) => Some((&i.ident, DefKind::Enum, &i.attrs, &i.vis)),
-        syn::Item::Trait(i) => Some((&i.ident, DefKind::Trait, &i.attrs, &i.vis)),
-        syn::Item::Type(i) => Some((&i.ident, DefKind::TypeAlias, &i.attrs, &i.vis)),
-        syn::Item::Const(i) => Some((&i.ident, DefKind::Const, &i.attrs, &i.vis)),
-        syn::Item::Static(i) => Some((&i.ident, DefKind::Static, &i.attrs, &i.vis)),
-        syn::Item::Union(i) => Some((&i.ident, DefKind::Union, &i.attrs, &i.vis)),
+        syn::Item::Fn(i) => Some((&i.sig.ident, DefKind::Fn, of(DefKind::Fn), &i.attrs, &i.vis)),
+        syn::Item::Struct(i) => Some((
+            &i.ident,
+            DefKind::Struct,
+            match i.fields {
+                syn::Fields::Named(_) => Namespace::Type,
+                syn::Fields::Unnamed(_) | syn::Fields::Unit => Namespace::Both,
+            },
+            &i.attrs,
+            &i.vis,
+        )),
+        syn::Item::Enum(i) => Some((&i.ident, DefKind::Enum, of(DefKind::Enum), &i.attrs, &i.vis)),
+        syn::Item::Trait(i) => Some((
+            &i.ident,
+            DefKind::Trait,
+            of(DefKind::Trait),
+            &i.attrs,
+            &i.vis,
+        )),
+        syn::Item::Type(i) => Some((
+            &i.ident,
+            DefKind::TypeAlias,
+            of(DefKind::TypeAlias),
+            &i.attrs,
+            &i.vis,
+        )),
+        syn::Item::Const(i) => Some((
+            &i.ident,
+            DefKind::Const,
+            of(DefKind::Const),
+            &i.attrs,
+            &i.vis,
+        )),
+        syn::Item::Static(i) => Some((
+            &i.ident,
+            DefKind::Static,
+            of(DefKind::Static),
+            &i.attrs,
+            &i.vis,
+        )),
+        syn::Item::Union(i) => Some((
+            &i.ident,
+            DefKind::Union,
+            of(DefKind::Union),
+            &i.attrs,
+            &i.vis,
+        )),
         _ => None,
     }
 }
@@ -2563,6 +2660,36 @@ fn allows_lint(attr: &syn::Attribute, lints: &[&str]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The kind-to-namespace table, spelled out where a reviewer can check it
+    /// against the language rather than against the code that reads it.
+    ///
+    /// `DefKind::Struct` is absent on purpose: its answer is in the fields, and
+    /// [`describe`] is the only place that has them —
+    /// `each_reported_item_carries_the_namespace_its_name_is_bound_in` covers
+    /// all three spellings. `DefKind::Mod` is here and *only* here, because a
+    /// `mod` declaration is never reportable, so its namespace reaches no
+    /// finding and no output test can see it. It is written down anyway: the
+    /// claim is about Rust, not about what Deadwood currently reports.
+    #[test]
+    fn every_def_kind_binds_the_namespace_rust_binds_it_in() {
+        for (kind, namespace) in [
+            (DefKind::Fn, Namespace::Value),
+            (DefKind::Const, Namespace::Value),
+            (DefKind::Static, Namespace::Value),
+            (DefKind::Enum, Namespace::Type),
+            (DefKind::Trait, Namespace::Type),
+            (DefKind::TypeAlias, Namespace::Type),
+            (DefKind::Union, Namespace::Type),
+            (DefKind::Mod, Namespace::Type),
+            // A `use` binds every namespace its target does, and nothing here
+            // resolves which those are, so it claims both.
+            (DefKind::Import, Namespace::Both),
+            (DefKind::Reexport, Namespace::Both),
+        ] {
+            assert_eq!(kind.namespace(), namespace, "{kind:?}");
+        }
+    }
 
     /// A crate whose files are `(module path, source)`; an empty module path
     /// is the crate root.

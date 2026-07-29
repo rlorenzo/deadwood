@@ -143,6 +143,71 @@ impl FindingKind {
     ];
 }
 
+/// Which of Rust's namespaces a definition binds its name in.
+///
+/// Rust resolves a name in the type namespace and the value namespace
+/// independently, which is why `pub struct Group { .. }` and
+/// `#[allow(non_snake_case)] pub fn Group(..)` compile side by side in one
+/// module. Nothing else on a [`Finding`] tells those two apart — same kind,
+/// same file, same name, same module — so this is what a baseline entry needs
+/// to name one of them without covering the other
+/// ([#30](https://github.com/rlorenzo/deadwood/issues/30)).
+///
+/// Three values, not two, and the third is a quarter of the `pub` structs in
+/// the corpus: a **unit or tuple** struct binds its name in *both* namespaces,
+/// because the constructor is a value of the same name. So is a `use` alias,
+/// which imports every namespace the path it names resolves in.
+///
+/// The macro namespace has no value here: Deadwood reports no macro
+/// definitions, so no finding is ever about a name bound in it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Namespace {
+    /// `struct` with named fields, `enum`, `trait`, `type`, `union`, `mod`.
+    Type,
+    /// `fn`, `const`, `static`.
+    Value,
+    /// Both at once: a unit or tuple `struct`, whose constructor is a value of
+    /// the same name, and a `use` alias, which binds whatever its target does.
+    Both,
+}
+
+impl Namespace {
+    /// Whether these two could name the same definition — whether the sets of
+    /// namespaces they stand for intersect.
+    ///
+    /// This is the whole matching rule, and it is set overlap rather than
+    /// equality because [`Namespace::Both`] is a set of two. `Both` therefore
+    /// covers everything, which is the forgiving direction and the only one
+    /// that is safe: a `pub struct Foo;` that gains a field becomes
+    /// [`Namespace::Type`], and a baseline entry recorded against the unit
+    /// spelling has to keep matching it.
+    ///
+    /// What that leaves uncovered is a `Both` definition beside a `Value` one
+    /// in the same module — and those cannot both exist in one build, because
+    /// both bind the name in the value namespace and rustc rejects the second
+    /// (E0428). Deadwood analyzes the union of every `cfg` configuration, so
+    /// the shape does occur here: as two `cfg`-alternative spellings of one
+    /// item, which is exactly the case one baseline entry *should* cover.
+    pub fn overlaps(self, other: Namespace) -> bool {
+        self == other || self == Namespace::Both || other == Namespace::Both
+    }
+
+    /// How a stale baseline entry names this, for a reader looking for the
+    /// definition it recorded.
+    ///
+    /// Two entries under one name in one module differ in nothing else the
+    /// report prints, so without this the list would repeat a line and expect
+    /// the reader to guess which item each one was about.
+    pub fn describe(self) -> &'static str {
+        match self {
+            Namespace::Type => "type namespace",
+            Namespace::Value => "value namespace",
+            Namespace::Both => "type and value namespaces",
+        }
+    }
+}
+
 /// A single issue reported by the analyzer.
 #[derive(Debug, Clone, Serialize)]
 pub struct Finding {
@@ -174,6 +239,16 @@ pub struct Finding {
     /// fields, or constructs this struct with a literal, has to learn about it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub module: Option<String>,
+    /// Which namespace the named item binds its name in, for the same three
+    /// item kinds that carry a [`Finding::module`] and absent for the same four
+    /// that do not — see [`Namespace`].
+    ///
+    /// Present on exactly the entries `module` is present on. That does not
+    /// make the field free — a Deadwood that knows `module` and not this one
+    /// rejects a baseline carrying it — but it does mean no *file* becomes
+    /// version-sensitive that was not already ([`crate::baseline`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<Namespace>,
     pub message: String,
 }
 
@@ -349,9 +424,11 @@ pub fn analyze_with(
                         line: None,
                         name: None,
                         // A dead file is not an item: there is no module
-                        // inside it to name, and the file path is already the
-                        // whole of the finding's identity.
+                        // inside it to name, no name to bind in a namespace,
+                        // and the file path is already the whole of the
+                        // finding's identity.
                         module: None,
+                        namespace: None,
                         message: format!(
                             "not reachable from any target of package `{}` via `mod` declarations",
                             package.name
@@ -399,6 +476,7 @@ pub fn analyze_with(
             },
             name: Some(item.name),
             module: Some(item.module),
+            namespace: Some(item.namespace),
         }));
         // The narrower claim, from the same pass: reached, but only from test
         // code. It says what to *do* rather than that the item is dead —
@@ -424,6 +502,7 @@ pub fn analyze_with(
             },
             name: Some(item.name),
             module: Some(item.module),
+            namespace: Some(item.namespace),
         }));
     } else {
         // Both kinds, because both come out of the one resolution pass: a
@@ -462,8 +541,10 @@ pub fn analyze_with(
                     package.name
                 ),
                 name: Some(entry.name),
-                // A manifest entry is in no module.
+                // A manifest entry is in no module, and a crate name in a
+                // manifest is in no namespace of the crate's own code.
                 module: None,
+                namespace: None,
             }),
         );
         findings.extend(
@@ -490,6 +571,7 @@ pub fn analyze_with(
                 ),
                 name: Some(entry.name),
                 module: None,
+                namespace: None,
             }),
         );
     }
@@ -596,8 +678,10 @@ impl GateSites {
                 },
                 name: site.name,
                 // A gate site, not a definition: the name is whatever the gate
-                // sits on, and nothing here tracks which module that is.
+                // sits on, and nothing here tracks which module that is or
+                // which namespace it binds in.
                 module: None,
+                namespace: None,
             })
             .collect()
     }

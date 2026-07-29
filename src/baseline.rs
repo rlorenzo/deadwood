@@ -21,7 +21,8 @@
 //!
 //! Reading is looser than writing on purpose. Only `kind` and `file` are
 //! required, so a hand-written or hand-edited entry is a two-line object;
-//! `line`, `name`, `module`, `severity` and `message` are accepted, written
+//! `line`, `name`, `module`, `namespace`, `severity` and `message` are
+//! accepted, written
 //! back, and shown to whoever reads the file, but see below for which of them
 //! the matching actually uses. Unknown keys are rejected, for the reason every
 //! other file Deadwood reads rejects them: a key that is parsed and ignored is
@@ -29,9 +30,15 @@
 //!
 //! # The match key, and what is deliberately not in it
 //!
-//! An entry matches a finding when **kind, file, name and module** are equal,
-//! with one exception for the module that the next section is entirely about.
-//! That is the whole key, and each exclusion is a decision:
+//! An entry matches a finding on **kind, file, name, module and namespace**.
+//! The first three are compared for equality. The last two are *qualifiers*,
+//! and neither is compared that way: each constrains the match only when both
+//! sides record it, and the namespace is then compared by **overlap** rather
+//! than equality, because [`crate::Namespace::Both`] stands for two namespaces
+//! at once. "An absent qualifier is not a value", below, is entirely about why
+//! — the short version is that an entry written before a field existed has not
+//! said the field differs, it has said nothing. That is the whole key, and each
+//! exclusion is a decision:
 //!
 //! - **Not the line.** Code moves. A baseline keyed on line numbers would
 //!   un-suppress a whole file the first time someone adds an import at the top,
@@ -54,19 +61,32 @@
 //!   "`serde` is in the wrong table", because those are different claims and
 //!   the second one is news.
 //!
-//! - **The module, which arrived last and is the only field the key acquired
-//!   after shipping.** Two `pub fn twin` in two inline modules of one file
-//!   differ in nothing else the key looks at, so one entry used to suppress
-//!   both — and a *third* `twin` added later was suppressed before it existed
+//! - **The module, the first field the key acquired after shipping.** Two `pub
+//!   fn twin` in two inline modules of one file differ in nothing else the key
+//!   looks at, so one entry used to suppress both — and a *third* `twin` added
+//!   later was suppressed before it existed
 //!   ([#16](https://github.com/rlorenzo/deadwood/issues/16)). The module path
 //!   is `crate`-rooted and crate-relative (`crate`, `crate::alpha`), it is what
 //!   [`crate::Finding::module`] carries, and — the property that makes it
 //!   admissible at all — it does not move when code above it does. That is the
 //!   whole test the line failed.
+//! - **The namespace, the second, and the last one Rust has to give.** The
+//!   module did not make the key unique: `pub struct Group { .. }` and the
+//!   `#[allow(non_snake_case)] pub fn Group(..)` beside it share a kind, a file,
+//!   a name *and* a module, so one entry covered both and a third same-named
+//!   item added to that module was suppressed before it existed
+//!   ([#30](https://github.com/rlorenzo/deadwood/issues/30)). What separates
+//!   those two is the namespace Rust binds each name in
+//!   ([`crate::Namespace`]), and it passes the same admissibility test the
+//!   module does: a definition does not change namespace because code around it
+//!   moved. It has three values rather than two, because a unit or tuple struct
+//!   binds a constructor value of its own name and so is in *both* — see
+//!   "Two definitions that still share a key", below, for what that costs and
+//!   why the answer is nothing.
 //!
 //! `name` is an `Option`, and `None` is a value like any other: a dead file has
-//! no name, and matches only a baseline entry that has none either. `module` is
-//! an `Option` too and behaves entirely differently — see below.
+//! no name, and matches only a baseline entry that has none either. `module` and
+//! `namespace` are `Option`s too and behave entirely differently — see below.
 //!
 //! The file path is what makes the key specific enough to be safe — without it
 //! one `unused_pub_item foo` entry would cover every `foo` in the workspace,
@@ -149,53 +169,74 @@
 //! `--write-baseline` re-records everything from the current run and is how a
 //! baseline picks the new paths up.
 //!
-//! # An absent module is not a module: the fallback, in both directions
+//! # An absent qualifier is not a value: the fallback, in every direction
 //!
-//! Only three of the seven kinds have a module to name. A dead file is not an
-//! item at all, the two dependency kinds name an entry in a manifest, and an
-//! unsatisfiable gate names the site the gate is written at rather than a
-//! definition — so the key gained a field most kinds can never fill, and every
-//! baseline written before the field existed fills it for none of them.
+//! Only three of the seven kinds have a module to name, and they are the same
+//! three that bind a name in a namespace. A dead file is not an item at all, the
+//! two dependency kinds name an entry in a manifest, and an unsatisfiable gate
+//! names the site the gate is written at rather than a definition — so the key
+//! gained two fields most kinds can never fill, and every baseline written
+//! before each of them fills it for none of them.
 //!
-//! So `None` here means *nothing was said about the module*, never *the crate
-//! root* — which is why the root is spelled `crate` and not the empty string.
-//! Matching compares modules **only when both sides name one** ([`Modules`]).
-//! An entry with no module covers every finding under its shared key, exactly as
-//! it did before this field existed; a finding with no module is covered by an
-//! entry that names one. The forgiving direction is not a convenience: the
-//! alternative un-baselines every entry of every baseline in every project that
-//! upgrades without touching its file, which is a run failing over code nobody
-//! changed. This project prefers noise to silence, but only when the noise is
-//! about the user's own code.
+//! So `None` here means *nothing was said*, never *the crate root* or *some
+//! particular namespace* — which is why the root is spelled `crate` and not the
+//! empty string. Matching compares each qualifier **only when both sides record
+//! one** ([`Qualifiers`]), and the two are compared as a *pair*, because an
+//! entry is one claim and a finding that matched one entry's module and a
+//! different entry's namespace has been matched by neither. An entry with
+//! neither covers every finding under its shared key, exactly as it did before
+//! these fields existed; a finding with neither is covered by an entry that
+//! records both. The forgiving direction is not a convenience: the alternative
+//! un-baselines every entry of every baseline in every project that upgrades
+//! without touching its file, which is a run failing over code nobody changed.
+//! This project prefers noise to silence, but only when the noise is about the
+//! user's own code.
+//!
+//! The namespace is forgiving one step further than the module, because
+//! [`crate::Namespace::Both`] is a *set* of two: `Both` and `Type` overlap, so
+//! an entry recorded against `pub struct Foo;` still matches after the struct
+//! grows a field and becomes a type alone. Equality there would un-baseline an
+//! item for a change that has nothing to do with whether it is dead.
 //!
 //! The same relation answers both questions — a finding is suppressed when some
 //! entry covers it, and an entry is stale when no finding covers it — from one
 //! function, because two copies could drift into an entry that suppresses a
 //! finding *and* reads as no longer occurring.
 //!
-//! # Two findings that still share a key
+//! # Two definitions that still share a key, and why that is now the right
+//! # answer rather than a gap
 //!
-//! The module narrows the key; it does not make it unique, and one entry still
-//! suppresses **every** finding matching its key. Set semantics, not counting:
-//! recording a multiplicity and reporting the (n+1)th occurrence as new stays
-//! rejected for the reason phase 6 rejected it — with lines unmatched we cannot
-//! say which occurrence is the new one, so the report would point at a line that
-//! is very likely baselined. That is a wrong finding where this is a missed one.
+//! One entry still suppresses **every** finding matching its key. Set
+//! semantics, not counting: recording a multiplicity and reporting the (n+1)th
+//! occurrence as new stays rejected for the reason phase 6 rejected it — with
+//! lines unmatched we cannot say which occurrence is the new one, so the report
+//! would point at a line that is very likely baselined. That is a wrong finding
+//! where this is a missed one.
 //!
-//! Two shapes survive, both measured on real code and both cases where two
-//! definitions genuinely share a file, a name *and* a module:
+//! What can share a key is now exactly one shape, and it is the shape where one
+//! entry is *correct*:
 //!
 //! - **Two `cfg`-alternative definitions of one item.** `#[cfg(feature =
 //!   "utf8")] pub type DefaultCharAccumulator = Utf8Parser;` beside its
 //!   `not(utf8)` twin. Deadwood's matrix is the union of every build, so both
 //!   halves are analyzed and both could be reported. One entry covering both is
-//!   *right* here — it is one item, and a reader fixing it fixes both.
-//! - **A type and a value sharing a name.** `pub struct Group` beside
-//!   `#[allow(non_snake_case)] pub fn Group(..)`, syn's constructor-shim idiom.
-//!   These are two different items, and the module path cannot separate them
-//!   because Rust separates them by *namespace*, which nothing in the key
-//!   models. This is the residual of #16, and it is left open rather than
-//!   guessed at.
+//!   *right* here — it is one item, one place for a reader to open, and one fix.
+//!
+//! That is not luck, and it is the argument the namespace field rests on.
+//! Rust admits two definitions of one name in one module only when they are in
+//! different namespaces, and only when neither is in *both* — a `pub struct
+//! Foo;` beside a `pub fn Foo()` is E0428, "`Foo` must be defined only once in
+//! the value namespace of this module". So every pair that can be compiled
+//! together is a pair the namespace separates, and every pair it does not
+//! separate is a pair that cannot be compiled together: two spellings of one
+//! item behind opposite `cfg`s, which is the case above. The forgiving
+//! treatment of `Both` therefore costs nothing here — the collisions it leaves
+//! behind are the ones worth leaving.
+//!
+//! Measured across the corpus every phase uses, the ten groups the module path
+//! could not separate are six `cfg`-alternative pairs and four type-and-value
+//! pairs, and the field separates four of four while leaving six of six alone.
+//! Both halves of that are in `tests/fixtures/namespace`.
 //!
 //! # Suppressed findings do not appear in the report
 //!
@@ -246,25 +287,48 @@
 //! path written down in `deadwood.toml` must exist, while the default location
 //! simply may or may not have a file in it yet.
 //!
-//! # Reading a newer baseline is a hard error too, and that door is one-way
+//! # Reading a newer baseline is a hard error too, and that door is one-way —
+//! # but it is one door, not one per field
 //!
-//! [`Entry`] rejects unknown fields, so the compatibility of the `module` field
-//! runs one way only. A newer Deadwood reads every older baseline (the fallback
-//! above); an **older** Deadwood handed a baseline carrying `module` exits 2 with
-//! ``unknown field `module` ``, on a file it read yesterday. Downgrading after
-//! rewriting the baseline needs the field deleted by hand, or the file
-//! regenerated by the older binary.
+//! [`Entry`] rejects unknown fields, so the compatibility of `module` and
+//! `namespace` runs one way only. A newer Deadwood reads every older baseline
+//! (the fallback above); an **older** Deadwood handed a baseline carrying either
+//! exits 2 with ``unknown field `module` `` or ``unknown field `namespace` ``,
+//! on a file it read yesterday. Downgrading after rewriting the baseline needs
+//! the field deleted by hand, or the file regenerated by the older binary.
 //!
-//! Relaxing the strictness would not fix that — the strict reader is the one
-//! already released — and it would cost the protection outright. "A setting that
-//! silently does nothing is worse than no setting" is a rule about config, and
-//! the objection to applying it to a *data* file is fair as far as it goes: an
-//! ignored decoration on an entry still leaves the entry matching, and the
-//! failure is noise rather than silence. But `module` is not a decoration. It is
-//! part of the key, so an entry whose `module` was silently dropped as a typo
-//! falls back to the broad shared key and suppresses the neighbour this field
-//! exists to stop suppressing — silence, in the exact place the phase was about.
-//! The strictness stays, and the door is documented rather than papered over.
+//! A door is per *reader version*, so the second field is a second door and
+//! saying otherwise would be a lie: a Deadwood from between these two phases
+//! reads `module` and rejects `namespace`, on a file it read yesterday. What
+//! the second field does not do is widen the set of *files* that are
+//! version-sensitive at all, and that is a property of where it is written
+//! rather than a hope. Both are recorded on exactly the three kinds that name
+//! an item, and on no other — so every baseline that carries a `namespace`
+//! carries a `module`, and was already unreadable by anything older than that,
+//! while a file recording nothing but dead files, dependency entries or
+//! unsatisfiable gates carries neither and is byte-portable across all three
+//! versions. Both halves were measured against binaries built from `main` and
+//! from the commit before `module` existed, rather than read off the serde
+//! attribute, and `namespace_is_recorded_on_exactly_the_entries_module_is`
+//! keeps the property that bounds them.
+//!
+//! That bound is what a later field would have to earn separately. A *package
+//! name*, which [#32](https://github.com/rlorenzo/deadwood/issues/32) wants,
+//! belongs on every entry including the dead files — so it would make the
+//! byte-portable baselines version-sensitive too, which is a strictly larger
+//! cost than either of these paid, and #32 has to weigh it on its own.
+//!
+//! Relaxing the strictness would not fix any of it — the strict reader is the
+//! one already released — and it would cost the protection outright. "A setting
+//! that silently does nothing is worse than no setting" is a rule about config,
+//! and the objection to applying it to a *data* file is fair as far as it goes:
+//! an ignored decoration on an entry still leaves the entry matching, and the
+//! failure is noise rather than silence. But neither of these is a decoration.
+//! Both are part of the key, so an entry whose `module` or `namespace` was
+//! silently dropped as a typo falls back to the broad shared key and suppresses
+//! the neighbour the field exists to stop suppressing — silence, in the exact
+//! place each phase was about. The strictness stays, and the door is documented
+//! rather than papered over.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -273,7 +337,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::config::Severity;
-use crate::{Finding, FindingKind};
+use crate::{Finding, FindingKind, Namespace};
 
 /// The file name Deadwood looks for when no `baseline` key names one.
 pub const FILE_NAME: &str = "deadwood-baseline.json";
@@ -339,16 +403,22 @@ pub struct Key {
     /// `crate::alpha`, for the kinds that have one. `None` is not a wildcard in
     /// the *key* — two keys with different modules are different keys, and both
     /// are reported and deduplicated on their own — but it is one in
-    /// [`Modules::covers`], which is where matching happens.
+    /// [`Qualifiers::covers`], which is where matching happens.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub module: Option<String>,
+    /// Which namespace the name is bound in, for the same kinds and on the same
+    /// terms as `module`: a value in the key, a wildcard in
+    /// [`Qualifiers::covers`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<Namespace>,
 }
 
-/// The part of a key that every key has, whatever it says about the module.
+/// The part of a key that every key has, whatever it says about the module or
+/// the namespace.
 ///
-/// Matching falls back to this whenever one side records no module, which is
-/// what makes a baseline written before the field existed keep working. The
-/// module is not in it: it is carried alongside, as a [`Modules`].
+/// Matching falls back to this whenever one side records neither, which is what
+/// makes a baseline written before those fields existed keep working. Both are
+/// carried alongside, as a [`Qualifiers`].
 type Shared = (FindingKind, PathBuf, Option<String>);
 
 impl Key {
@@ -358,6 +428,7 @@ impl Key {
             file: finding.file.clone(),
             name: finding.name.clone(),
             module: finding.module.clone(),
+            namespace: finding.namespace,
         }
     }
 
@@ -380,6 +451,19 @@ impl Key {
     /// carries a name, so an entry that lost the name requirement still has
     /// nothing to pair with. It stays because an identity without a name is not
     /// one, not because it is load bearing today.
+    ///
+    /// **The namespace is deliberately not here**, and it is the one field of
+    /// the key this pass does not read. An entry written before that field
+    /// existed records none, so an identity that required one would answer
+    /// `None` for every entry in every baseline already committed — and a
+    /// moved file would un-baseline for all of them, which is the migration
+    /// this project will not make. Comparing it forgivingly is not available
+    /// either: a [`Relocation`] is a hash key, and "these two might be the same
+    /// definition" is not an equivalence. What the field does reach is the
+    /// ambiguity guard in [`relocations`], which counts keys rather than
+    /// files — so a pair the namespace newly separates makes the pass *decline*
+    /// rather than pair one entry with both findings. Coarser here means
+    /// noisier, which is the direction this pass already falls back in.
     fn relocation(&self, packages: &Packages) -> Option<Relocation> {
         Some(Relocation {
             kind: self.kind,
@@ -389,11 +473,14 @@ impl Key {
         })
     }
 
-    /// `src/lib.rs: unused_pub_item `dead` in `crate::alpha``, for the text
-    /// report.
+    /// `src/lib.rs: unused_pub_item `dead` in `crate::alpha` (value
+    /// namespace)`, for the text report.
     ///
-    /// The module is appended only when there is one, so an entry written
-    /// before the field existed is described exactly as it always was.
+    /// Each qualifier is appended only when there is one, so an entry written
+    /// before either field existed is described exactly as it always was. The
+    /// namespace is not decoration: two entries that differ only in it name two
+    /// different items, and a stale list that printed the same line twice would
+    /// leave the reader to guess which was which.
     pub fn describe(&self) -> String {
         let kind = self.kind.label();
         let mut out = match &self.name {
@@ -403,59 +490,83 @@ impl Key {
         if let Some(module) = &self.module {
             out.push_str(&format!(" in `{module}`"));
         }
+        if let Some(namespace) = self.namespace {
+            out.push_str(&format!(" ({})", namespace.describe()));
+        }
         out
     }
 }
 
-/// What one side of the match records about the module, under one [`Shared`]
-/// key.
+/// What one side of the match records *beyond* the [`Shared`] key: which module
+/// each of its keys names, and which namespace.
 ///
 /// This is the whole of the format's compatibility story, and it is
-/// deliberately the *forgiving* reading in both directions. A side that records
+/// deliberately the *forgiving* reading in every direction. A side that records
 /// no module has not said the modules differ — it has said nothing about
 /// modules at all — so there is nothing to compare and the shared key is the
-/// whole key, which is exactly today's behaviour. Only when both sides name a
-/// module does a mismatch separate them.
+/// whole key, which is exactly the behaviour before that field existed. The
+/// namespace arrived later and answers the same way for the same reason.
 ///
-/// The alternative, treating an absent module as a module of its own, would
+/// The alternative, treating an absent field as a value of its own, would
 /// un-baseline every entry in every baseline ever written the moment a project
 /// upgraded — a file the user committed, breaking on a run that changed no code
 /// of theirs. That is the loudest possible noise, and this project prefers noise
 /// to silence only when the noise is about the user's own code.
 ///
+/// The two fields are held as *pairs* rather than as two independent sets: an
+/// entry is one claim, and a finding matching one entry's module and a
+/// different entry's namespace has been matched by neither.
+///
 /// Never empty: it exists only where something was added to it.
 #[derive(Debug, Default)]
-struct Modules {
-    /// Something under this key records no module.
-    unqualified: bool,
-    /// The modules that are named.
-    qualified: HashSet<String>,
+struct Qualifiers {
+    /// One per key recorded under this shared key, in no order.
+    recorded: HashSet<(Option<String>, Option<Namespace>)>,
 }
 
-impl Modules {
-    fn add(&mut self, module: Option<&str>) {
-        match module {
-            None => self.unqualified = true,
-            Some(module) => {
-                self.qualified.insert(module.to_string());
-            }
-        }
+impl Qualifiers {
+    fn add(&mut self, module: Option<&str>, namespace: Option<Namespace>) {
+        self.recorded
+            .insert((module.map(str::to_string), namespace));
     }
 
-    /// Whether this side covers something on the other side that records
-    /// `module`.
+    /// Whether this side covers something on the other side recorded as
+    /// `module` and `namespace`.
     ///
     /// Symmetric on purpose: `apply` asks it of the entries and `stale` asks it
     /// of the findings, and an entry that suppresses a finding must be the same
     /// relation as a finding that keeps an entry fresh. Two copies of it, drifting,
     /// would produce an entry that both suppresses a finding and reads as stale.
-    fn covers(&self, module: Option<&str>) -> bool {
-        match module {
-            // The other side records no module either: nothing to compare on,
-            // so the shared key is the whole key.
-            None => true,
-            Some(module) => self.unqualified || self.qualified.contains(module),
-        }
+    fn covers(&self, module: Option<&str>, namespace: Option<Namespace>) -> bool {
+        self.recorded.iter().any(|(recorded_module, recorded_ns)| {
+            covers_module(recorded_module.as_deref(), module)
+                && covers_namespace(*recorded_ns, namespace)
+        })
+    }
+}
+
+/// Whether two recorded modules can be the same module.
+///
+/// Absent on either side means nothing was said, and nothing said is not a
+/// disagreement.
+fn covers_module(one: Option<&str>, other: Option<&str>) -> bool {
+    match (one, other) {
+        (Some(one), Some(other)) => one == other,
+        _ => true,
+    }
+}
+
+/// Whether two recorded namespaces can belong to the same definition.
+///
+/// Absent on either side means nothing was said, exactly as for the module.
+/// When both sides did say, the question is whether the namespaces they stand
+/// for overlap ([`Namespace::overlaps`]) rather than whether they are equal:
+/// [`Namespace::Both`] is a set of two, and a `pub struct Foo;` that gains a
+/// field is still the definition its baseline entry recorded.
+fn covers_namespace(one: Option<Namespace>, other: Option<Namespace>) -> bool {
+    match (one, other) {
+        (Some(one), Some(other)) => one.overlaps(other),
+        _ => true,
     }
 }
 
@@ -518,45 +629,72 @@ impl Packages {
 /// between them; declining leaves the run reporting the findings and naming the
 /// entries stale, which is what it does today.
 ///
-/// One set answers both questions, which is the same reason [`Modules::covers`]
+/// "Exactly one" counts distinct **keys**, not distinct files. Those were the
+/// same measurement until the key carried a namespace: two keys sharing a
+/// relocation and a file agreed in kind, name and module, so they *were* one
+/// key. A `pub struct Group` and the `pub fn Group(..)` beside it are now two,
+/// and counting files would let one entry for the struct pair with both
+/// findings the moment the file moved — pass two quietly undoing what pass one
+/// was changed to do.
+///
+/// One set answers both questions, which is the same reason [`Qualifiers::covers`]
 /// is one function: an entry kept fresh by a move and a finding suppressed by
 /// one are the same claim, and two copies of it could drift into an entry that
 /// suppresses a finding *and* reads as no longer occurring.
 fn relocations(entries: &[Key], findings: &[Key], packages: &Packages) -> HashSet<Relocation> {
-    fn candidates(keys: &[Key], packages: &Packages) -> HashMap<Relocation, HashSet<PathBuf>> {
-        let mut out: HashMap<Relocation, HashSet<PathBuf>> = HashMap::new();
+    fn candidates(keys: &[Key], packages: &Packages) -> HashMap<Relocation, HashSet<Key>> {
+        let mut out: HashMap<Relocation, HashSet<Key>> = HashMap::new();
         for key in keys {
             if let Some(relocation) = key.relocation(packages) {
-                out.entry(relocation).or_default().insert(key.file.clone());
+                out.entry(relocation).or_default().insert(key.clone());
             }
         }
         out
     }
 
+    /// The one key carrying a relocation, or `None` when the evidence is
+    /// ambiguous.
+    fn only(keys: &HashSet<Key>) -> Option<&Key> {
+        match keys.len() {
+            1 => keys.iter().next(),
+            _ => None,
+        }
+    }
+
     let from = candidates(entries, packages);
     let to = candidates(findings, packages);
-    from.into_iter()
-        .filter(|(_, files)| files.len() == 1)
-        .filter(|(relocation, _)| to.get(relocation).is_some_and(|files| files.len() == 1))
-        .map(|(relocation, _)| relocation)
+    from.iter()
+        .filter_map(|(relocation, entries)| {
+            let entry = only(entries)?;
+            let finding = only(to.get(relocation)?)?;
+            // The namespace is not part of the identity above, so it is asked
+            // here instead, on the one pair the identity produced. A `pub
+            // struct Group` recorded in one file and a `pub fn Group(..)`
+            // appearing in another are not one definition that moved; they are
+            // a deletion and an addition, and reporting the second while naming
+            // the first stale is what the run did before either was written.
+            // An entry from a baseline older than the field records nothing
+            // here and pairs as it always did.
+            covers_namespace(entry.namespace, finding.namespace).then(|| relocation.clone())
+        })
         .collect()
 }
 
 /// Index one side of the match by its shared key.
-fn index(keys: impl IntoIterator<Item = Key>) -> HashMap<Shared, Modules> {
-    let mut out: HashMap<Shared, Modules> = HashMap::new();
+fn index(keys: impl IntoIterator<Item = Key>) -> HashMap<Shared, Qualifiers> {
+    let mut out: HashMap<Shared, Qualifiers> = HashMap::new();
     for key in keys {
         out.entry(key.shared())
             .or_default()
-            .add(key.module.as_deref());
+            .add(key.module.as_deref(), key.namespace);
     }
     out
 }
 
 /// Whether `side` — one side of the match, indexed by [`index`] — covers `key`.
-fn covered(side: &HashMap<Shared, Modules>, key: &Key) -> bool {
+fn covered(side: &HashMap<Shared, Qualifiers>, key: &Key) -> bool {
     side.get(&key.shared())
-        .is_some_and(|modules| modules.covers(key.module.as_deref()))
+        .is_some_and(|qualifiers| qualifiers.covers(key.module.as_deref(), key.namespace))
 }
 
 /// A recorded finding, as it sits in the file.
@@ -579,9 +717,18 @@ pub(crate) struct Entry {
     name: Option<String>,
     /// Absent in every baseline written before this field existed, and in every
     /// entry for a kind that has no module to name. Absent means *unqualified*,
-    /// never *the crate root*: see [`Modules`].
+    /// never *the crate root*: see [`Qualifiers`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     module: Option<String>,
+    /// Absent in every baseline written before this field existed, and in every
+    /// entry for a kind that has no name in a namespace to bind. Absent means
+    /// *unqualified*, exactly as an absent `module` does: see [`Qualifiers`].
+    ///
+    /// Written on precisely the entries `module` is written on, which bounds
+    /// what it costs: the same files are version-sensitive, and no others —
+    /// see the module docs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    namespace: Option<Namespace>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     message: Option<String>,
 }
@@ -595,6 +742,7 @@ impl Entry {
             line: finding.line,
             name: finding.name.clone(),
             module: finding.module.clone(),
+            namespace: finding.namespace,
             message: Some(finding.message.clone()),
         }
     }
@@ -605,6 +753,7 @@ impl Entry {
             file: self.file.clone(),
             name: self.name.clone(),
             module: self.module.clone(),
+            namespace: self.namespace,
         }
     }
 }
@@ -772,7 +921,7 @@ impl Baseline {
         )
     }
 
-    fn index_entries(&self) -> HashMap<Shared, Modules> {
+    fn index_entries(&self) -> HashMap<Shared, Qualifiers> {
         index(self.entries.iter().map(Entry::key))
     }
 
@@ -780,14 +929,14 @@ impl Baseline {
     /// exact key*, in file order and without repeats.
     ///
     /// `occurring` is the finding side indexed by [`index`], so the relation
-    /// asked here is [`Modules::covers`] read the other way round: an entry
+    /// asked here is [`Qualifiers::covers`] read the other way round: an entry
     /// naming `crate::alpha` is fresh when some finding is in `crate::alpha` —
     /// or when a finding under the same shared key names no module at all,
     /// which is the same forgiving fallback that suppresses it.
     ///
     /// Not the stale set: these are the candidates the second pass then draws
     /// from, and what survives it is what the report calls stale.
-    fn orphaned(&self, occurring: &HashMap<Shared, Modules>) -> Vec<Key> {
+    fn orphaned(&self, occurring: &HashMap<Shared, Qualifiers>) -> Vec<Key> {
         let mut seen = HashSet::new();
         self.entries
             .iter()
@@ -942,6 +1091,7 @@ mod tests {
             line,
             name: name.map(str::to_string),
             module: None,
+            namespace: None,
             message: "why".to_string(),
         }
     }
@@ -950,6 +1100,14 @@ mod tests {
     /// kinds carry and the other four never do.
     fn in_module(mut finding: Finding, module: &str) -> Finding {
         finding.module = Some(module.to_string());
+        finding
+    }
+
+    /// The same finding, recorded as binding its name in `namespace`. Carried
+    /// by exactly the kinds that carry a module, and by no baseline written
+    /// before the field existed.
+    fn in_namespace(mut finding: Finding, namespace: Namespace) -> Finding {
+        finding.namespace = Some(namespace);
         finding
     }
 
@@ -984,6 +1142,12 @@ mod tests {
         )
     }
 
+    /// An item finding as this Deadwood records one: a module *and* a
+    /// namespace. `item` above deliberately stays as an older one wrote it.
+    fn item_in(file: &str, name: &str, module: &str, namespace: Namespace) -> Finding {
+        in_namespace(item(file, name, module), namespace)
+    }
+
     fn reported(findings: &[Finding]) -> Vec<String> {
         findings
             .iter()
@@ -1001,6 +1165,8 @@ mod tests {
     #[test]
     fn entry_matches_a_report_finding_field_for_field() {
         for sample in [
+            item_in("src/lib.rs", "a", "crate::alpha", Namespace::Type),
+            item_in("src/lib.rs", "a", "crate::alpha", Namespace::Both),
             in_module(
                 finding(FindingKind::UnusedPubItem, "src/lib.rs", Some(3), Some("a")),
                 "crate::alpha",
@@ -1029,6 +1195,7 @@ mod tests {
                 file: PathBuf::from("src/a.rs"),
                 name: None,
                 module: None,
+                namespace: None,
             }
         );
     }
@@ -1629,5 +1796,297 @@ mod tests {
         );
         assert!(err.contains("could not read baseline file"), "{err}");
         assert!(err.contains("--write-baseline"), "{err}");
+    }
+
+    /// The defect this field closes, at the level the matching happens: a
+    /// `pub struct Group` and the `pub fn Group(..)` beside it share a kind, a
+    /// file, a name and a module, and one entry must no longer cover both.
+    #[test]
+    fn an_entry_naming_a_namespace_leaves_its_same_named_neighbour_reported() {
+        let baseline = baseline(&[item_in(
+            "src/token.rs",
+            "Group",
+            "crate::token",
+            Namespace::Type,
+        )]);
+        let (kept, report) = applied(
+            &baseline,
+            vec![
+                item_in("src/token.rs", "Group", "crate::token", Namespace::Type),
+                item_in("src/token.rs", "Group", "crate::token", Namespace::Value),
+            ],
+        );
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].namespace, Some(Namespace::Value));
+        assert!(report.stale.is_empty());
+    }
+
+    /// The half that must not move: two `cfg`-alternative spellings of one item
+    /// are in the same namespace, so one entry still covers both. Splitting
+    /// them would report a second finding for one item with one fix.
+    #[test]
+    fn two_cfg_alternatives_of_one_item_stay_covered_by_one_entry() {
+        let baseline = baseline(&[item_in(
+            "src/lib.rs",
+            "DefaultCharAccumulator",
+            "crate",
+            Namespace::Type,
+        )]);
+        let (kept, report) = applied(
+            &baseline,
+            vec![
+                item_in(
+                    "src/lib.rs",
+                    "DefaultCharAccumulator",
+                    "crate",
+                    Namespace::Type,
+                ),
+                item_in(
+                    "src/lib.rs",
+                    "DefaultCharAccumulator",
+                    "crate",
+                    Namespace::Type,
+                ),
+            ],
+        );
+        assert!(reported(&kept).is_empty(), "{:?}", reported(&kept));
+        assert!(report.stale.is_empty());
+    }
+
+    /// The migration, at this level: an entry written before the field existed
+    /// records no namespace, and covers every finding under its shared key
+    /// exactly as it did the day it was written.
+    #[test]
+    fn an_entry_with_no_namespace_still_covers_every_finding_that_shares_its_key() {
+        let baseline = baseline(&[item("src/token.rs", "Group", "crate::token")]);
+        let (kept, report) = applied(
+            &baseline,
+            vec![
+                item_in("src/token.rs", "Group", "crate::token", Namespace::Type),
+                item_in("src/token.rs", "Group", "crate::token", Namespace::Value),
+            ],
+        );
+        assert!(reported(&kept).is_empty(), "{:?}", reported(&kept));
+        assert!(report.stale.is_empty());
+    }
+
+    /// And the other direction, which is what keeps such an entry from reading
+    /// as stale the moment either half of it stops occurring.
+    #[test]
+    fn a_finding_with_no_namespace_is_covered_by_an_entry_that_names_one() {
+        let baseline = baseline(&[item_in(
+            "src/token.rs",
+            "Group",
+            "crate::token",
+            Namespace::Type,
+        )]);
+        let (kept, report) = applied(
+            &baseline,
+            vec![item("src/token.rs", "Group", "crate::token")],
+        );
+        assert!(reported(&kept).is_empty(), "{:?}", reported(&kept));
+        assert!(report.stale.is_empty());
+    }
+
+    /// `Both` is a set of two, so it overlaps either half. This is what a unit
+    /// or tuple struct records, and it is the forgiving direction on purpose:
+    /// the alternative un-baselines an item because it gained a field.
+    #[test]
+    fn an_entry_recorded_against_a_unit_struct_still_matches_once_it_gains_a_field() {
+        let baseline = baseline(&[item_in("src/lib.rs", "Foo", "crate", Namespace::Both)]);
+        let (kept, report) = applied(
+            &baseline,
+            vec![item_in("src/lib.rs", "Foo", "crate", Namespace::Type)],
+        );
+        assert!(reported(&kept).is_empty(), "{:?}", reported(&kept));
+        assert!(report.stale.is_empty());
+    }
+
+    /// The cost of that reading, pinned rather than left to be discovered: a
+    /// `Both` entry covers a `Value` finding too. Nothing legal can produce
+    /// that pair in one module — `pub struct Foo;` beside `pub fn Foo()` is
+    /// E0428 — so what it covers is two `cfg` alternatives, where covering both
+    /// is right.
+    #[test]
+    fn an_entry_in_both_namespaces_covers_a_value_finding_of_the_same_name() {
+        let baseline = baseline(&[item_in("src/lib.rs", "Foo", "crate", Namespace::Both)]);
+        let (kept, report) = applied(
+            &baseline,
+            vec![item_in("src/lib.rs", "Foo", "crate", Namespace::Value)],
+        );
+        assert!(reported(&kept).is_empty(), "{:?}", reported(&kept));
+        assert!(report.stale.is_empty());
+    }
+
+    /// The two qualifiers are one claim, not two independent ones. Two entries
+    /// between them record both halves of this finding's key, and neither
+    /// entry records it: matching either half against whichever entry happens
+    /// to carry it would suppress a finding no entry describes.
+    #[test]
+    fn the_module_and_the_namespace_are_matched_as_one_pair() {
+        let baseline = baseline(&[
+            item_in("src/lib.rs", "Foo", "crate::alpha", Namespace::Type),
+            item_in("src/lib.rs", "Foo", "crate::beta", Namespace::Value),
+        ]);
+        let (kept, report) = applied(
+            &baseline,
+            vec![item_in(
+                "src/lib.rs",
+                "Foo",
+                "crate::alpha",
+                Namespace::Value,
+            )],
+        );
+        assert_eq!(reported(&kept), vec!["src/lib.rs"]);
+        assert_eq!(report.stale.len(), 2);
+    }
+
+    /// A stale entry is something a reader has to go and find, and two entries
+    /// under one name in one module differ in nothing else the line prints.
+    #[test]
+    fn a_stale_entry_names_the_namespace_it_recorded() {
+        let baseline = baseline(&[item_in(
+            "src/token.rs",
+            "Group",
+            "crate::token",
+            Namespace::Value,
+        )]);
+        let (_, report) = applied(&baseline, vec![]);
+        assert_eq!(
+            stale_of(&report),
+            vec!["src/token.rs: unused_pub_item `Group` in `crate::token` (value namespace)"]
+        );
+    }
+
+    /// An entry from before the field exists says nothing about a namespace,
+    /// and its description must not grow a parenthesis claiming it did.
+    #[test]
+    fn a_stale_entry_with_no_namespace_is_described_as_it_always_was() {
+        let baseline = baseline(&[item("src/lib.rs", "gone", "crate")]);
+        let (_, report) = applied(&baseline, vec![]);
+        assert_eq!(
+            stale_of(&report),
+            vec!["src/lib.rs: unused_pub_item `gone` in `crate`"]
+        );
+    }
+
+    /// What bounds the compatibility cost of the second additive field: it is
+    /// written on exactly the entries `module` is written on, so it makes no
+    /// baseline version-sensitive that was not already — a file recording only
+    /// the kinds with no module carries neither field and stays portable. A
+    /// field written anywhere else, such as #32's package name, would not have
+    /// that bound.
+    #[test]
+    fn namespace_is_recorded_on_exactly_the_entries_module_is() {
+        for sample in [
+            in_namespace(item("src/lib.rs", "a", "crate"), Namespace::Value),
+            finding(FindingKind::DeadFile, "src/orphan.rs", None, None),
+            finding(
+                FindingKind::UnusedDependency,
+                "Cargo.toml",
+                None,
+                Some("serde"),
+            ),
+        ] {
+            let entry = serde_json::to_value(Entry::of(&sample)).unwrap();
+            assert_eq!(
+                entry.get("namespace").is_some(),
+                entry.get("module").is_some(),
+                "{entry}"
+            );
+        }
+    }
+
+    /// A relocation is the identity a move preserves, and the namespace is
+    /// deliberately not part of it — an entry written before the field existed
+    /// has none, and requiring one would un-baseline every moved file in every
+    /// baseline already committed. What the field does reach is the ambiguity
+    /// guard: one entry and two findings the namespace now separates is not a
+    /// move anybody can name, so the pass declines and the run says so.
+    #[test]
+    fn a_pair_the_namespace_separates_declines_to_relocate_together() {
+        let baseline = baseline(&[item_in(
+            "src/old.rs",
+            "Group",
+            "crate::token",
+            Namespace::Type,
+        )]);
+        let (kept, report) = applied(
+            &baseline,
+            vec![
+                item_in("src/new.rs", "Group", "crate::token", Namespace::Type),
+                item_in("src/new.rs", "Group", "crate::token", Namespace::Value),
+            ],
+        );
+        assert_eq!(reported(&kept), vec!["src/new.rs", "src/new.rs"]);
+        assert_eq!(report.stale.len(), 1);
+    }
+
+    /// And the case that must keep working: one entry, one finding, one move.
+    /// Counting keys rather than files must not have narrowed the pass itself.
+    #[test]
+    fn a_finding_that_moved_still_relocates_when_the_namespace_agrees() {
+        let baseline = baseline(&[item_in(
+            "src/old.rs",
+            "Group",
+            "crate::token",
+            Namespace::Type,
+        )]);
+        let (kept, report) = applied(
+            &baseline,
+            vec![item_in(
+                "src/new.rs",
+                "Group",
+                "crate::token",
+                Namespace::Type,
+            )],
+        );
+        assert!(reported(&kept).is_empty(), "{:?}", reported(&kept));
+        assert!(report.stale.is_empty());
+    }
+
+    /// A struct that went away and a function of its name that appeared are two
+    /// events, not one move. The relocation identity cannot see the difference
+    /// — it is built from the fields a move preserves and a namespace is not
+    /// one of them — so the pairing it proposes is checked against the
+    /// namespaces before it is accepted.
+    #[test]
+    fn a_definition_replaced_by_one_in_another_namespace_is_not_a_move() {
+        let baseline = baseline(&[item_in(
+            "src/old.rs",
+            "Group",
+            "crate::token",
+            Namespace::Type,
+        )]);
+        let (kept, report) = applied(
+            &baseline,
+            vec![item_in(
+                "src/new.rs",
+                "Group",
+                "crate::token",
+                Namespace::Value,
+            )],
+        );
+        assert_eq!(reported(&kept), vec!["src/new.rs"]);
+        assert_eq!(report.stale.len(), 1);
+    }
+
+    /// The same pairing from a baseline written before the field existed, which
+    /// must relocate exactly as it did then: an entry that records no namespace
+    /// has not said the namespaces differ.
+    #[test]
+    fn a_moved_entry_with_no_namespace_relocates_as_it_always_did() {
+        let baseline = baseline(&[item("src/old.rs", "Group", "crate::token")]);
+        let (kept, report) = applied(
+            &baseline,
+            vec![item_in(
+                "src/new.rs",
+                "Group",
+                "crate::token",
+                Namespace::Value,
+            )],
+        );
+        assert!(reported(&kept).is_empty(), "{:?}", reported(&kept));
+        assert!(report.stale.is_empty());
     }
 }
