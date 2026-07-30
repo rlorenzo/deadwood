@@ -6,7 +6,11 @@
 
 use shared_crate::Thing;
 
-/// Builds a thing.
+/// Builds a thing, on top of doc_and_library_dev_crate.
+///
+/// That name in this sentence is an opaque mention, and the body below names
+/// the same crate in code. One opaque mention stops the entry being judged at
+/// all, so no placement claim is made about it in either direction.
 ///
 /// The example is compiled as a doctest, which links the dev-dependencies, so
 /// what it names is correctly declared as one:
@@ -17,8 +21,24 @@ use shared_crate::Thing;
 /// ```
 pub fn build() -> Thing {
     stale_build_crate::helper();
+    // Two `[dev-dependencies]` entries named by the library itself, which is a
+    // build that cannot link them. The second is named by `tests/it.rs` too,
+    // and is reported all the same: one runtime mention decides it.
+    library_named_dev_crate::helper();
+    library_and_test_dev_crate::helper();
+    doc_and_library_dev_crate::helper();
     Thing
 }
+
+/// A mention Deadwood cannot see through. The body is not expanded, so
+/// `opaque_dev_crate` is known to be used and not known to be used *where* —
+/// which keeps the entry off both placement claims.
+macro_rules! opaque_use {
+    () => {
+        opaque_dev_crate::helper()
+    };
+}
+pub(crate) use opaque_use;
 
 /// The same unit tests written out of line: the gate is here, the code is in
 /// `src/outline_tests.rs`, and nothing in that file says what it is.

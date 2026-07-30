@@ -71,6 +71,32 @@ doc_only_crate = "1"
 # has to stay silent about: reporting it would tell a package its manifest is
 # broken when it compiles.
 test_fn_dev_crate = "1"
+# Named by ordinary library code. A library build does not link
+# `[dev-dependencies]` at all, so this manifest does not compile: the entry
+# belongs one table up. This is the claim phase 5 refused and phase 21 makes.
+library_named_dev_crate = "1"
+# Named by the library *and* by `tests/it.rs`. This is where the two directions
+# stop being mirror images: an entry every mention of which is dev code belongs
+# in `[dev-dependencies]`, but one runtime mention is enough to put an entry
+# here in `[dependencies]`, however much test code names it too — the library
+# cannot link it either way. A finding.
+library_and_test_dev_crate = "1"
+# Named only from inside a `macro_rules!` body, which Deadwood does not expand.
+# A mention it cannot attribute to a target keeps the entry alive for the
+# unused check and proves nothing about placement: not a finding, in either
+# direction.
+opaque_dev_crate = "1"
+# Named only by `build.rs`. A build script links `[build-dependencies]`, not
+# `[dev-dependencies]`, so this entry is in the wrong table — but the table it
+# belongs in is the build one, and this check makes no claim from build-script
+# evidence about a dev entry. Not a finding, deliberately.
+build_only_dev_crate = "1"
+# Named by library code *and* by a doc comment. One opaque mention anywhere
+# stops the check judging an entry at all, so this is not a finding — even
+# though the library mention on its own would be enough. That costs a finding
+# rather than inventing one, and it is the same rule in both directions; it is
+# pinned here because the guard is otherwise invisible from the outside.
+doc_and_library_dev_crate = "1"
 
 [build-dependencies]
 # Named by `build.rs`, the only target that can use a build-dependency.

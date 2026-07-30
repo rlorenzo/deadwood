@@ -21,7 +21,7 @@ this project was bootstrapped from.
 | **Unused pub items** | Fully-`pub` fns, structs, enums, traits, type aliases, consts, statics, and unions that nothing live in the workspace reaches — either no path resolves to them, or every path that does is written inside something itself unreachable | `dead_code` assumes `pub` items have external consumers |
 | **Unused re-exports** | `pub use` re-exports nothing live in the workspace goes through, where outside code cannot reach them either | `unused_imports` only sees imports the crate itself does not use, not ones re-exported for nobody |
 | **Unused dependencies** | `Cargo.toml` entries — normal, dev, or build — whose crate name the declaring package's code never mentions | Cargo has no reason to look, and an unused entry still costs build time and supply-chain surface |
-| **Misplaced dependencies** | `Cargo.toml` entries declared in a table the code naming them cannot see: a `[dependencies]` entry only tests, examples and benches use, or a `[build-dependencies]` entry the build script never touches | Cargo builds the entry wherever you put it; a normal dependency only your tests need is compiled by everyone who depends on you |
+| **Misplaced dependencies** | `Cargo.toml` entries declared in a table the code naming them cannot see: a `[dependencies]` entry only tests, examples and benches use, a `[dev-dependencies]` entry the library itself names — a manifest that does not compile — or a `[build-dependencies]` entry the build script never touches | Cargo builds the entry wherever you put it for the two directions that compile, and a normal dependency only your tests need is compiled by everyone who depends on you. The third does not compile — but the error lands on the first line that used the crate, naming neither the entry nor the table it should have been in |
 | **Unsatisfiable `cfg` gates** | `#[cfg(...)]` gates that can hold in no build of the package, e.g. a `mod` behind a feature the manifest does not declare | The code is never compiled, so no lint ever sees it — and the gate reads as deliberate |
 | **Test-only public items** *(off by default)* | `pub` items the workspace reaches only through its test code — reached, so not dead, but `pub` for nobody | `dead_code` says nothing about an item in a test, bench or example target, since the only build that compiles one also uses it. Where rustc *can* see the item it usually does report it, in a build with the tests left out — see [Known limitations](#known-limitations-tracked-not-hidden) |
 
@@ -171,13 +171,17 @@ Everything else stays quiet, by design:
   precisely because we cannot see through them; a reference that cannot be
   attributed to a target cannot prove misplacement. This is most of what the
   check gives up.
-- **A dev-dependency is never reported.** The only claim available — "the
-  library names it" — describes a manifest that does not compile, so a
-  mis-attribution on our side is the likelier explanation. Two such
-  mis-attributions have been closed, and with both closed the claim has no
-  candidates left in the 35-crate registry corpus, where it had two. The
-  attribute-macro gap above is the one that keeps it quiet: it is the same class
-  of mistake in a form no measurement over that corpus can rule out.
+- **A dev-dependency the library names is reported**, as of phase 21 — the
+  claim phase 5 refused. "The library names it" describes a manifest that does
+  not compile, and what kept it unmade was never the reasoning but the risk that
+  a mis-attribution of ours would invent the finding. Both known sources are
+  closed, and with them closed the claim has no candidates in the 35-crate
+  registry corpus nor in Deadwood itself, where it had two before.
+- **The two directions need different evidence, and that is deliberate.** An
+  entry moves *down* only when every mention is dev code, since one library
+  mention justifies it where it is. It moves *up* on a single runtime mention,
+  since the library cannot link it at all — test code naming it too changes
+  nothing about the build that fails.
 
 `cfg` gates are evaluated rather than always followed, but the *default* set of
 builds analyzed is the union of every possibility — every feature on and off,
@@ -762,8 +766,25 @@ toolchain is pinned to `stable` with `clippy` and `rustfmt` via
   macro cannot be expanded. `#[tokio::test]` really does confine its function;
   an attribute macro merely *named* `test` need not; nothing before expansion
   tells them apart, so neither counts. A `[dependencies]` entry named only from
-  such a function is not reported, and the same gap is why a
-  `[dev-dependencies]` entry the library appears to name is not reported at all.
+  such a function is not reported.
+
+  The gap is **half the size it looks**, and the half that is missing is
+  impossible rather than merely unobserved. An attribute macro has to resolve
+  in the build the item is compiled into, so `#[rstest]` in library code with
+  `rstest` under `[dev-dependencies]` is not a case Deadwood mishandles — it is
+  a case that does not compile (`error[E0433]`, verified). That rules out any
+  test-macro crate declared *only* as a dev-dependency, which is where
+  `rstest`, `test-case`, `serial_test` and `proptest` are conventionally put —
+  though nothing in Cargo requires it, since the kind comes from the table and
+  the same crate listed under `[dependencies]` puts the case back in the
+  reachable half. What remains is a test-confining attribute macro from a crate
+  the library links anyway, `#[tokio::test]` being the common spelling rather
+  than the whole of it. Where such a function names a `[dev-dependencies]`
+  entry, that
+  entry is reported as belonging in `[dependencies]` and should not be — the
+  one shape in which the check invents a finding, with no instance in the
+  35-crate corpus, and `[dependencies]` in `deadwood.toml` is the escape
+  hatch.
 - A file that both a `#[cfg(test)]` `mod` declaration and one no gate confines
   to a test build reach is attributed to the second, so what it names is judged
   as library code. One file gets one answer, and this is the direction that

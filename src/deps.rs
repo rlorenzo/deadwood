@@ -168,29 +168,39 @@
 //! ## Which claims are made
 //!
 //! "No target of the right kind names it" is a weaker statement than "it is in
-//! the wrong table", and only two directions clear the gap:
+//! the wrong table", and three directions clear the gap:
 //!
 //! - A `[dependencies]` entry every mention of which is dev code belongs in
 //!   `[dev-dependencies]`. Nothing is lost by moving it and every consumer of
 //!   the crate stops building it.
+//! - A `[dev-dependencies]` entry the library names belongs in
+//!   `[dependencies]`. That manifest does not compile at all — a library build
+//!   links no dev-dependency — so it is a defect rather than a preference.
 //! - A `[build-dependencies]` entry the build script never names is in a table
 //!   nothing reads, since the build script is the only thing compiled against
 //!   that table. The code that *does* name it says which table it should have
 //!   been in.
 //!
-//! Three directions are deliberately never reported. An entry nothing names is
-//! [`find_unused`]'s answer, not this one's. An entry mentioned only opaquely
-//! is not placed, in any direction. And a `[dev-dependencies]` entry the
-//! library appears to name is left alone: such a manifest does not compile at
-//! all, so the likelier explanation is that we attributed the mention wrongly.
-//! Two sources of that mis-attribution are closed — an out-of-line
-//! `#[cfg(test)] mod tests;` now arrives here as the test code it is
-//! ([`ParsedFile::test_only`]), and so does a bare `#[test] fn` — and with both
-//! closed the claim has **no candidates** anywhere in the local registry, where
-//! it had two before. What keeps it unreported is what is left rather than what
-//! was found: an attribute macro that confines a function without saying so in
-//! any syntax Deadwood reads is the same class of gap in a form no measurement
-//! over this corpus can rule out.
+//! **The first two are not mirror images**, and flattening them is the way to
+//! turn this check into a noisy one. Moving an entry *down* needs every
+//! mention to be dev code, because a single library mention justifies it where
+//! it is. Moving one *up* needs a single runtime mention, because the library
+//! cannot link the entry at all: one such mention is a build that fails,
+//! however much test code names it too.
+//!
+//! The second claim was refused from phase 5 to phase 20, and the reason was
+//! never the reasoning — it was that a mis-attribution of ours was the likelier
+//! explanation, so the claim would have invented findings against manifests
+//! that compile. Both known sources are closed: an out-of-line `#[cfg(test)]
+//! mod tests;` arrives here as the test code it is ([`ParsedFile::test_only`]),
+//! and so does a bare `#[test] fn`. Measured with both closed, the claim has
+//! **no candidates** in the 35 crates of the local registry nor in Deadwood
+//! itself, where it had two before.
+//!
+//! Two directions are still never reported. An entry nothing names is
+//! [`find_unused`]'s answer, not this one's; and an entry mentioned opaquely
+//! *anywhere* is not placed in any direction, even when another mention would
+//! place it — which costs a finding rather than inventing one.
 //!
 //! # Entries that are load bearing without being named
 //!
@@ -725,6 +735,16 @@ fn misplacement(kind: DependencyKind, found: Contexts) -> Option<DependencyKind>
         // Test, example and bench code links `[dev-dependencies]`, so an entry
         // only they name costs every consumer of the crate a build for nothing.
         DependencyKind::Normal if found == Contexts::DEV => Some(DependencyKind::Development),
+        // The mirror, and the two are not mirror images in their evidence. The
+        // arm above needs *every* mention to be dev code, because one library
+        // mention justifies the entry where it is. This one needs only *one*
+        // runtime mention, because the library cannot link a dev-dependency at
+        // all: a single one is a build that fails, however much test code names
+        // it too. `found` is already known to carry no opaque mention, which is
+        // what makes a runtime mention evidence rather than a guess.
+        DependencyKind::Development if found.contains(Contexts::RUNTIME) => {
+            Some(DependencyKind::Normal)
+        }
         // The build script is the only thing that compiles against a
         // `[build-dependencies]` entry, so one it never names is in the wrong
         // table — and the code that does name it says which.
@@ -1950,13 +1970,54 @@ mod tests {
         assert!(misplaced(&manifest, &refs).0.is_empty());
     }
 
-    /// A dev-dependency the library itself appears to name is never reported.
-    /// Such a manifest does not compile, so the likelier explanation is that
-    /// the mention was attributed to the wrong code — a `#[cfg(test)] mod
-    /// tests;` in its own file, say, whose gate lives in the parent.
+    /// A dev-dependency the library itself names belongs in `[dependencies]`.
+    ///
+    /// Phase 5 refused this claim and phase 21 makes it. What changed is not
+    /// the reasoning — such a manifest still does not compile — but the
+    /// evidence: the refusal existed because the likelier explanation was a
+    /// mis-attribution of ours, and the two that were left
+    /// ([#14](https://github.com/rlorenzo/deadwood/issues/14), then #44's
+    /// `#[test]`) are closed. Measured over the corpus with them closed, this
+    /// claim fires on nothing.
     #[test]
-    fn a_dev_dependency_named_by_runtime_code_is_never_reported() {
+    fn a_dev_dependency_named_by_runtime_code_belongs_in_dependencies() {
         let refs = references(&["pub fn go() { dev_only::helper(); }\n"]);
+        let manifest = package(vec![dev_dependency("dev_only")]);
+        assert_eq!(
+            misplaced(&manifest, &refs).0,
+            vec![("dev_only".to_string(), DependencyKind::Normal)]
+        );
+    }
+
+    /// The two directions are not mirror images, and this is the asymmetry.
+    ///
+    /// Moving an entry *down* needs every mention to be dev code, because one
+    /// library mention justifies it where it is. Moving one *up* needs only a
+    /// single runtime mention: the library cannot link a dev-dependency at
+    /// all, so a build fails however much test code names it too.
+    #[test]
+    fn one_runtime_mention_places_a_dev_dependency_however_much_test_code_names_it() {
+        let refs = references_from(&[
+            ("lib", "pub fn go() { dev_only::helper(); }\n"),
+            ("test", "fn t() { dev_only::helper(); }\n"),
+        ]);
+        let manifest = package(vec![dev_dependency("dev_only")]);
+        assert_eq!(
+            misplaced(&manifest, &refs).0,
+            vec![("dev_only".to_string(), DependencyKind::Normal)]
+        );
+    }
+
+    /// And the direction that must stay silent: a dev-dependency only the
+    /// build script names. It cannot link one either, but build-script
+    /// evidence does not say which of the other two tables the entry belongs
+    /// in, and a placement claim that cannot name a table is not a claim.
+    #[test]
+    fn a_dev_dependency_only_the_build_script_names_is_not_placed() {
+        let refs = references_from(&[
+            ("lib", "pub fn go() {}\n"),
+            ("custom-build", "fn main() { dev_only::probe(); }\n"),
+        ]);
         let manifest = package(vec![dev_dependency("dev_only")]);
         assert!(misplaced(&manifest, &refs).0.is_empty());
     }
