@@ -152,9 +152,17 @@ code that does name it lives.
 
 Everything else stays quiet, by design:
 
-- **`#[cfg(test)]` code counts as test code wherever it sits**, so the unit
+- **Test-confined code counts as test code wherever it sits**, so the unit
   tests inside a library do not make every dev-dependency they use look
   misplaced. That is the single largest false positive the check could make.
+  `#[cfg(test)]` is one way to write it and `#[test]`/`#[bench]` is the other:
+  rustc leaves the function those sit on out of every build that is not a test
+  build, so a bare `#[test] fn` at module scope is test code with no
+  `#[cfg(test)]` in sight. Only the built-in, single-segment attribute counts —
+  an attribute macro Deadwood cannot expand (`#[tokio::test]`, and the
+  `#[core::prelude::v1::test]` the built-in one is also spelled as) leaves a
+  mention attributed to the code it is written in, which costs a finding
+  rather than inventing one.
 - **A mention in a doc comment places nothing.** Doc examples are compiled as
   doctests, which link the normal *and* the dev dependencies, so a crate named
   in one is correctly declared under either table.
@@ -165,7 +173,11 @@ Everything else stays quiet, by design:
   check gives up.
 - **A dev-dependency is never reported.** The only claim available — "the
   library names it" — describes a manifest that does not compile, so a
-  mis-attribution on our side is the likelier explanation.
+  mis-attribution on our side is the likelier explanation. Two such
+  mis-attributions have been closed, and with both closed the claim has no
+  candidates left in the 35-crate registry corpus, where it had two. The
+  attribute-macro gap above is the one that keeps it quiet: it is the same class
+  of mistake in a form no measurement over that corpus can rule out.
 
 `cfg` gates are evaluated rather than always followed, but the *default* set of
 builds analyzed is the union of every possibility — every feature on and off,
@@ -741,8 +753,17 @@ toolchain is pinned to `stable` with `clippy` and `rustfmt` via
   correctly for that tree, not for the repository it came from.
 - One mention through a macro, an attribute, or a doc comment is enough to
   make an entry unplaceable, so the misplaced-dependency check is much quieter
-  than the unused one. Across the 34 crates in a local registry it reports
-  nothing at all.
+  than the unused one. Across the 35 crates in a local registry it reports
+  nothing at all — including after `#[test]` and `#[bench]` started counting as
+  confinements, which moved mentions in two of those crates without moving a
+  finding in any of them.
+- A function an attribute macro confines to a test build is read as library
+  code, because only the built-in `#[test]`/`#[bench]` is matched and a proc
+  macro cannot be expanded. `#[tokio::test]` really does confine its function;
+  an attribute macro merely *named* `test` need not; nothing before expansion
+  tells them apart, so neither counts. A `[dependencies]` entry named only from
+  such a function is not reported, and the same gap is why a
+  `[dev-dependencies]` entry the library appears to name is not reported at all.
 - A file that both a `#[cfg(test)]` `mod` declaration and one no gate confines
   to a test build reach is attributed to the second, so what it names is judged
   as library code. One file gets one answer, and this is the direction that

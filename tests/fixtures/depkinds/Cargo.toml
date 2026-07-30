@@ -34,6 +34,28 @@ shared_view_crate = "1"
 # Named a level further down, by `src/shared_view/deeper.rs`. Its own
 # declaration is ungated and says nothing; what it inherits decides.
 shared_view_child_crate = "1"
+# Named only from a bare `#[test] fn` at module scope in `src/lib.rs`. No
+# `#[cfg(test)]` is written anywhere near it, and it does not need one:
+# `#[test]` is itself what keeps the function out of every build a consumer
+# gets, so this entry belongs in `[dev-dependencies]` — a finding.
+test_fn_crate = "1"
+# The same through `#[bench]`, which confines a function identically (`cargo
+# bench` is no more a consumer of the crate than `cargo test` is).
+bench_fn_crate = "1"
+# Named only from a function carrying `#[should_panic]` and no `#[test]`. That
+# attribute confines nothing on its own — rustc compiles the function into the
+# library — so this entry is right where it is: not a finding.
+should_panic_crate = "1"
+# Named only from a function carrying `#[harness::test]`, an attribute macro
+# Deadwood cannot expand. Guessing from the name of one is a guess in both
+# directions, so the mention stays library code and the entry stays put: not a
+# finding.
+proc_macro_test_crate = "1"
+# Named only from a bare `#[test] fn` *inside* the `#[cfg(test)] mod tests`
+# below. The module already moves its whole subtree into the tests, so this
+# entry is reported exactly as it was before `#[test]` counted for anything —
+# which is what makes it the regression guard for the nested case.
+nested_test_fn_crate = "1"
 
 [dev-dependencies]
 # Named only by a `#[cfg(test)]` module inside the library. That module is part
@@ -43,10 +65,20 @@ cfg_test_crate = "1"
 # Named only by a doc example in `src/lib.rs`. A doctest compiles with the
 # dev-dependencies available, so the entry is correctly placed.
 doc_only_crate = "1"
+# Named only from a bare `#[test] fn` at module scope — the shape
+# `clap_builder` names `static_assertions` from, and `winnow`
+# `term-transcript`. The manifest is correct, and this is the entry the check
+# has to stay silent about: reporting it would tell a package its manifest is
+# broken when it compiles.
+test_fn_dev_crate = "1"
 
 [build-dependencies]
 # Named by `build.rs`, the only target that can use a build-dependency.
 build_crate = "1"
+# Named only from a `#[test] fn` inside `build.rs`. A test attribute does not
+# turn build-script code into dev code — there is no test harness for a build
+# script — so this entry is right where it is: not a finding.
+build_test_crate = "1"
 # Never named by the build script; the library names it. The `[dependencies]`
 # entry above is the one carrying the library's use, so this copy is a stale
 # leftover in a table nothing reads: a finding.
