@@ -4,6 +4,11 @@
 
 fn main() {
     build_crate::probe();
+    // A `[dev-dependencies]` entry named only from here. The build script
+    // cannot link it either, but build-script evidence says nothing about
+    // which of the other two tables an entry belongs in, so the check stays
+    // quiet rather than guessing between them.
+    build_only_dev_crate::probe();
 }
 
 // A build script has no test harness: `cargo test` compiles no `#[test]`

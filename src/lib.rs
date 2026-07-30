@@ -746,6 +746,20 @@ fn misplacement_evidence(
                 _ => "library, binaries and proc-macro code",
             }
         ),
+        // A dev-dependency the library names. One such mention is enough, so
+        // the phrasing says what was found rather than "only", which would be
+        // false whenever the tests name it as well — as they usually do.
+        //
+        // The same three target kinds as the arm above, joined by "or" rather
+        // than "and". There the list sits behind "only by", which reads as the
+        // category it is; here it is a positive statement, and "and" would
+        // claim all three referenced the entry — wrong for the lib-only
+        // package that is the common case, and wrong in the direction of
+        // naming targets that do not exist.
+        (metadata::DependencyKind::Development, metadata::DependencyKind::Normal) => format!(
+            "is referenced by the library, binary or proc-macro code of package `{package}`, \
+             which cannot link a dev-dependency"
+        ),
         _ => {
             format!("is referenced only by the test, example and bench code of package `{package}`")
         }

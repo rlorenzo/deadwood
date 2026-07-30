@@ -6,4 +6,6 @@ fn builds_a_thing() {
     let thing = shared_crate::make();
     test_only_crate::assert_ok(thing);
     depkinds::build();
+    // Also named by the library, which is what decides its table.
+    library_and_test_dev_crate::assert_ok();
 }

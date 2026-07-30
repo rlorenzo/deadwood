@@ -1492,10 +1492,13 @@ fn dependencies_declared_in_the_wrong_table_are_reported() {
         // names — both link `[dev-dependencies]` — one only the out-of-line
         // body of a `#[cfg(test)] mod` names, three named only from a function
         // a test attribute confines, and a build-dependency the build script
-        // never touches.
+        // never touches. Then the direction phase 21 added: two
+        // `[dev-dependencies]` entries the library itself names.
         vec![
             "bench_fn_crate",
             "example_only_crate",
+            "library_and_test_dev_crate",
+            "library_named_dev_crate",
             "nested_test_fn_crate",
             "outline_test_crate",
             "stale_build_crate",
@@ -1537,6 +1540,18 @@ fn dependencies_declared_in_the_wrong_table_are_reported() {
         // `build.rs`. A build script has no test harness, so its test
         // functions are build-script code like the rest of the file.
         "build_test_crate",
+        // A dev-dependency named only from inside a `macro_rules!` body. The
+        // new claim needs a runtime mention, and a mention Deadwood cannot see
+        // through is not one.
+        "opaque_dev_crate",
+        // A dev-dependency named only by `build.rs`. The build script cannot
+        // link it either, but that says nothing about which of the other two
+        // tables it belongs in, so no claim is made.
+        "build_only_dev_crate",
+        // Named by library code *and* by a doc comment. The opaque mention
+        // stops the entry being judged, even though the library mention alone
+        // would place it: the guard costs a finding rather than inventing one.
+        "doc_and_library_dev_crate",
     ] {
         assert!(
             !analysis
@@ -1553,6 +1568,74 @@ fn dependencies_declared_in_the_wrong_table_are_reported() {
     assert!(
         reported(&analysis, FindingKind::UnusedDependency).is_empty(),
         "no entry here is unreferenced: {:?}",
+        analysis.findings
+    );
+}
+
+/// The claim phase 5 refused, made in phase 21: a `[dev-dependencies]` entry
+/// the library itself names belongs in `[dependencies]`.
+///
+/// The manifest does not compile — `cargo build` cannot see a dev-dependency
+/// from the library — so this is a real defect rather than a style question.
+/// What kept it unmade was not the reasoning but the evidence: while a
+/// mis-attribution of ours was the likelier explanation the claim would have
+/// invented findings, and #14 closed the first of those, #44 the second.
+#[test]
+fn a_dev_dependency_the_library_names_is_reported_as_belonging_in_dependencies() {
+    let analysis = analyze_fixture("depkinds");
+    let reported_names: Vec<&str> = reported(&analysis, FindingKind::MisplacedDependency)
+        .into_iter()
+        .map(|(_, name)| name)
+        .collect();
+
+    assert!(
+        reported_names.contains(&"library_named_dev_crate"),
+        "named by `pub fn build`, which is a build that cannot link it: {:?}",
+        analysis.findings
+    );
+    // The message has to say which way the entry moves, or a reader cannot
+    // tell it from the claim that moves an entry the other way.
+    let message = analysis
+        .findings
+        .iter()
+        .find(|finding| finding.name.as_deref() == Some("library_named_dev_crate"))
+        .map(|finding| finding.message.clone())
+        .unwrap_or_default();
+    assert!(
+        message.contains("belongs in `[dependencies]` rather than `[dev-dependencies]`"),
+        "the direction has to be in the message: {message}"
+    );
+    // And the evidence clause has to describe *this* claim. Reusing the other
+    // direction's wording would tell a reader the tests name it, which is the
+    // opposite of what was found and the opposite of what to do about it.
+    assert!(
+        message.contains("is referenced by the library"),
+        "the evidence clause belongs to this direction, not the other: {message}"
+    );
+    assert!(
+        !message.contains("only by the test"),
+        "that is the other direction's evidence: {message}"
+    );
+}
+
+/// The asymmetry between the two directions, which is not obvious and is the
+/// thing most likely to be flattened into a bug.
+///
+/// An entry moves *down* only when every mention is dev code, because one
+/// library mention justifies it where it is. It moves *up* on a single runtime
+/// mention, because the library cannot link a dev-dependency at all — so test
+/// code naming it too changes nothing.
+#[test]
+fn a_dev_dependency_both_the_library_and_the_tests_name_still_belongs_in_dependencies() {
+    let analysis = analyze_fixture("depkinds");
+    let reported_names: Vec<&str> = reported(&analysis, FindingKind::MisplacedDependency)
+        .into_iter()
+        .map(|(_, name)| name)
+        .collect();
+
+    assert!(
+        reported_names.contains(&"library_and_test_dev_crate"),
+        "`tests/it.rs` naming it as well does not make the library build work: {:?}",
         analysis.findings
     );
 }
