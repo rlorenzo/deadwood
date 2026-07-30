@@ -2004,49 +2004,149 @@ lesson stands: an invisible mutation is a reason to write the test.
 
 Closes [#44](https://github.com/rlorenzo/deadwood/issues/44).
 
+## Phase 21 — the claim phase 5 refused (shipped)
+
+`misplaced_dependency` made two claims and refused a third: a
+`[dev-dependencies]` entry the *library* names. That manifest does not compile —
+a library build links no dev-dependency — so it is a defect rather than a
+preference, and Deadwood was silent about it from phase 5 to phase 20.
+
+The refusal was never about the reasoning. It was that a mis-attribution of
+ours was the likelier explanation, so the claim would have invented findings
+against manifests that compile — the direction this project cares about most.
+Both known sources are now closed:
+[#14](https://github.com/rlorenzo/deadwood/issues/14) (phase 7) and
+[#44](https://github.com/rlorenzo/deadwood/issues/44) (phase 20).
+This phase takes the measurement #42 asked for with both closed, and makes the
+claim.
+
+### The idea this phase started with, and why it died
+
+Phase 21 was drafted as something else: infer confinement from the manifest, so
+that `#[tokio::test]` would count as test code when `tokio` is declared only
+under `[dev-dependencies]`. That would have been "a way to read such an
+attribute that is not syntax", which is what #42's entry said the direction
+needed.
+
+**The first experiment killed it.** An attribute macro must resolve in the build
+the item is compiled into, so a dev-only macro in library code is not a case
+Deadwood mishandles — it is a case that does not compile:
+
+```console
+$ cargo build   # error[E0433]: unresolved module or unlinked crate `devmac`
+$ cargo test    # the same error: the plain lib target is built first
+```
+
+The inference could only ever fire on code no checked-in package contains. Built
+as drafted it would have gained exactly nothing.
+
+**It produced something better than the idea it killed.** The residual is half
+the size it was written down as, and the missing half is impossible rather than
+unobserved. A test-macro crate declared *only* under `[dev-dependencies]` —
+which is where `rstest`, `test-case`, `serial_test` and `proptest`
+conventionally go — cannot confine a function sitting in library code, because
+the attribute would not resolve there. Cargo takes the kind from the table
+rather than from the crate, so that is a claim about how these crates are
+declared and not about what they are: the same crate listed under
+`[dependencies]` puts the case back in the reachable half. What remains is a
+test-confining attribute macro from a crate the library links anyway,
+`#[tokio::test]` being the common spelling rather than the whole of it.
+`README.md`'s
+limitation now says so, and that narrowing is what made this phase's claim
+defensible: the shape that can still invent a finding is one specific and rare
+one, not the open-ended class the docs described.
+
+### The decisions
+
+**The two directions are not mirror images.** Moving an entry *down* needs every
+mention to be dev code, because one library mention justifies it where it is.
+Moving one *up* needs a single runtime mention, because the library cannot link
+the entry at all — one such mention is a build that fails, however much test
+code names it too. Flattening that into one rule is the way to make this check
+noisy, and
+`one_runtime_mention_places_a_dev_dependency_however_much_test_code_names_it`
+is what defends it.
+
+**Build-script evidence places nothing.** A dev-dependency only `build.rs` names
+is in the wrong table too, but build-script evidence does not say which of the
+other two tables it belongs in, and a placement claim that cannot name a table
+is not a claim. Silent, deliberately.
+
+**No new kind, no new field.** A third message on `misplaced_dependency`, which
+already carries a `file` and a `name` and no `module`, so no baseline field and
+no new configuration surface.
+
+### What it found
+
+- **Zero movement on real code.** 366 artefacts over the 61 targets ×
+  {text, `--json`} × {stdout, stderr, exit code} against a binary built from
+  `main` at `199b97e`: the only differences are `depkinds`'s own stdout and
+  JSON, from the fixture entries added here. **Nothing moves in any of the 35
+  registry crates, nor in Deadwood itself.** That is the measurement #42 asked
+  for, taken with the mis-attributions closed.
+- **Recall, checked the way phase 5 checked it.** Four of Deadwood's own
+  `[dependencies]` demoted into `[dev-dependencies]`: **two reported, two not**,
+  and the two misses are exactly the opaque channel doing its job — `syn` has
+  eight doc-comment mentions and `serde_json` two, and one opaque mention
+  anywhere stops an entry being judged. `anyhow` and `proc-macro2` have none and
+  are reported. The same two-of-four shape phase 5 got, for the same reason.
+- **That guard costs a finding**, and it is now pinned rather than incidental:
+  `doc_and_library_dev_crate` is named by library code *and* by a doc comment,
+  and is not reported even though the library mention alone would place it. It
+  survived the first mutation run, which is how it got a fixture entry.
+
+**Recall by mutation: eight inversions, all eight caught by a named test.** Two
+survived the first run — the opaque guard above, and a message that dropped its
+direction and read as the *other* claim while still passing a test that only
+checked the table names. Both have tests now.
+
+Closes [#42](https://github.com/rlorenzo/deadwood/issues/42).
+
 ## Next (sequenced, one slice at a time)
 
-1. **Report a `[dev-dependencies]` entry the library itself names**
-   ([#42](https://github.com/rlorenzo/deadwood/issues/42)) — the mirror of the
-   claim phase 5 does make, and the one it deliberately refused. It stays item 1
-   and it stays open, and what it is waiting on has changed: the measurement it
-   asks for has been taken twice. Against `bc6625f` it returned **two candidates
-   and both were false positives**, which is why phase 20 exists; with
-   [#44](https://github.com/rlorenzo/deadwood/issues/44) in it returns **zero
-   candidates over all 61 targets**. By the issue's own text zero is the argument
-   for closing it, and the reason that is not the conclusion is recorded in a
-   comment on the issue: the zero is again taken over a mis-attribution that is
-   known. A function an attribute macro confines — `#[tokio::test]`, or the
-   `#[core::prelude::v1::test]` spelling rustc honours — is still read as library
-   code, deliberately, because nothing before expansion distinguishes it from an
-   attribute macro merely named `test`. That is this issue's own failure mode in a
-   shape the corpus has no instance of, so it cannot be measured here: what the
-   direction needs next is a corpus that contains one, or a way to read such an
-   attribute that is not syntax. Its failure direction is unchanged and is why the
-   bar is where it is — a finding *invented*, a package told its manifest is
-   broken when it is not.
+**Empty.** Every filed issue is closed: #37 and #39 shipped, #32 was measured
+and closed as working as intended, #44 shipped in phase 20, and #42 shipped in
+phase 21 — the claim it asked for, made on the measurement it asked for.
 
-No longer on this list: **`#[test]` confining an item to a test build**
-([#44](https://github.com/rlorenzo/deadwood/issues/44)) — filed and shipped in
-phase 20, which is where it came from: #42's measurement could not mean anything
-while it was open, and it turned a missed `misplaced_dependency` into a reported
-one on its own account; **a `use` alias claiming both namespaces**
-([#37](https://github.com/rlorenzo/deadwood/issues/37)) — shipped in phase 19,
-which also corrected three of its claims, including the one its headline
-example rests on: the *kind* already separates an unused re-export from an
-unused item of that name, so the collision is on `test_only_item` and nowhere
-else; **following an `include!`-ed module tree when deciding what a dead file
-is** ([#39](https://github.com/rlorenzo/deadwood/issues/39)) — shipped in phase
-18, out of turn and for the reason recorded there; and **matching a moved dead
-file, or a moved package's entries**
-([#32](https://github.com/rlorenzo/deadwood/issues/32)) — measured in phase 17
-and closed as working as intended, because the fix costs a field on the
-one class of baseline that is portable across every release, converts a noisy
-failure into a silent one, and only starts working after the `--write-baseline`
-that already fixes it.
+That is a state to name rather than fill. The list has always been sequenced
+from filed issues, and inventing an entry to keep it non-empty would invert the
+rule the last five phases were decided by: a direction earns a slot by being
+measured, not by being available. Phase 17 ended in a close rather than a
+feature, and phase 21 ended by discarding the idea it was drafted around.
 
-Everything above is filed; the roadmap and the issue list say the same thing,
-so neither can quietly rot.
+What would put something back on it, in the order this project has weighed these
+before:
+
+1. **A finding invented.** Phase 15's tenet. This outranks the others whatever
+   its population — and phase 21 added the only shape in which
+   `misplaced_dependency` can now invent one (below), so the first candidate is
+   already known.
+2. **A finding missed, with a population.** Phase 20's `#[test]` gap
+   qualified on the first count and measured at zero on the second, which is
+   why it shipped as a correctness fix rather than opening a sequence.
+3. **A claim the docs make that the code does not.** Phase 18's spliced
+   `test_only`, phase 20's "the known mis-attribution is gone", and phase 21's
+   own over-broad statement of the attribute-macro residual were all found this
+   way, and none was on any list.
+
+Two limitations are recorded rather than filed, both from phase 21:
+
+- **The one shape that can invent a finding.** A `[dev-dependencies]` entry
+  named only from a function an attribute macro confines, where that macro's
+  crate is one the library links anyway — `#[tokio::test]` is the common
+  spelling, not the whole class — is now reported as belonging in
+  `[dependencies]` and should not be. The other half, where the macro's crate
+  is declared only as a dev-dependency, is impossible rather than unobserved
+  (the attribute would not resolve), which is what made the claim shippable;
+  this half is real. There is
+  no instance in the 35-crate corpus, `[dependencies]` in `deadwood.toml` is the
+  escape hatch, and it earns a slot when a corpus shows it costing someone a
+  false report.
+- **The opaque guard costs a finding.** One opaque mention anywhere stops an
+  entry being judged in either direction, even when an unambiguous runtime
+  mention would place it — which is why the recall check reports two of four.
+  Loosening it is a change to both directions at once and needs its own
+  measurement.
 
 ## Explicitly out of scope for now
 
