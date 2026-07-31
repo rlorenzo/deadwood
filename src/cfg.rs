@@ -51,8 +51,8 @@
 //! - `feature = "..."` against the features `cargo metadata` reports for the
 //!   package, which includes the implicit feature Cargo synthesizes for each
 //!   optional dependency.
-//! - `test`, which the matrix admits by default (see `docs/SCOPE.md` for why
-//!   the quiet default was chosen).
+//! - `test`, which the matrix admits by default (see `docs/HISTORY.md` phase 4
+//!   for why the quiet default was chosen).
 //! - `target_os = "..."`, `target_family = "..."`, `unix`, `windows`.
 //! - `not`, `all`, `any` over any of those, at any nesting depth.
 //!

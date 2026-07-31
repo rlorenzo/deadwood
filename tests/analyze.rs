@@ -2510,7 +2510,7 @@ fn pruning_keeps_a_relocated_entry_with_the_path_it_was_written_with() {
 //
 // Phase 17 measured #32 and closed it: the four kinds with no item identity
 // keep behaving exactly as they do above, and the boundary is pinned here
-// rather than only argued in `docs/SCOPE.md`. Each test below is a case a rule
+// rather than only argued in `docs/HISTORY.md`. Each test below is a case a rule
 // that closed #32 would have had to get right, and each one is a case the rule
 // available gets wrong.
 
