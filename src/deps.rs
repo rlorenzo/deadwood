@@ -159,9 +159,19 @@
 //! uses. The boundary is narrow on purpose: only the built-in, single-segment
 //! attribute, and only where rustc honours it ([`crate::cfg::Site`]). An
 //! attribute macro Deadwood cannot expand — `#[tokio::test]`, or the
-//! `#[core::prelude::v1::test]` the built-in one is also spelled as — leaves a
-//! mention where it was written, which costs a finding rather than inventing
-//! one.
+//! `#[core::prelude::v1::test]` the built-in one is also spelled as — is not a
+//! third spelling of confinement, because it need not confine: it *owns* the
+//! item. The item is that macro's input, what survives expansion and in which
+//! build is unknowable, and so a runtime item under one has its mentions moved
+//! to the opaque context rather than read as the library code they
+//! syntactically sit in ([`crate::cfg::unexpandable_macro`]). Before that
+//! shift, a `[dev-dependencies]` entry named only from a `#[tokio::test] fn`
+//! was reported as belonging in `[dependencies]` — a finding invented against
+//! a manifest that compiles
+//! ([#49](https://github.com/rlorenzo/deadwood/issues/49)). The shift is for
+//! runtime code only: expansion happens inside one crate, so whatever a macro
+//! leaves of an item in a dev target or a build script compiles into that same
+//! target, and the attribution written there holds whatever the macro does.
 //!
 //! **A doc comment attributes to nowhere.** Doc examples are compiled as
 //! doctests, and a doctest links the normal *and* the dev dependencies — so a
@@ -177,10 +187,12 @@
 //! input (a `macro_rules!` body expands wherever it is invoked, which may be a
 //! different target entirely — serde_json's only mention of `itoa` outside
 //! plain code is exactly that), identifiers and strings in attribute
-//! arguments, and every name in a `.rs` file that no `mod` declaration
-//! reaches. That last one is worth spelling out: those files are read at all
-//! *because* a macro we cannot expand declares them (`automod::dir!`), and
-//! that macro is the only thing that knows which target compiles them.
+//! arguments, a runtime item owned by an attribute macro (the item *is* macro
+//! input, tokens and all), and every name in a `.rs` file that no `mod`
+//! declaration reaches. That last one is worth spelling out: those files are
+//! read at all *because* a macro we cannot expand declares them
+//! (`automod::dir!`), and that macro is the only thing that knows which target
+//! compiles them.
 //!
 //! ## Which claims are made
 //!
@@ -212,7 +224,10 @@
 //! mod tests;` arrives here as the test code it is ([`ParsedFile::test_only`]),
 //! and so does a bare `#[test] fn`. Measured with both closed, the claim has
 //! **no candidates** in the 35 crates of the local registry nor in Deadwood
-//! itself, where it had two before.
+//! itself, where it had two before. A third source was found after that
+//! measurement and is closed the other way: a mention under an attribute macro
+//! is not runtime evidence at all, but opaque
+//! ([#49](https://github.com/rlorenzo/deadwood/issues/49)).
 //!
 //! Two directions are still never reported. An entry nothing names is
 //! [`find_unused`]'s answer, not this one's; and an entry mentioned opaquely
@@ -254,14 +269,24 @@
 //!   parts only the test-confined declaration compiles. There is one file and
 //!   one answer, and this is the direction that misses findings instead of
 //!   inventing them ([`crate::modtree::resolve`]).
-//! - A function an *attribute macro* confines to a test build is read as
-//!   library code. `#[tokio::test]` expands to the built-in attribute and does
-//!   confine, but nothing before expansion tells it from an attribute macro
-//!   merely named `test`, so neither is matched ([`crate::cfg::Site`]). A
-//!   `[dependencies]` entry named only from such a function is therefore not
-//!   reported as belonging in `[dev-dependencies]` — and the same gap is why a
-//!   `[dev-dependencies]` entry the library appears to name is still not
-//!   reported at all.
+//! - An item owned by an attribute macro is opaque, and opacity has the cost
+//!   attribution always does here: a `[dependencies]` entry named only from a
+//!   `#[tokio::test] fn` is not reported as belonging in `[dev-dependencies]`,
+//!   even though it does. The macro that does not confine keeps such an entry
+//!   correct, the one that does makes it misplaced, and Deadwood cannot tell
+//!   which it has — so it claims nothing, which misses findings instead of
+//!   inventing them.
+//! - The boundary of "attribute macro" has one corner that is read the safe
+//!   way for placement and the unsafe way for this issue's shape: a
+//!   *single-segment* attribute macro sharing an item with a `#[derive(..)]`
+//!   is indistinguishable from a helper attribute of that derive, is read as
+//!   one, and leaves the item attributed as written
+//!   ([`crate::cfg::unexpandable_macro`]); the multi-segment spelling stays a
+//!   macro, derive or no derive. A test-confining single-segment macro on a
+//!   derive-carrying item would re-open
+//!   [#49](https://github.com/rlorenzo/deadwood/issues/49) in that corner; no
+//!   such spelling has been seen (the known test-confining macros sit on bare
+//!   `fn`s).
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -475,7 +500,7 @@ impl CrateReferences {
         // its target would otherwise put it. A file is `Site::Other`: `#![test]`
         // is not a thing rustc honours.
         let mut origin = origin;
-        origin.context = test_shifted(origin, &ast.attrs, Site::Other);
+        origin.context = shifted(origin, &ast.attrs, Site::Other);
 
         let file = std::mem::take(&mut self.names);
         let mut collector = Collector {
@@ -549,17 +574,6 @@ impl CrateReferences {
     }
 }
 
-/// `origin`'s context, moved to [`Contexts::DEV`] when `attrs` confine the
-/// item they sit on to a test build.
-///
-/// Only runtime code moves. A test target is already dev code, an opaque
-/// mention must not become attributable, and a build script's `#[cfg(test)]`
-/// module is not compiled by `cargo test` at all — it is still build-script
-/// code, and treating it as dev code would be inventing a claim.
-///
-/// `site` is what the item is, which decides whether a `#[test]` written on it
-/// confines it at all ([`Site`]); every caller here states its own answer,
-/// because the ones that are not a `fn` are not a judgement call.
 /// Move each alias's mentions onto the crate it actually names, within one
 /// target's names.
 ///
@@ -587,15 +601,46 @@ fn fold_aliases(names: &mut HashMap<String, Contexts>, aliases: &HashMap<String,
     }
 }
 
-fn test_shifted(origin: Origin<'_>, attrs: &[syn::Attribute], site: Site) -> Contexts {
-    let test_only = origin
-        .gates
-        .is_some_and(|gates| gates.test_only(attrs, site));
-    if origin.context == Contexts::RUNTIME && test_only {
-        Contexts::DEV
-    } else {
-        origin.context
+/// `origin`'s context, moved to [`Contexts::DEV`] when `attrs` confine the
+/// item they sit on to a test build, and to [`Contexts::OPAQUE`] when they
+/// hand it to an attribute macro Deadwood cannot expand
+/// ([`crate::cfg::unexpandable_macro`]).
+///
+/// Only runtime code moves, and for the second shift that is not caution but
+/// the whole reason it is sound to make: expansion happens inside one crate,
+/// so whatever a macro leaves of an item in a dev target or a build script
+/// compiles into that same target, and the attribution written there holds
+/// whatever the macro does. Only in runtime code can expansion move the item
+/// somewhere else — out of every build a consumer gets, if the macro confines
+/// it the way `#[tokio::test]` does — and "used, but no target can be held
+/// responsible" is exactly what the opaque context says. A test target being
+/// already dev code, an opaque mention staying unattributable, and a build
+/// script's `#[cfg(test)]` module staying build-script code (it is not
+/// compiled by `cargo test` at all) are the same rule for the first shift.
+///
+/// Confinement is judged before macro-ownership: a `#[cfg(test)]
+/// #[tokio::test] fn` is test code by its gate, and everything the macro could
+/// leave of it stays inside the test build the gate confines it to.
+///
+/// `site` is what the item is, which decides whether a `#[test]` written on it
+/// confines it at all ([`Site`]); every caller here states its own answer,
+/// because the ones that are not a `fn` are not a judgement call. Macro
+/// ownership has no site: an attribute macro rewrites whatever item kind it
+/// sits on.
+fn shifted(origin: Origin<'_>, attrs: &[syn::Attribute], site: Site) -> Contexts {
+    if origin.context != Contexts::RUNTIME {
+        return origin.context;
     }
+    if origin
+        .gates
+        .is_some_and(|gates| gates.test_only(attrs, site))
+    {
+        return Contexts::DEV;
+    }
+    if crate::cfg::unexpandable_macro(attrs) {
+        return Contexts::OPAQUE;
+    }
+    Contexts::RUNTIME
 }
 
 fn parse(path: &Path) -> Option<syn::File> {
@@ -1011,7 +1056,7 @@ impl Collector<'_, '_> {
     /// only a `fn` can be ([`Site`]).
     fn within(&mut self, attrs: &[syn::Attribute], site: Site, body: impl FnOnce(&mut Self)) {
         let outer = self.origin.context;
-        self.origin.context = test_shifted(self.origin, attrs, site);
+        self.origin.context = shifted(self.origin, attrs, site);
         body(self);
         self.origin.context = outer;
     }
@@ -1876,19 +1921,12 @@ mod tests {
         assert!(misplaced(&manifest, &refs).0.is_empty());
     }
 
-    /// The boundary, from the direction that matters: an attribute Deadwood
-    /// cannot expand confines nothing it can prove, so the mention stays
-    /// library code and the entry stays where the author put it. A
-    /// `[dependencies]` entry reported here would be a finding invented
-    /// against a manifest that compiles.
+    /// The half of the boundary that stays attributed: an attribute that is
+    /// not a macro rewrites nothing, so the mention is the library code it
+    /// sits in and the entry stays where the author put it.
     #[test]
-    fn an_attribute_that_is_not_the_built_in_test_one_leaves_a_mention_in_the_library() {
-        for attribute in [
-            "#[should_panic]",
-            "#[tokio::test]",
-            "#[core::prelude::v1::test]",
-            "#[test_case(1)]",
-        ] {
+    fn an_inert_attribute_leaves_a_mention_in_the_library() {
+        for attribute in ["#[should_panic]", "#[inline]", "#[rustfmt::skip]"] {
             let refs = references(&[format!(
                 "pub fn go() {{}}\n{attribute}\nfn t() {{ maybe_runtime::go(); }}\n"
             )
@@ -1906,6 +1944,83 @@ mod tests {
                 "`{attribute}` must not move a normal entry"
             );
         }
+    }
+
+    /// The half that does not: an attribute macro owns its item, so a mention
+    /// under one is opaque — known used, unknown where — and no entry it is
+    /// the only evidence for is judged in either direction. The second
+    /// direction is the finding [#49] filed: before this shift, a
+    /// `[dev-dependencies]` entry named only from a `#[tokio::test] fn` was
+    /// reported as belonging in `[dependencies]`, against a manifest that
+    /// compiles.
+    ///
+    /// [#49]: https://github.com/rlorenzo/deadwood/issues/49
+    #[test]
+    fn an_attribute_macro_makes_its_items_mentions_opaque() {
+        for attribute in [
+            "#[tokio::test]",
+            "#[core::prelude::v1::test]",
+            "#[test_case(1)]",
+        ] {
+            let refs = references(&[format!(
+                "pub fn go() {{}}\n{attribute}\nfn t() {{ maybe_anywhere::go(); }}\n"
+            )
+            .as_str()]);
+            assert_eq!(
+                refs.names.get("maybe_anywhere").copied(),
+                Some(Contexts::OPAQUE),
+                "`{attribute}` makes its item macro input"
+            );
+            for entry in [
+                dependency("maybe_anywhere"),
+                dev_dependency("maybe_anywhere"),
+            ] {
+                let manifest = package(vec![entry]);
+                assert!(
+                    misplaced(&manifest, &refs).0.is_empty(),
+                    "`{attribute}` leaves the entry unjudged in both directions"
+                );
+            }
+        }
+    }
+
+    /// The scope of that shift: runtime code only. A test target is dev code
+    /// however a macro rewrites its items — expansion stays inside the crate
+    /// being built — so the attribution written there holds, and a normal
+    /// entry named only from under a macro in one is still a finding.
+    #[test]
+    fn an_attribute_macro_in_a_dev_target_leaves_the_mention_dev_code() {
+        let refs = references_from(&[(
+            "test",
+            "#[tokio::test]\nasync fn t() { test_helper::assert_ok(); }\n",
+        )]);
+        assert_eq!(refs.names.get("test_helper").copied(), Some(Contexts::DEV));
+        let manifest = package(vec![dependency("test_helper")]);
+        assert_eq!(
+            misplaced(&manifest, &refs).0,
+            vec![("test_helper".to_string(), DependencyKind::Development)],
+            "the macro changes nothing about which build compiles the mention"
+        );
+    }
+
+    /// Confinement is judged before macro-ownership: a gate is written in the
+    /// syntax and holds whatever the macro emits, so `#[cfg(test)]
+    /// #[tokio::test] fn` is dev code, not an unknown — and a normal entry it
+    /// holds the only mention of is a finding, which opacity would have
+    /// silently given up.
+    #[test]
+    fn a_gate_beside_an_attribute_macro_still_confines() {
+        let refs = references(&[concat!(
+            "pub fn go() {}\n",
+            "#[cfg(test)]\n#[tokio::test]\nasync fn t() { test_helper::assert_ok(); }\n",
+        )]);
+        assert_eq!(refs.names.get("test_helper").copied(), Some(Contexts::DEV));
+        let manifest = package(vec![dependency("test_helper")]);
+        assert_eq!(
+            misplaced(&manifest, &refs).0,
+            vec![("test_helper".to_string(), DependencyKind::Development)],
+            "the gate, not the macro, is what owns the answer"
+        );
     }
 
     /// A build script is not dev code, and a test attribute inside one does

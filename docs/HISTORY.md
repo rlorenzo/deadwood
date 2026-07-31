@@ -2199,3 +2199,90 @@ the map as it was — so the branch went, and the reasoning stayed as a doc
 comment. A branch no test can distinguish is not a branch worth keeping.
 
 Closes [#48](https://github.com/rlorenzo/deadwood/issues/48).
+
+## Phase 23 — an item an attribute macro owns is macro input (shipped)
+
+Phase 20 matched the built-in `#[test]`/`#[bench]` exactly and refused to
+guess about anything else, and phase 21 shipped its claim on the strength of
+that refusal. Together they left one shape inverted: a `[dev-dependencies]`
+entry named only from a `#[tokio::test] fn` in library code was reported as
+belonging in `[dependencies]` — the macro expands to the built-in `#[test]`,
+no build a consumer gets compiles the function, and the manifest the finding
+indicts is correct. A finding *invented*, the direction this project ranks
+above all others, which is why it went first on the Next list with no corpus
+instance to its name.
+
+### The decisions
+
+- **Opacity, not the allowlist.** Issue #49 allowed two answers: treat an item
+  under an unexpandable attribute macro as opaque, or leave the shape to the
+  `[dependencies]` allowlist in `deadwood.toml`. The allowlist answer means
+  the tool knowingly reports a manifest that compiles and asks the user to say
+  so — tenable for a shape with no corpus instance, but the wrong default for
+  the failure direction the project ranks first, and the opaque state needed
+  no new machinery: "known used, unknown where" is exactly what the mention
+  under such a macro is. The whole of the work was the boundary.
+- **The boundary: what is *not* a macro.** An attribute macro receives its
+  item as tokens and may emit anything, so the recognizer
+  (`crate::cfg::unexpandable_macro`) asks the opposite question — which
+  attributes provably rewrite nothing. Three exclusions: the built-in
+  attributes (a fixed list from the Reference's index, with `unsafe` on it for
+  the `#[unsafe(no_mangle)]` wrapper), the reserved tool namespaces
+  (`rustfmt`, `clippy`, `diagnostic`), and an unknown single-segment attribute
+  on an item that also carries `#[derive(..)]` — a derive helper is only legal
+  beside its derive, is inert, and cannot be told from an attribute macro by
+  spelling, so it is read as the helper it almost always is. Everything else
+  can be nothing but an attribute macro on stable rustc: a multi-segment
+  non-tool path (`#[tokio::test]`, `#[core::prelude::v1::test]`) or an
+  underived unknown single segment (`#[rstest]` brought in by `use`). A
+  built-in the list is missing degrades in the safe direction — its item goes
+  opaque, which costs a claim and cannot invent one.
+- **Runtime code only**, and not out of caution: expansion happens inside one
+  crate, so whatever a macro leaves of an item in a dev target or a build
+  script compiles into that same target, and the attribution written there
+  holds whatever the macro does. Only in runtime code can expansion move an
+  item out of every build a consumer gets. Blanket opacity would have silently
+  un-judged a `[dependencies]` entry named only from a `#[tokio::test] fn` in
+  `tests/` — a real finding the fixture now pins (`attr_macro_test_target_crate`).
+- **The gate is judged before the macro.** `#[cfg(test)] #[tokio::test] fn` is
+  test code by its gate, which is written in the syntax and holds whatever the
+  macro emits. Opacity there would trade a known answer for an unknown one.
+- **`cfg_attr` stays unfollowed**, and for this recognizer the refusal is also
+  simply correct: in every build whose predicate does not hold, the item is
+  compiled exactly as written, so its mentions are attributable to the code
+  they sit in.
+
+### What it found
+
+- **Zero movement on real code.** 342 artefacts over the 57 targets present in
+  this environment (31 of the 35 lockfile registry crates — the four absent
+  are Windows-only dependencies never unpacked on this machine — the 25
+  fixtures, and Deadwood itself) against a binary built from `main` at
+  `5bf0e2d`. Two differ, both `depkinds`'s own stdout and JSON, and the
+  difference *is* the fix: `main` reports the four invented findings on the
+  new fixture entries — the `#[tokio::test]` shape, its single-segment and
+  `core::prelude::v1` spellings, and the `impl`-member case — and this does
+  not. The corpus claim behind phase 21 still holds: its `src/` trees carry
+  `target_feature`, `deprecated` and `rustfmt::skip`, all on the inert side of
+  the boundary, and no unexpandable attribute macro.
+- **An extended sweep, beyond the canonical corpus:** this environment's
+  registry holds 330 unpacked crates, not 35. Both binaries were run over
+  every one of them — JSON output and exit code — and all 330 are
+  byte-identical. The recognizer's inert side (built-ins, tool namespaces,
+  derive helpers) covers everything real library code carried.
+
+**Recall by mutation: eight inversions, all eight caught by a named test.**
+Dropping the opaque shift, applying it in every context, judging the macro
+before the gate, guessing `DEV` instead of opaque, giving macro-ownership a
+site, treating every underived single segment as a macro, sweeping the tool
+namespaces in, and dropping the derive-helper exemption. The runtime-only
+guard turned out to be load-bearing for the existing `DEV` shift as well —
+removing it fails eleven tests across every context the fixture pins. The
+ordering mutation is caught by exactly one test
+(`a_gate_beside_an_attribute_macro_still_confines`), written because working
+through the shift's cases showed that swapping gate and macro produces the
+same *findings* on every other pinned shape — `DEV` and opaque are equally
+silent about a correctly-placed dev entry — and the battery confirmed it is
+the only test that can see the difference.
+
+Closes [#49](https://github.com/rlorenzo/deadwood/issues/49).

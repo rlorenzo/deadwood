@@ -88,35 +88,26 @@ alternatives, corpus measurements and mutation runs written down in full in
 22. **A crate is not always spelled like its entry** — `extern crate real as
     alias;` and `use real as alias;` fold mentions onto the crate they bind,
     scoped to where the binding actually holds. Closes #48.
+23. **An item an attribute macro owns is macro input** — a runtime item under
+    an attribute Deadwood cannot expand has its mentions moved to the opaque
+    context instead of read as library code, which closes the one shape in
+    which the placement check invented a finding. Closes #49.
 
 ## Next (sequenced, one slice at a time)
 
-1. **A function an unexpandable attribute macro confines is read as library
-   code** ([#49](https://github.com/rlorenzo/deadwood/issues/49)) — a finding
-   *invented* since phase 21: a `[dev-dependencies]` entry named only from a
-   `#[tokio::test] fn` is reported as belonging in `[dependencies]`, against a
-   manifest that compiles. Half the class is impossible rather than unobserved
-   (a macro crate declared only as a dev-dependency cannot resolve in library
-   code — `error[E0433]`, verified), which is what made phase 21's claim
-   shippable; what is left is a macro from a crate the library links anyway.
-   **No instance in the corpus**, so the decision is between making an
-   unexpandable attribute opaque — Deadwood already has that third state, and
-   the work is telling it from an inert helper attribute like `#[serde(...)]` —
-   and leaving the allowlist to it. First on the list because its direction is
-   the one the project ranks above all others.
-
-2. **One opaque mention stops an entry being placed**
+1. **One opaque mention stops an entry being placed**
    ([#50](https://github.com/rlorenzo/deadwood/issues/50)) — a finding *missed*,
    and the guard is doing more than the job it was written for: a word in a doc
    comment suppresses a claim an unambiguous runtime mention would decide.
-   Phase 21's recall check lost two of four to it. It is second and it is
+   Phase 21's recall check lost two of four to it. It is
    **blocked on remeasuring**: before phase 22 its entire real corpus population
    was `serde_json`'s `serde`, which was
    [#48](https://github.com/rlorenzo/deadwood/issues/48)
    rather than a missed finding. With #48 closed the population needs counting
-   again, and zero would be the argument for closing this rather than building
-   it — the bar [#42](https://github.com/rlorenzo/deadwood/issues/42) set for
-   itself.
+   again — and counting *after* phase 23, which moved a new class of mentions
+   into the opaque context the guard reads. Zero would be the argument for
+   closing this rather than building it — the bar
+   [#42](https://github.com/rlorenzo/deadwood/issues/42) set for itself.
 
 Everything above is filed; the roadmap and the issue list say the same thing,
 so neither can quietly rot. What shipped is in the index above and in
