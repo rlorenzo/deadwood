@@ -652,6 +652,14 @@ impl SymbolTable {
             for file in &unit.spliced {
                 let Some(ast) = &file.ast else { continue };
                 let module = table.module_for(krate, &file.module);
+                // Minting the guessed module also registers it in `by_path`,
+                // where `record_references`' fallback will now stop — so the
+                // guess must never claim its scope is fully known. Marked
+                // opaque, a name the imports do not answer is `Unknown`
+                // rather than a certain-sounding `Absent`, and the file's
+                // relative paths keep the conservatism the ancestor fallback
+                // used to lend them.
+                table.modules[module].opaque = true;
                 let test_context = unit.test_code || file.test_only;
                 let before = table.defs.len();
                 for item in &ast.items {
