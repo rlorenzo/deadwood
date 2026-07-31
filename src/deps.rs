@@ -1061,7 +1061,16 @@ fn doc_attr_text(tokens: &TokenStream) -> Option<String> {
             Some(TokenTree::Ident(ident)),
             Some(TokenTree::Punct(punct)),
             Some(TokenTree::Literal(literal)),
-        ) if ident == "doc" && punct.as_char() == '=' => Some(literal.to_string()),
+        ) if ident == "doc" && punct.as_char() == '=' => {
+            // Parsed rather than stringified, so the raw and escaped
+            // spellings yield the documentation text alone — `r#"…"#`
+            // stringified would shed spurious one-letter "words" into the
+            // mention set. A non-string literal is not documentation.
+            let tokens = TokenStream::from(TokenTree::Literal(literal));
+            syn::parse2::<syn::LitStr>(tokens)
+                .ok()
+                .map(|lit| lit.value())
+        }
         _ => None,
     }
 }
