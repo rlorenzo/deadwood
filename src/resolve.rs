@@ -1686,6 +1686,12 @@ impl SymbolTable {
                 }
                 Ok((current, index, false))
             }
+            // `Self::assoc` in an impl or trait: associated items only. The
+            // refusal is stated rather than inherited — `Self` is no item's
+            // name, so the lookup in `walk_path` would answer `Foreign`
+            // anyway; a mutation run confirms deleting this arm changes
+            // nothing observable, and the arm stays because a refusal that
+            // falls out of a failed lookup is not written down anywhere.
             "Self" => Err(Outcome::Foreign),
             _ => Ok((module, 0, true)),
         }
@@ -4580,6 +4586,44 @@ mod tests {
                 "pub fn helper() -> u32 { 1 }\n#[unsafe(export_name = \"x\")]\npub fn exported() -> u32 { helper() }\n"
             )
             .is_empty()
+        );
+    }
+
+    /// A `self::` path stays in the module it is written in: losing the
+    /// qualifier's meaning would read the head as a name, find nothing, and
+    /// drop a real use on the floor.
+    #[test]
+    fn a_self_qualified_path_resolves_in_its_own_module() {
+        assert!(
+            unused_in_binary_root("pub fn helper() -> u32 { 1 }\nfn main() { self::helper(); }\n")
+                .is_empty(),
+            "`self::helper` is `helper`"
+        );
+    }
+
+    /// `extern crate fixture as renamed;` binds the alias to the crate root:
+    /// a path through the alias is a use of what it names, and dropping the
+    /// binding would leave the head resolving to nothing and the target read
+    /// as dead.
+    #[test]
+    fn an_extern_crate_alias_binds_the_crate_root() {
+        let dep = unit(&[("", "pub fn thing() -> u32 { 1 }")]);
+        let app = CrateUnit {
+            names: vec!["app".to_string()],
+            test_code: false,
+            spliced: Vec::new(),
+            files: unit(&[(
+                "",
+                "extern crate fixture as renamed;\nfn main() { renamed::thing(); }",
+            )])
+            .files,
+        };
+        let crates = [dep, app];
+        let mut table = SymbolTable::build(&crates);
+        table.record_references(&crates);
+        assert!(
+            table.unused_definitions(&PublicApi::default()).is_empty(),
+            "`renamed::thing` reaches through the alias"
         );
     }
 
