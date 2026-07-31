@@ -92,22 +92,34 @@ alternatives, corpus measurements and mutation runs written down in full in
     an attribute Deadwood cannot expand has its mentions moved to the opaque
     context instead of read as library code, which closes the one shape in
     which the placement check invented a finding. Closes #49.
+24. **The opaque guard's population, counted** — #50 measured and closed as
+    working as intended: zero missed findings in the canonical corpus, and
+    every blocked claim in a 330-crate sweep a suppression of noise. Found and
+    filed #55 while measuring. Closes #50.
 
 ## Next (sequenced, one slice at a time)
 
-1. **One opaque mention stops an entry being placed**
-   ([#50](https://github.com/rlorenzo/deadwood/issues/50)) — a finding *missed*,
-   and the guard is doing more than the job it was written for: a word in a doc
-   comment suppresses a claim an unambiguous runtime mention would decide.
-   Phase 21's recall check lost two of four to it. It is
-   **blocked on remeasuring**: before phase 22 its entire real corpus population
-   was `serde_json`'s `serde`, which was
-   [#48](https://github.com/rlorenzo/deadwood/issues/48)
-   rather than a missed finding. With #48 closed the population needs counting
-   again — and counting *after* phase 23, which moved a new class of mentions
-   into the opaque context the guard reads. Zero would be the argument for
-   closing this rather than building it — the bar
-   [#42](https://github.com/rlorenzo/deadwood/issues/42) set for itself.
+1. **A placement claim judged on another entry's evidence**
+   ([#55](https://github.com/rlorenzo/deadwood/issues/55)) — a finding
+   *invented*, live on `main` today: the same crate declared in both
+   `[dependencies]` and `[dev-dependencies]` (extra features for tests —
+   `zerocopy-derive`, `schemars_derive` and `bumpalo` all do it) has one
+   mention set keyed by crate name, so the library mentions that justify the
+   normal copy also indict the dev copy. Every registry instance is masked by
+   an incidental opaque mention, exactly as
+   [#48](https://github.com/rlorenzo/deadwood/issues/48) was; a clean two-file
+   package reproduces the invented finding. Found and filed by phase 24's
+   measurement. The narrow rule — never move an entry into a table already
+   declaring the same crate — closes it without per-entry attribution
+   machinery.
+
+2. **A macOS gate run is not clean**
+   ([#53](https://github.com/rlorenzo/deadwood/issues/53)) — the baseline
+   suppression note prints an absolute path when the workspace resolves
+   through a symlinked temp dir (`/var` → `/private/var`), which fails one
+   test on macOS on an unmodified checkout. Cosmetic in the product, real in
+   the harness; the note should print the path as configured on every
+   platform.
 
 Everything above is filed; the roadmap and the issue list say the same thing,
 so neither can quietly rot. What shipped is in the index above and in
