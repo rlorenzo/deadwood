@@ -1,9 +1,9 @@
 # The repository doubles as a composite GitHub Action. By default the action
 # builds Deadwood from its own checked-out source, so the ref a workflow pins
-# (`rlorenzo/deadwood@main`, later a tag) *is* the tool version it runs —
-# no registry involved, and the action works whether or not a release is
-# published. The `version` input switches to installing a published release
-# from crates.io instead.
+# (`rlorenzo/deadwood@main`, later a tag) *is* the tool version it runs — no
+# published release required, though dependencies still come from crates.io
+# as any build's do. The `version` input switches to installing a published
+# release instead.
 #
 # Inputs are passed to the shell through `env` rather than interpolated into
 # the script, so a value can never be read as code.
@@ -52,5 +52,9 @@ runs:
       env:
         DEADWOOD_PATH: ${{ inputs.path }}
         DEADWOOD_ARGS: ${{ inputs.args }}
-      # `args` is deliberately word-split: it is a list of flags.
-      run: deadwood check "$DEADWOOD_PATH" $DEADWOOD_ARGS
+      # `args` is a list of flags: split on whitespace through `read`, which
+      # — unlike an unquoted expansion — never glob-expands a `*` into
+      # whatever the working directory happens to hold.
+      run: |
+        read -ra args <<< "$DEADWOOD_ARGS"
+        deadwood check "$DEADWOOD_PATH" ${args[@]+"${args[@]}"}
