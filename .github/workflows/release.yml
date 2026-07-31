@@ -14,12 +14,13 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # The library API, checked against the previous release before anything
-  # ships: a change that needs a bigger version bump than the tag declares
-  # is reported here. Informational while the crate is pre-1.0 — a beta is
-  # allowed to break — and skipped loudly on the first release, which has
-  # nothing to compare against. Promote to a blocking `needs` of `build`
-  # at 1.0.
+  # The library API, checked against the previous release: a change that
+  # needs a bigger version bump than the tag declares is reported here.
+  # Informational while the crate is pre-1.0 — a beta is allowed to break —
+  # so it runs beside the release jobs rather than gating them, and skips
+  # loudly on the first release, which has nothing to compare against. To
+  # make it blocking at 1.0, add this job to `publish`'s `needs`: only the
+  # undraft step waits on it, so the assets still build in parallel.
   semver:
     name: semver against previous release
     runs-on: ubuntu-latest

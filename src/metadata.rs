@@ -289,3 +289,16 @@ fn lib_names(manifest: &Path) -> HashMap<String, String> {
         .filter_map(|package| renamed_lib(&package.name, &package.targets))
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    /// The manifest key `default-features` is on unless written: an entry
+    /// that does not spell it keeps the dependency's default features, which
+    /// is what the doubled-copy check reads off this field.
+    #[test]
+    fn an_unwritten_default_features_key_is_on() {
+        let dependency: super::Dependency =
+            serde_json::from_value(serde_json::json!({ "name": "plain" })).unwrap();
+        assert!(dependency.uses_default_features);
+    }
+}

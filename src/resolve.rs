@@ -757,6 +757,31 @@ impl SymbolTable {
         union
     }
 
+    /// The module `path` resolves in, and the prefix of it the table holds:
+    /// the nearest collected ancestor, ending at the crate root, which
+    /// always is.
+    ///
+    /// A spliced file's module path can be a guess at a module that was
+    /// never collected — the macro that declares it is not expanded, so
+    /// nothing put it in the table. Only relative paths read the module at
+    /// all, and resolving one against a wider scope than it was written in
+    /// can mark the wrong definition used, never invent a finding.
+    fn nearest_collected_module<'a>(
+        &self,
+        krate: usize,
+        mut path: &'a [String],
+    ) -> (usize, &'a [String]) {
+        loop {
+            if let Some(&module) = self.by_path.get(&(krate, path.to_vec())) {
+                return (module, path);
+            }
+            match path.split_last() {
+                Some((_, rest)) => path = rest,
+                None => return (self.roots[krate], path),
+            }
+        }
+    }
+
     /// Resolve every path in `crates`, marking the definitions they name.
     ///
     /// Spliced files are walked here and nowhere else: they write paths that
@@ -772,24 +797,7 @@ impl SymbolTable {
         for (krate, unit) in crates.iter().enumerate() {
             for file in unit.files.iter().chain(&unit.spliced) {
                 let Some(ast) = &file.ast else { continue };
-                // A spliced file's module path can be a guess at a module that
-                // was never collected — the macro that declares it is not
-                // expanded, so nothing put it in the table. Fall back to the
-                // nearest ancestor that is there, ending at the crate root,
-                // which always is. Only relative paths read the module at all,
-                // and resolving one against a wider scope than it was written
-                // in can mark the wrong definition used, never invent a
-                // finding.
-                let mut path = file.module.as_slice();
-                let module = loop {
-                    if let Some(&module) = self.by_path.get(&(krate, path.to_vec())) {
-                        break module;
-                    }
-                    match path.split_last() {
-                        Some((_, rest)) => path = rest,
-                        None => break self.roots[krate],
-                    }
-                };
+                let (module, path) = self.nearest_collected_module(krate, file.module.as_slice());
                 let mut walker = RefWalker {
                     table: self,
                     krate,
@@ -1336,106 +1344,123 @@ impl SymbolTable {
     ) {
         for item in items {
             match item {
-                syn::Item::Mod(m) => {
-                    let krate = self.modules[module].krate;
-                    let mut path = self.modules[module].path.clone();
-                    path.push(m.ident.to_string());
-                    let child = self.module_for(krate, &path);
-                    self.modules[child].declared_pub = matches!(m.vis, syn::Visibility::Public(_));
-                    self.add_def(Def {
-                        name: m.ident.to_string(),
-                        kind: DefKind::Mod,
-                        namespace: DefKind::Mod.namespace(),
-                        file: file.path.clone(),
-                        line: m.ident.span().start().line,
-                        module,
-                        reportable: false,
-                        // A `mod` declaration is a leaf in the edge graph —
-                        // paths written inside the module belong to the items
-                        // holding them, not to the declaration — so whether it
-                        // is reached decides nothing, and neither flag needs
-                        // to claim anything.
-                        is_pub: false,
-                        entry_point: EntryPoint::None,
-                        child: Some(child),
-                        target: None,
-                    });
-                    if let Some((_, inner)) = &m.content {
-                        // An inline `#[cfg(test)] mod tests { ... }` is test
-                        // code, exactly as the out-of-line `#[cfg(test)] mod
-                        // tests;` spelling of it is. Both answers come from
-                        // one evaluation of `cfg::Gates::test_only` in
-                        // `crate::modtree`, which walks these declarations
-                        // anyway: this module still does not know what a `cfg`
-                        // is, and the predicate still has one copy.
-                        let inner_context = test_context || file.test_only_mods.contains(&path);
-                        self.collect_items(inner, child, file, true, inner_context);
-                    }
-                }
+                syn::Item::Mod(m) => self.add_module(m, module, file, test_context),
                 syn::Item::Use(u) => self.add_use(u, module, file, top_level, test_context),
-                syn::Item::ExternCrate(e) => {
-                    // `extern crate foo as bar;` binds `bar` to a crate root.
-                    let name = e
-                        .rename
-                        .as_ref()
-                        .map_or_else(|| e.ident.to_string(), |(_, alias)| alias.to_string());
-                    if let Some(&root) = self.externs.get(&e.ident.to_string()) {
-                        self.add_def(Def {
-                            name,
-                            kind: DefKind::Mod,
-                            namespace: DefKind::Mod.namespace(),
-                            file: file.path.clone(),
-                            line: e.ident.span().start().line,
-                            module,
-                            reportable: false,
-                            is_pub: false,
-                            entry_point: EntryPoint::None,
-                            child: Some(root),
-                            target: None,
-                        });
-                    }
-                }
-                other => {
-                    if let Some((ident, kind, namespace, attrs, vis)) = describe(other) {
-                        let name = ident.to_string();
-                        let is_pub = matches!(vis, syn::Visibility::Public(_));
-                        // `fn main` is the binary and build-script entry point
-                        // and has been exempt from reporting since v0.1; being
-                        // a root is the same fact stated for the cascade.
-                        let is_main = kind == DefKind::Fn && name == "main";
-                        let entry_point = if is_main {
-                            EntryPoint::of_context(test_context)
-                        } else {
-                            entry_point_attr(attrs, test_context)
-                        };
-                        self.add_def(Def {
-                            name,
-                            kind,
-                            namespace,
-                            file: file.path.clone(),
-                            line: ident.span().start().line,
-                            module,
-                            reportable: is_pub && !is_main && !has_skip_attr(attrs),
-                            is_pub,
-                            entry_point,
-                            child: None,
-                            target: None,
-                        });
-                    }
-                    // A `use` inside a function body still binds a name that
-                    // paths in this file resolve through. Attributing it to
-                    // the enclosing module widens its scope, which can only
-                    // make resolution more forgiving.
-                    let mut nested = NestedUses {
-                        table: self,
-                        module,
-                        file,
-                        test_context,
-                    };
-                    nested.visit_item(other);
-                }
+                syn::Item::ExternCrate(e) => self.add_extern_crate(e, module, file),
+                other => self.add_item(other, module, file, test_context),
             }
         }
+    }
+
+    /// A `mod` declaration: the child module's definition, and — for the
+    /// inline form — its contents, collected in the context the declaration
+    /// puts them in.
+    fn add_module(
+        &mut self,
+        m: &syn::ItemMod,
+        module: usize,
+        file: &ParsedFile,
+        test_context: bool,
+    ) {
+        let krate = self.modules[module].krate;
+        let mut path = self.modules[module].path.clone();
+        path.push(m.ident.to_string());
+        let child = self.module_for(krate, &path);
+        self.modules[child].declared_pub = matches!(m.vis, syn::Visibility::Public(_));
+        self.add_def(Def {
+            name: m.ident.to_string(),
+            kind: DefKind::Mod,
+            namespace: DefKind::Mod.namespace(),
+            file: file.path.clone(),
+            line: m.ident.span().start().line,
+            module,
+            reportable: false,
+            // A `mod` declaration is a leaf in the edge graph —
+            // paths written inside the module belong to the items
+            // holding them, not to the declaration — so whether it
+            // is reached decides nothing, and neither flag needs
+            // to claim anything.
+            is_pub: false,
+            entry_point: EntryPoint::None,
+            child: Some(child),
+            target: None,
+        });
+        if let Some((_, inner)) = &m.content {
+            // An inline `#[cfg(test)] mod tests { ... }` is test
+            // code, exactly as the out-of-line `#[cfg(test)] mod
+            // tests;` spelling of it is. Both answers come from
+            // one evaluation of `cfg::Gates::test_only` in
+            // `crate::modtree`, which walks these declarations
+            // anyway: this module still does not know what a `cfg`
+            // is, and the predicate still has one copy.
+            let inner_context = test_context || file.test_only_mods.contains(&path);
+            self.collect_items(inner, child, file, true, inner_context);
+        }
+    }
+
+    /// `extern crate foo as bar;` binds `bar` to a crate root.
+    fn add_extern_crate(&mut self, e: &syn::ItemExternCrate, module: usize, file: &ParsedFile) {
+        let name = e
+            .rename
+            .as_ref()
+            .map_or_else(|| e.ident.to_string(), |(_, alias)| alias.to_string());
+        if let Some(&root) = self.externs.get(&e.ident.to_string()) {
+            self.add_def(Def {
+                name,
+                kind: DefKind::Mod,
+                namespace: DefKind::Mod.namespace(),
+                file: file.path.clone(),
+                line: e.ident.span().start().line,
+                module,
+                reportable: false,
+                is_pub: false,
+                entry_point: EntryPoint::None,
+                child: Some(root),
+                target: None,
+            });
+        }
+    }
+
+    /// Any other item: its definition if [`describe`] admits the kind, and
+    /// the `use` declarations nested in its body either way.
+    fn add_item(&mut self, item: &syn::Item, module: usize, file: &ParsedFile, test_context: bool) {
+        if let Some((ident, kind, namespace, attrs, vis)) = describe(item) {
+            let name = ident.to_string();
+            let is_pub = matches!(vis, syn::Visibility::Public(_));
+            // `fn main` is the binary and build-script entry point
+            // and has been exempt from reporting since v0.1; being
+            // a root is the same fact stated for the cascade.
+            let is_main = kind == DefKind::Fn && name == "main";
+            let entry_point = if is_main {
+                EntryPoint::of_context(test_context)
+            } else {
+                entry_point_attr(attrs, test_context)
+            };
+            self.add_def(Def {
+                name,
+                kind,
+                namespace,
+                file: file.path.clone(),
+                line: ident.span().start().line,
+                module,
+                reportable: is_pub && !is_main && !has_skip_attr(attrs),
+                is_pub,
+                entry_point,
+                child: None,
+                target: None,
+            });
+        }
+        // A `use` inside a function body still binds a name that
+        // paths in this file resolve through. Attributing it to
+        // the enclosing module widens its scope, which can only
+        // make resolution more forgiving.
+        let mut nested = NestedUses {
+            table: self,
+            module,
+            file,
+            test_context,
+        };
+        nested.visit_item(item);
     }
 
     fn add_use(
@@ -1625,6 +1650,53 @@ impl SymbolTable {
         }
     }
 
+    /// Where `path` starts: the module and segment index the segment walk
+    /// begins at, or the outcome that ends the path before it takes a step.
+    ///
+    /// The head is where every qualifier lives. An absolute path enters at
+    /// the extern it names; `crate` enters at the crate root; `self` stays
+    /// put; `super` climbs, and above the crate root the path is not
+    /// resolvable but also not attributable to an item; `Self::assoc` names
+    /// associated items only. The returned flag says whether the first
+    /// unconsumed segment is still the head, where a workspace crate's name
+    /// may yet apply.
+    fn path_start(&self, module: usize, path: &RefPath) -> Result<(usize, usize, bool), Outcome> {
+        let segments = &path.segments;
+        if path.absolute {
+            if self.ambiguous_externs.contains(&segments[0]) {
+                return Err(Outcome::Opaque(0));
+            }
+            return match self.externs.get(&segments[0]) {
+                Some(&root) => Ok((root, 1, false)),
+                None => Err(Outcome::Foreign),
+            };
+        }
+        match segments[0].as_str() {
+            "crate" => Ok((self.roots[self.modules[module].krate], 1, false)),
+            "self" => Ok((module, 1, false)),
+            "super" => {
+                let mut current = module;
+                let mut index = 0;
+                while index < segments.len() && segments[index] == "super" {
+                    let Some(parent) = self.modules[current].parent else {
+                        return Err(Outcome::Foreign);
+                    };
+                    current = parent;
+                    index += 1;
+                }
+                Ok((current, index, false))
+            }
+            // `Self::assoc` in an impl or trait: associated items only. The
+            // refusal is stated rather than inherited — `Self` is no item's
+            // name, so the lookup in `walk_path` would answer `Foreign`
+            // anyway; a mutation run confirms deleting this arm changes
+            // nothing observable, and the arm stays because a refusal that
+            // falls out of a failed lookup is not written down anywhere.
+            "Self" => Err(Outcome::Foreign),
+            _ => Ok((module, 0, true)),
+        }
+    }
+
     /// Resolve `path` from `module`, collecting the definitions it names into
     /// `reached`, one group per segment.
     ///
@@ -1650,50 +1722,10 @@ impl SymbolTable {
             return Outcome::Foreign;
         }
 
-        let mut index = 0;
-        let mut current = module;
-        // Whether the next segment is still the head of the path, where crate
-        // names and the `crate`/`self`/`super` qualifiers apply.
-        let mut at_head = true;
-
-        if path.absolute {
-            if self.ambiguous_externs.contains(&segments[0]) {
-                return Outcome::Opaque(0);
-            }
-            let Some(&root) = self.externs.get(&segments[0]) else {
-                return Outcome::Foreign;
-            };
-            current = root;
-            index = 1;
-            at_head = false;
-        } else {
-            match segments[0].as_str() {
-                "crate" => {
-                    current = self.roots[self.modules[module].krate];
-                    index = 1;
-                    at_head = false;
-                }
-                "self" => {
-                    index = 1;
-                    at_head = false;
-                }
-                "super" => {
-                    while index < segments.len() && segments[index] == "super" {
-                        let Some(parent) = self.modules[current].parent else {
-                            // Above the crate root: not resolvable, but also
-                            // not something we can attribute to an item.
-                            return Outcome::Foreign;
-                        };
-                        current = parent;
-                        index += 1;
-                    }
-                    at_head = false;
-                }
-                // `Self::assoc` in an impl or trait: associated items only.
-                "Self" => return Outcome::Foreign,
-                _ => {}
-            }
-        }
+        let (mut current, mut index, mut at_head) = match self.path_start(module, path) {
+            Ok(start) => start,
+            Err(outcome) => return outcome,
+        };
 
         while index < segments.len() {
             let name = &segments[index];
@@ -4554,6 +4586,130 @@ mod tests {
                 "pub fn helper() -> u32 { 1 }\n#[unsafe(export_name = \"x\")]\npub fn exported() -> u32 { helper() }\n"
             )
             .is_empty()
+        );
+    }
+
+    /// A `self::` path stays in the module it is written in: losing the
+    /// qualifier's meaning would read the head as a name, find nothing, and
+    /// drop a real use on the floor.
+    #[test]
+    fn a_self_qualified_path_resolves_in_its_own_module() {
+        assert!(
+            unused_in_binary_root("pub fn helper() -> u32 { 1 }\nfn main() { self::helper(); }\n")
+                .is_empty(),
+            "`self::helper` is `helper`"
+        );
+    }
+
+    /// `extern crate fixture as renamed;` binds the alias to the crate root:
+    /// a path through the alias is a use of what it names, and dropping the
+    /// binding would leave the head resolving to nothing and the target read
+    /// as dead.
+    #[test]
+    fn an_extern_crate_alias_binds_the_crate_root() {
+        let dep = unit(&[("", "pub fn thing() -> u32 { 1 }")]);
+        let app = CrateUnit {
+            names: vec!["app".to_string()],
+            test_code: false,
+            spliced: Vec::new(),
+            files: unit(&[(
+                "",
+                "extern crate fixture as renamed;\nfn main() { renamed::thing(); }",
+            )])
+            .files,
+        };
+        let crates = [dep, app];
+        let mut table = SymbolTable::build(&crates);
+        table.record_references(&crates);
+        assert!(
+            table.unused_definitions(&PublicApi::default()).is_empty(),
+            "`renamed::thing` reaches through the alias"
+        );
+    }
+
+    /// A qualified `impl crate::a::Wrapper` whose body spells a bare
+    /// `Wrapper` that a `use` binds to a *different* item is using that other
+    /// item: reading it as a self-reference would report a live item as dead,
+    /// which is why anything short of certainty in `bare_name_means` answers
+    /// no.
+    #[test]
+    fn a_bare_name_bound_to_another_item_is_not_a_self_reference() {
+        assert!(
+            unused_in_binary(&[
+                (
+                    "",
+                    "use b::Wrapper;\nmod a;\nmod b;\nimpl crate::a::Wrapper { fn m(&self) { let _ = Wrapper; } }\nfn main() { let _: crate::a::Wrapper; }\n"
+                ),
+                ("a", "pub struct Wrapper;"),
+                ("b", "pub struct Wrapper;"),
+            ])
+            .is_empty(),
+            "the bare `Wrapper` is `b`'s, and it is alive"
+        );
+    }
+
+    /// The other direction: a bare name that provably is the impl's own type
+    /// is the self-reference the rule exists for, and an impl is not a use
+    /// of its type — the type stays reported.
+    #[test]
+    fn a_bare_name_provably_the_impls_own_type_stays_a_self_reference() {
+        assert_eq!(
+            unused_in_binary(&[
+                (
+                    "",
+                    "use a::Gone;\nmod a;\nimpl crate::a::Gone { fn m(&self) { let _ = Gone; } }\nfn main() {}\n"
+                ),
+                ("a", "pub struct Gone;"),
+            ]),
+            vec!["Gone"],
+            "its own impl is `Gone`'s only mention"
+        );
+    }
+
+    /// The suppressed self-reference is not a reference at all: the type is
+    /// reported as *never named*, not as named-only-from-unreachable-code.
+    /// The two are different claims with different wordings, and the bare
+    /// `Gone` in its own impl must produce the first — counting it as a use
+    /// (a self-edge that keeps nothing alive) would produce the second.
+    #[test]
+    fn a_suppressed_self_reference_leaves_the_type_never_named() {
+        let crates = [CrateUnit {
+            names: Vec::new(),
+            test_code: false,
+            spliced: Vec::new(),
+            files: unit(&[
+                ("", "mod a;\nfn main() {}\n"),
+                (
+                    "a",
+                    "pub struct Gone;\nimpl crate::a::Gone { fn m(&self) { let _ = Gone; } }\n",
+                ),
+            ])
+            .files,
+        }];
+        let mut table = SymbolTable::build(&crates);
+        table.record_references(&crates);
+        let unused = table.unused_definitions(&PublicApi::default());
+        let gone = unused
+            .iter()
+            .find(|def| def.name == "Gone")
+            .expect("`Gone` is dead");
+        assert!(
+            !gone.only_from_unreached,
+            "its impl's bare `Gone` is itself, not a reference"
+        );
+    }
+
+    /// A qualified self type is not a bare head name: `impl <Keep as
+    /// Convert>::Out` names `Keep` and `Convert` in its qualifier, and both
+    /// are uses the ordinary type walk keeps.
+    #[test]
+    fn a_qualified_impl_self_type_keeps_its_qualifier_alive() {
+        assert_eq!(
+            unused_in_binary_root(
+                "pub struct Keep;\npub trait Convert { type Out; }\nimpl <Keep as Convert>::Out { fn f(&self) {} }\npub fn orphan() {}\n"
+            ),
+            vec!["orphan"],
+            "the qualifier's types are used; only `orphan` is not"
         );
     }
 

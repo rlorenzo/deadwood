@@ -1022,6 +1022,117 @@ fn crate_names(package: &metadata::Package, target: &metadata::Target) -> Vec<St
 mod tests {
     use super::*;
 
+    /// An impossible gate whose reason is not an undeclared feature —
+    /// `#[cfg(any())]`, or a matrix that rules the predicate out — is worded
+    /// on the build, not on a feature list there is nothing to put in.
+    #[test]
+    fn an_impossible_gate_without_undeclared_features_names_the_build() {
+        let mut sites = GateSites::default();
+        sites.record(
+            Path::new("src/lib.rs"),
+            "pkg",
+            vec![cfg::GateSite {
+                line: 3,
+                name: None,
+                gate: "any()".to_string(),
+                verdict: cfg::Verdict::Impossible {
+                    undeclared: Vec::new(),
+                },
+            }],
+        );
+        let findings = sites.into_findings(Path::new("/ws"));
+        assert_eq!(findings.len(), 1);
+        assert!(
+            findings[0]
+                .message
+                .ends_with("can never hold in any build of package `pkg`"),
+            "no feature clause without a feature to name: {}",
+            findings[0].message
+        );
+    }
+
+    /// What a finding calls a manifest entry is the table's own noun: an
+    /// "unused dependency" message about a `[build-dependencies]` entry
+    /// would send the reader to the wrong table.
+    #[test]
+    fn a_dependency_noun_names_its_table() {
+        assert_eq!(
+            dependency_noun(metadata::DependencyKind::Normal),
+            "dependency"
+        );
+        assert_eq!(
+            dependency_noun(metadata::DependencyKind::Development),
+            "dev-dependency"
+        );
+        assert_eq!(
+            dependency_noun(metadata::DependencyKind::Build),
+            "build-dependency"
+        );
+    }
+
+    /// A misplaced `[build-dependencies]` entry is argued from where the
+    /// references are not: the build script is the only code that can use
+    /// one, so the finding says it never does.
+    #[test]
+    fn a_misplaced_build_entry_is_argued_from_the_build_script() {
+        let message = misplacement_evidence(
+            metadata::DependencyKind::Build,
+            metadata::DependencyKind::Normal,
+            "pkg",
+        );
+        assert!(
+            message.starts_with("is never referenced by the build script"),
+            "{message}"
+        );
+    }
+
+    /// The package name is the fallback spelling and is kept exactly once:
+    /// a renamed lib carries it beside the target name, the usual same-named
+    /// pair does not double it.
+    #[test]
+    fn crate_names_keep_the_package_spelling_exactly_once() {
+        let target = |name: &str| metadata::Target {
+            name: name.to_string(),
+            kind: vec!["lib".to_string()],
+            src_path: PathBuf::from("/ws/src/lib.rs"),
+        };
+        let package = |name: &str| {
+            let mut package = cfg::tests_support::bare_package();
+            package.name = name.to_string();
+            package
+        };
+        assert_eq!(
+            crate_names(&package("md-5"), &target("md5")),
+            ["md5", "md_5"]
+        );
+        assert_eq!(crate_names(&package("plain"), &target("plain")), ["plain"]);
+    }
+
+    /// Dead-file roots are the directories the runtime crate roots sit in.
+    /// Dev targets and the build script contribute none — a build script
+    /// sits in the package directory, and walking that would sweep the whole
+    /// package — and a root nested in another (`src/bin/` under `src/`) is
+    /// covered by the walk above it, or its files would be found twice.
+    #[test]
+    fn dead_file_roots_come_from_runtime_crate_roots_alone() {
+        let dir = std::env::temp_dir().join(format!("deadwood-roots-test-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("src/bin")).unwrap();
+        std::fs::create_dir_all(dir.join("tests")).unwrap();
+        let target = |name: &str, kind: &str, path: &str| metadata::Target {
+            name: name.to_string(),
+            kind: vec![kind.to_string()],
+            src_path: dir.join(path),
+        };
+        let mut package = cfg::tests_support::bare_package();
+        package.targets = vec![
+            target("pkg", "lib", "src/lib.rs"),
+            target("tool", "bin", "src/bin/tool.rs"),
+            target("build-script-build", "custom-build", "build.rs"),
+            target("it", "test", "tests/it.rs"),
+        ];
+        assert_eq!(dead_file_roots(&package, &dir), vec![dir.join("src")]);
+    }
+
     /// The display strip must survive the root and the path spelling one
     /// place two ways. macOS hands every test a temp directory behind a
     /// symlink (`/var` is `/private/var`), which is where

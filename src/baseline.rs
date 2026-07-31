@@ -1138,6 +1138,25 @@ impl Location {
 mod tests {
     use super::*;
 
+    /// The three answers stay apart: a path that cannot be a baseline —
+    /// here, a path under a plain file — is an error, never "no baseline",
+    /// because passing silently would run without the baseline the
+    /// configuration promised. Unix only: Windows maps this stat to
+    /// `NotFound`, where `Ok(false)` is the correct reading.
+    #[cfg(unix)]
+    #[test]
+    fn a_stat_error_other_than_not_found_is_surfaced() {
+        let dir = std::env::temp_dir().join(format!("deadwood-exists-{}", std::process::id()));
+        // A leftover `plain.txt` directory from a panicked earlier run would
+        // fail the write below forever after; starting clean makes the test
+        // self-healing.
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("plain.txt");
+        std::fs::write(&file, b"x").unwrap();
+        assert!(exists_as_file(&file.join("nested.json")).is_err());
+    }
+
     fn finding(kind: FindingKind, file: &str, line: Option<usize>, name: Option<&str>) -> Finding {
         Finding {
             kind,

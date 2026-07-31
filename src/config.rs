@@ -476,6 +476,23 @@ mod tests {
         Config::load(&path)
     }
 
+    /// Discovery walks from the analyzed directory up to the workspace root,
+    /// inclusive: a config at the root governs a nested member.
+    #[test]
+    fn discovery_reaches_a_config_at_the_workspace_root() {
+        let root =
+            std::env::temp_dir().join(format!("deadwood-discover-test-{}", std::process::id()));
+        // Discovery takes the nearest file, so a leftover from a panicked
+        // earlier run anywhere under `root` could shadow the one written
+        // below; starting clean makes the test self-healing.
+        let _ = fs::remove_dir_all(&root);
+        let deep = root.join("member/src");
+        fs::create_dir_all(&deep).unwrap();
+        fs::write(root.join(FILE_NAME), "[severity]\ndead_file = \"warn\"\n").unwrap();
+        let config = Config::discover(&deep, &root).unwrap();
+        assert_eq!(config.severity(FindingKind::DeadFile), Severity::Warn);
+    }
+
     /// The single most important property: no config file is today's behavior.
     #[test]
     fn the_default_config_changes_nothing() {
