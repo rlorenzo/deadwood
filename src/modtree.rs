@@ -724,10 +724,13 @@ fn path_attr_in_tokens(tokens: TokenStream) -> Option<String> {
                 {
                     iter.next();
                     if let Some(TokenTree::Literal(literal)) = iter.peek() {
-                        let text = literal.to_string();
-                        let trimmed = text.trim_matches('"');
-                        if trimmed.len() < text.len() {
-                            return Some(trimmed.to_string());
+                        // Parsed as a string literal rather than trimmed by
+                        // hand, so the raw (`r"..."`) and escaped spellings
+                        // read the path they mean; a non-string literal
+                        // parses as nothing and claims nothing.
+                        let tokens = TokenStream::from(TokenTree::Literal(literal.clone()));
+                        if let Ok(lit) = syn::parse2::<syn::LitStr>(tokens) {
+                            return Some(lit.value());
                         }
                     }
                 }
@@ -1532,7 +1535,10 @@ mod tests {
             &[
                 (
                     "lib.rs",
-                    "wrap! {\n    #[cfg_attr(feature = \"alt\", path = \"alt/actual.rs\")]\n    mod plain;\n}\n",
+                    // The raw-string spelling on purpose: the literal is
+                    // parsed, not trimmed, so `r"..."` reads the path it
+                    // means.
+                    "wrap! {\n    #[cfg_attr(feature = \"alt\", path = r\"alt/actual.rs\")]\n    mod plain;\n}\n",
                 ),
                 ("plain.rs", "pub fn stem() {}\n"),
                 ("alt/actual.rs", "pub fn attributed() {}\n"),
