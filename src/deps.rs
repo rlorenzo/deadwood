@@ -109,6 +109,23 @@
 //! kind of its own. The reported kind still comes from the entry, so the
 //! unused message names the table to edit.
 //!
+//! ## Which entry a mention belongs to
+//!
+//! A mention is a *word*, and a manifest entry is a word, so the two are
+//! matched by spelling — except where the source says otherwise.
+//! `extern crate real as alias;` binds `alias` for the crate that declares it,
+//! and every later `alias::` in that crate means `real`. Charging those to an
+//! entry that merely shares the alias's spelling is what made `serde_json`
+//! — `extern crate serde_core as serde;` beside a `serde` dev-dependency —
+//! look like a library naming its own dev-dependency
+//! ([#48](https://github.com/rlorenzo/deadwood/issues/48)).
+//!
+//! [`fold_aliases`] moves them, once per **target** rather than once per
+//! package. That is not an optimisation: a test target is a separate crate
+//! that links the dev-dependencies directly, so `src/lib.rs`'s rename says
+//! nothing about what `tests/it.rs` means by the same word. Folding across the
+//! package instead reports the entry the tests genuinely use as unused.
+//!
 //! ## Where a mention counts: [`Contexts`]
 //!
 //! [`find_misplaced`] needs what the unused check does not: *which* code names
@@ -353,6 +370,17 @@ pub struct CrateReferences {
     /// Name to the set of places it was mentioned. The keys alone answer the
     /// unused-dependency question; the values answer the placement one.
     names: HashMap<String, Contexts>,
+    /// Alias to the crate it stands for, from `extern crate real as alias;`.
+    ///
+    /// The alias binds at the crate root, so every later `alias::` in the
+    /// package means `real` — including in files that never mention `real`,
+    /// and including `::alias::`, which is why the whole package's mentions
+    /// have to be folded rather than each file's. Without this a package that
+    /// aliases one dependency to the *name of another* attributes every one of
+    /// those mentions to the wrong entry: `serde_json` does exactly that with
+    /// `extern crate serde_core as serde;` while carrying `serde` as a
+    /// dev-dependency ([#48](https://github.com/rlorenzo/deadwood/issues/48)).
+    aliases: HashMap<String, String>,
     /// Set when the package pulls in code Deadwood never sees, which would
     /// make any "never referenced" verdict a guess.
     hidden_code: Option<&'static str>,
@@ -362,6 +390,12 @@ impl CrateReferences {
     /// Add every crate name the files of one target refer to, attributed to
     /// the code that target is.
     pub fn add_target(&mut self, files: &[ParsedFile], target: &Target, gates: &Gates<'_>) {
+        // Collect this target's mentions on their own, because an
+        // `extern crate real as alias;` binds for the crate that declares it
+        // and no further. `src/lib.rs` renaming one dependency says nothing
+        // about what `tests/it.rs` means by the same word: a test target is a
+        // separate crate that links the dev-dependencies directly.
+        let package = std::mem::take(&mut self.names);
         let context = Contexts::of_target(target);
         for file in files {
             // A file that only `#[cfg(test)] mod tests;` reaches is unit-test
@@ -378,9 +412,20 @@ impl CrateReferences {
                 gates: Some(gates),
             };
             match &file.ast {
-                Some(ast) => self.add_file(ast, parent_of(&file.path), origin),
+                Some(ast) => self.add_file_at_depth(
+                    ast,
+                    parent_of(&file.path),
+                    origin,
+                    0,
+                    file.module.is_empty(),
+                ),
                 None => self.hidden_code = Some(UNPARSABLE_REASON),
             }
+        }
+        let mut target_names = std::mem::replace(&mut self.names, package);
+        fold_aliases(&mut target_names, &std::mem::take(&mut self.aliases));
+        for (name, context) in target_names {
+            self.names.entry(name).or_default().insert(context);
         }
     }
 
@@ -415,7 +460,7 @@ impl CrateReferences {
     }
 
     fn add_file(&mut self, ast: &syn::File, dir: PathBuf, origin: Origin<'_>) {
-        self.add_file_at_depth(ast, dir, origin, 0);
+        self.add_file_at_depth(ast, dir, origin, 0, false);
     }
 
     fn add_file_at_depth(
@@ -424,6 +469,7 @@ impl CrateReferences {
         dir: PathBuf,
         origin: Origin<'_>,
         depth: usize,
+        at_crate_root: bool,
     ) {
         // An inner `#![cfg(test)]` makes the whole file unit-test code, wherever
         // its target would otherwise put it. A file is `Site::Other`: `#![test]`
@@ -431,11 +477,16 @@ impl CrateReferences {
         let mut origin = origin;
         origin.context = test_shifted(origin, &ast.attrs, Site::Other);
 
+        let file = std::mem::take(&mut self.names);
         let mut collector = Collector {
             names: &mut self.names,
+            aliases: &mut self.aliases,
+            file_aliases: HashMap::new(),
+            module_depth: 0,
             hidden_code: &mut self.hidden_code,
             dir,
             origin,
+            at_crate_root,
             included_code: Vec::new(),
             included_text: Vec::new(),
         };
@@ -448,6 +499,14 @@ impl CrateReferences {
             collector.visit_item(item);
         }
         let (code, text) = (collector.included_code, collector.included_text);
+        let file_aliases = collector.file_aliases;
+        // Fold this file's own `use` renames over this file's own mentions,
+        // then hand them back to the target.
+        let mut this_file = std::mem::replace(&mut self.names, file);
+        fold_aliases(&mut this_file, &file_aliases);
+        for (name, context) in this_file {
+            self.names.entry(name).or_default().insert(context);
+        }
 
         // `include!("generated.rs")` splices a file into this one, and
         // `#![doc = include_str!("../README.md")]` splices in documentation
@@ -469,7 +528,11 @@ impl CrateReferences {
             // rather than the file's being reused here.
             let origin = Origin { context, ..origin };
             match parse(&path) {
-                Some(ast) => self.add_file_at_depth(&ast, parent_of(&path), origin, depth + 1),
+                // An `include!`-ed file's tokens land in the including item,
+                // which is not the crate root even when the includer is.
+                Some(ast) => {
+                    self.add_file_at_depth(&ast, parent_of(&path), origin, depth + 1, false)
+                }
                 None => self.hidden_code = Some(INCLUDE_REASON),
             }
         }
@@ -497,6 +560,33 @@ impl CrateReferences {
 /// `site` is what the item is, which decides whether a `#[test]` written on it
 /// confines it at all ([`Site`]); every caller here states its own answer,
 /// because the ones that are not a `fn` are not a judgement call.
+/// Move each alias's mentions onto the crate it actually names, within one
+/// target's names.
+///
+/// `extern crate real as alias;` binds `alias` for the crate that declares it,
+/// so every later `alias::` in that crate means `real`. Charging them to a
+/// manifest entry that merely shares the alias's spelling is what made
+/// `serde_json` — `extern crate serde_core as serde;` beside a `serde`
+/// dev-dependency — look like a library naming its own dev-dependency
+/// ([#48](https://github.com/rlorenzo/deadwood/issues/48)).
+///
+/// The alias's own key is removed rather than emptied: after the fold nothing
+/// in *this* target names it, which is the truth. Another target naming it
+/// puts the key back, which is why this runs per target and not per package —
+/// `tests/it.rs` is a separate crate, and the lib's rename does not reach it.
+///
+/// `extern crate real as real;` is legal and renames nothing, and needs no
+/// guard here: removing the key and re-inserting the same contexts under the
+/// same name leaves the map as it was. A branch for it would be one no test
+/// could ever distinguish.
+fn fold_aliases(names: &mut HashMap<String, Contexts>, aliases: &HashMap<String, String>) {
+    for (alias, real) in aliases {
+        if let Some(context) = names.remove(alias) {
+            names.entry(real.clone()).or_default().insert(context);
+        }
+    }
+}
+
 fn test_shifted(origin: Origin<'_>, attrs: &[syn::Attribute], site: Site) -> Contexts {
     let test_only = origin
         .gates
@@ -851,6 +941,22 @@ fn documentation_file(value: &syn::Expr) -> Option<String> {
 /// Collects every name in a file that could be naming a crate.
 struct Collector<'a, 'g> {
     names: &'a mut HashMap<String, Contexts>,
+    /// Aliases that bind for the whole crate: an `extern crate real as alias;`
+    /// at the crate root enters the extern prelude, so every module sees it.
+    aliases: &'a mut HashMap<String, String>,
+    /// Aliases that bind only where they are written. A `use real as alias;`
+    /// is an ordinary item: it binds in its own module and nowhere else, so
+    /// these are folded over this file alone.
+    file_aliases: HashMap<String, String>,
+    /// How many `mod { .. }` blocks enclose the item being walked. An alias
+    /// written inside one binds inside it, and folding it over anything wider
+    /// rewrites mentions that never saw it.
+    module_depth: usize,
+    /// Whether this file *is* the crate root. Only an `extern crate` written
+    /// there enters the extern prelude; the same item at the top of
+    /// `src/foo.rs` is an ordinary item of module `foo` and binds no wider
+    /// than a `use` would.
+    at_crate_root: bool,
     hidden_code: &'a mut Option<&'static str>,
     /// Directory of the file being walked, which `include!` paths are
     /// relative to.
@@ -984,9 +1090,25 @@ impl<'ast> Visit<'ast> for Collector<'_, '_> {
         });
     }
 
+    fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
+        self.module_depth += 1;
+        syn::visit::visit_item_mod(self, node);
+        self.module_depth -= 1;
+    }
+
     fn visit_item_use(&mut self, node: &'ast syn::ItemUse) {
         for attr in &node.attrs {
             self.visit_attribute(attr);
+        }
+        // `use real as alias;` binds a crate under a new name exactly as
+        // `extern crate real as alias;` does, and is the edition-2018 spelling
+        // of it. Only the whole-path form counts: `use real::item as alias;`
+        // renames an item, and its head is still `real`.
+        if let syn::UseTree::Rename(rename) = &node.tree
+            && self.module_depth == 0
+        {
+            self.file_aliases
+                .insert(rename.rename.to_string(), rename.ident.to_string());
         }
         self.use_heads(&node.tree);
     }
@@ -995,7 +1117,24 @@ impl<'ast> Visit<'ast> for Collector<'_, '_> {
         for attr in &node.attrs {
             self.visit_attribute(attr);
         }
-        self.insert(node.ident.to_string());
+        let real = node.ident.to_string();
+        // `extern crate real as alias;` names `real` — the declaration itself
+        // is a mention of it, wherever the alias is later used — and binds
+        // `alias` to it for the rest of the package. Recording the second is
+        // what stops every later `alias::` being charged to an entry that
+        // merely shares that name.
+        if let Some((_, alias)) = &node.rename
+            && self.module_depth == 0
+        {
+            // Crate-wide only from the crate root, where it enters the extern
+            // prelude. Anywhere else it is an ordinary item of its own module.
+            if self.at_crate_root {
+                self.aliases.insert(alias.to_string(), real.clone());
+            } else {
+                self.file_aliases.insert(alias.to_string(), real.clone());
+            }
+        }
+        self.insert(real);
     }
 
     fn visit_path(&mut self, node: &'ast syn::Path) {
@@ -2020,6 +2159,43 @@ mod tests {
         ]);
         let manifest = package(vec![dev_dependency("dev_only")]);
         assert!(misplaced(&manifest, &refs).0.is_empty());
+    }
+
+    /// An alias's mentions belong to the crate it renames.
+    #[test]
+    fn a_renamed_extern_crate_moves_its_mentions_to_the_crate_it_names() {
+        let refs =
+            references(&["extern crate real_core as real;\npub fn go() { real::helper(); }\n"]);
+        assert_eq!(refs.names.get("real").copied(), None);
+        assert_eq!(
+            refs.names.get("real_core").copied(),
+            Some(Contexts::RUNTIME),
+            "both the declaration and the aliased use land on the real crate"
+        );
+    }
+
+    /// And the alias stops at the crate that declares it. A test target is a
+    /// separate crate linking the dev-dependencies directly, so the same word
+    /// written there is its own crate — folding package-wide would report the
+    /// entry unused, which is the bug `serde_json` exposed.
+    #[test]
+    fn a_crate_alias_does_not_apply_to_another_target() {
+        let refs = references_from(&[
+            (
+                "lib",
+                "extern crate real_core as real;\npub fn go() { real::helper(); }\n",
+            ),
+            ("test", "fn t() { real::assert_ok(); }\n"),
+        ]);
+        assert_eq!(
+            refs.names.get("real").copied(),
+            Some(Contexts::DEV),
+            "the test target's mention is its own, and stays where it was found"
+        );
+        assert_eq!(
+            refs.names.get("real_core").copied(),
+            Some(Contexts::RUNTIME)
+        );
     }
 
     /// The allowlist means "do not judge this entry", which covers where it is

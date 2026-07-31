@@ -1640,6 +1640,150 @@ fn a_dev_dependency_both_the_library_and_the_tests_name_still_belongs_in_depende
     );
 }
 
+/// A crate alias binds for the crate that declares it, and mentions of the
+/// alias belong to the crate it renames — not to a manifest entry that happens
+/// to share its spelling.
+///
+/// `serde_json` is the live instance: `extern crate serde_core as serde;` beside
+/// a `serde` dev-dependency, so every `serde::` in its library means
+/// `serde_core`. Without this the library appears to name its own
+/// dev-dependency, which phase 21's claim turns into a finding invented against
+/// a manifest that compiles
+/// ([#48](https://github.com/rlorenzo/deadwood/issues/48)).
+#[test]
+fn a_renamed_extern_crate_does_not_charge_its_mentions_to_the_entry_it_shadows() {
+    let analysis = analyze_fixture("depkinds");
+    let misplaced: Vec<&str> = reported(&analysis, FindingKind::MisplacedDependency)
+        .into_iter()
+        .map(|(_, name)| name)
+        .collect();
+
+    assert!(
+        !misplaced.contains(&"aliased_crate"),
+        "`aliased_crate::` in the library means `renamed_core_crate`, so the \
+         dev-dependency of that name is not named by library code: {:?}",
+        analysis.findings
+    );
+    assert!(
+        !misplaced.contains(&"renamed_core_crate"),
+        "and the crate it actually names is a normal dependency the library \
+         uses, which is where it belongs: {:?}",
+        analysis.findings
+    );
+    // `use real as alias;` binds a crate the same way and is the edition-2018
+    // spelling of the same rename, so it gets the same pair of answers.
+    assert!(
+        !misplaced.contains(&"use_aliased_crate"),
+        "the `use` spelling of the rename binds a crate too: {:?}",
+        analysis.findings
+    );
+    assert!(
+        !misplaced.contains(&"use_renamed_crate"),
+        "and the crate it names is where it belongs: {:?}",
+        analysis.findings
+    );
+}
+
+/// A rename binds where it is written, and an alias inside a nested module
+/// does not reach the code around it.
+///
+/// `depkinds` writes `mod nested { use nested_renamed_crate as
+/// nested_alias_crate; }` and then names `nested_alias_crate` at the crate
+/// root, where that alias does not apply. Folding a nested alias over the
+/// whole file moves the crate-root mention onto the wrong crate and reports
+/// the `nested_alias_crate` dependency as unused — a finding invented against
+/// code that compiles.
+#[test]
+fn an_alias_inside_a_module_does_not_reach_the_code_around_it() {
+    let analysis = analyze_fixture("depkinds");
+    let unused: Vec<&str> = reported(&analysis, FindingKind::UnusedDependency)
+        .into_iter()
+        .map(|(_, name)| name)
+        .collect();
+
+    for entry in [
+        // The `use` spelling, aliased inside `mod nested`.
+        "nested_alias_crate",
+        "nested_renamed_crate",
+        // The `extern crate` spelling, aliased inside `mod nested_extern`.
+        "nested_extern_alias",
+        "nested_extern_renamed",
+        // And the cross-file case: a rename at the crate root binds in the
+        // root module only, so `src/crossfile.rs` sees the crate itself.
+        "crossfile_alias_crate",
+        "crossfile_renamed_crate",
+        // The mirror of it: an `extern crate` rename at the top of a *module
+        // file* is an ordinary item of that module, not an extern-prelude
+        // entry, so it does not reach the crate root either.
+        "modfile_alias_crate",
+        "modfile_renamed_crate",
+    ] {
+        assert!(
+            !unused.contains(&entry),
+            "`{entry}` is named — the rename does not reach where it is named: {:?}",
+            analysis.findings
+        );
+    }
+}
+
+/// Where the rename rule stops: `use crate_name::Item as Alias;` renames an
+/// item, not a crate.
+///
+/// The head of that path is still the crate, and `Alias` is a type in the
+/// module that wrote it. Folding on it would move a dependency's mentions onto
+/// whatever crate the path happened to start with — `depkinds` writes
+/// `use shared_crate::Thing as cfg_test_crate;` so that mistake reports the
+/// `cfg_test_crate` dev-dependency as unused.
+#[test]
+fn a_renamed_item_is_not_a_renamed_crate() {
+    let analysis = analyze_fixture("depkinds");
+    let unused: Vec<&str> = reported(&analysis, FindingKind::UnusedDependency)
+        .into_iter()
+        .map(|(_, name)| name)
+        .collect();
+
+    assert!(
+        !unused.contains(&"cfg_test_crate"),
+        "the `#[cfg(test)]` module names it, and the item rename above changes \
+         nothing about that: {:?}",
+        analysis.findings
+    );
+}
+
+/// The other half, and the one a package-wide fold gets wrong.
+///
+/// `tests/it.rs` is a separate crate that links the dev-dependencies directly;
+/// `src/lib.rs`'s rename does not reach it, so `aliased_crate::` written there
+/// is the dev-dependency for real. Folding the alias across the whole package
+/// instead of per target reports that entry as unused — which is what a first
+/// cut of #48 did, and what `serde_json` caught.
+#[test]
+fn a_crate_alias_does_not_reach_a_separate_test_crate() {
+    let analysis = analyze_fixture("depkinds");
+    let unused: Vec<&str> = reported(&analysis, FindingKind::UnusedDependency)
+        .into_iter()
+        .map(|(_, name)| name)
+        .collect();
+
+    assert!(
+        !unused.contains(&"aliased_crate"),
+        "`tests/it.rs` names it, and the lib's rename does not apply there: {:?}",
+        analysis.findings
+    );
+    assert!(
+        !unused.contains(&"renamed_core_crate"),
+        "the `extern crate` declaration is itself a mention of it: {:?}",
+        analysis.findings
+    );
+    for entry in ["use_aliased_crate", "use_renamed_crate"] {
+        assert!(
+            !unused.contains(&entry),
+            "`{entry}` is named, through the `use` spelling of the rename: {:?}",
+            analysis.findings
+        );
+    }
+}
+
 /// Both halves of the finding have to be actionable: the table the entry sits
 /// in and the table it belongs in, in text and in JSON, under a kind
 /// `[severity]` reaches by its own serde tag.

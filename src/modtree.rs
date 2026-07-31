@@ -809,6 +809,9 @@ mod tests {
         assert_eq!(
             reached,
             vec![
+                // Declared by an ungated `mod crossfile;`, and named there so
+                // the crate-root rename in `lib.rs` does not reach it.
+                ("crossfile.rs".to_string(), false),
                 ("lib.rs".to_string(), false),
                 // Its only declaration is `#[cfg(test)] mod outline_tests;`.
                 ("outline_tests.rs".to_string(), true),

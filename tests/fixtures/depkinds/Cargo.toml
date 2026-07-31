@@ -34,6 +34,37 @@ shared_view_crate = "1"
 # Named a level further down, by `src/shared_view/deeper.rs`. Its own
 # declaration is ungated and says nothing; what it inherits decides.
 shared_view_child_crate = "1"
+# Renamed to `aliased_crate` at the crate root, which is the only reason a
+# mention of that name in `src/` belongs to this entry rather than to the
+# dev-dependency spelled the same way.
+renamed_core_crate = "1"
+# The same rename through `use ... as ...`, the edition-2018 spelling.
+use_renamed_crate = "1"
+# Aliased to `nested_alias_crate` inside a nested `mod`, which binds only in
+# that module. Folding it wider would move this entry's mentions elsewhere.
+nested_renamed_crate = "1"
+# Named at the crate root, where the nested alias above does not reach. If a
+# nested alias were applied to the whole file this entry would look unused —
+# a finding invented against code that compiles.
+nested_alias_crate = "1"
+# An `extern crate ... as ...` inside a nested `mod` binds there and nowhere
+# else, exactly as the `use` spelling does. This pair pins the depth check for
+# that form: without it the crate-root mention below is folded away.
+nested_extern_renamed = "1"
+nested_extern_alias = "1"
+# A `use` rename at the crate root binds in the root module only — it does not
+# reach a submodule file, which sees the crate itself through the extern
+# prelude. This pair pins that: `crossfile_alias_crate` is named only by
+# `src/crossfile.rs`, so folding the root's rename across the target reports it
+# unused.
+crossfile_renamed_crate = "1"
+crossfile_alias_crate = "1"
+# An `extern crate ... as ...` at the top of `src/crossfile.rs`, which is a
+# module file and not the crate root — so it does not enter the extern prelude
+# and binds no wider than a `use` would. `modfile_alias_crate` is named at the
+# crate root, where that rename does not reach.
+modfile_renamed_crate = "1"
+modfile_alias_crate = "1"
 # Named only from a bare `#[test] fn` at module scope in `src/lib.rs`. No
 # `#[cfg(test)]` is written anywhere near it, and it does not need one:
 # `#[test]` is itself what keeps the function out of every build a consumer
@@ -97,6 +128,17 @@ build_only_dev_crate = "1"
 # rather than inventing one, and it is the same rule in both directions; it is
 # pinned here because the guard is otherwise invisible from the outside.
 doc_and_library_dev_crate = "1"
+# The `serde_json` shape. `src/lib.rs` renames `renamed_core_crate` to this
+# name, so every `aliased_crate::` in the library means that crate and not this
+# one — while `tests/it.rs`, a separate crate the rename does not reach, names
+# this one for real. Reporting it in either direction would be a finding
+# invented against a manifest that compiles.
+aliased_crate = "1"
+# The dev-dependency the `use` rename above shadows, and the same pair of
+# answers as `aliased_crate`: no library mention belongs to it, and
+# `tests/it.rs` — a separate crate the rename does not reach — names it for
+# real. Not a finding in either direction.
+use_aliased_crate = "1"
 
 [build-dependencies]
 # Named by `build.rs`, the only target that can use a build-dependency.
