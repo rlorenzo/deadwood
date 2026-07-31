@@ -10,7 +10,7 @@ this file is the short version, newest first.
 
 ### Fixed
 
-Seven bugs, all found by running the analyzer over
+Eight bugs, all found by running the analyzer over
 [bun](https://github.com/oven-sh/bun)'s Rust tree — a 108-crate, ~1M-line
 workspace, and the first in the corpus laid out flat, declared through macros,
 and entered from C++. Every rule below was settled by handing rustc the
@@ -85,6 +85,22 @@ directory would exclude live neighbours — for `#[path = "body.rs"] mod body;`
 in `src/lib.rs`, the whole crate — and an excluded file is withheld from the
 dependency check as well as the dead-file one, so over-reaching there would
 invent unused-dependency claims rather than merely lose findings.
+
+**Proc-macro entry points**, the eighth find from the same run. A
+`#[proc_macro]`, `#[proc_macro_derive]` or `#[proc_macro_attribute]` function
+is invoked by the compiler, never by a written path: code spells the derive,
+attribute, or macro the function registers, so no workspace will ever name
+the function itself, and deleting it — the advice the finding gives — breaks
+every crate using the macro. The three attributes already rooted what an
+entry point reaches; the entry point itself is now off the report beside
+`#[no_mangle]`, whose case this is — an export whose caller the analyzer
+cannot see. All 12 on bun's tree were false positives. Across the 1265
+unpacked registry crates on this machine (three `windows-0.x`
+generated-bindings crates skipped for size, none of them a proc-macro
+target), the change removes 244 findings over 82 proc-macro crates — every
+one an `unused_pub_item` on an entry-point function, nothing added, no other
+finding kind moved — and 62 of those crates, `clap_derive` and
+`serde_derive` among them, now run entirely clean.
 
 ## 1.0.0-beta.1 — 2026-07-30
 

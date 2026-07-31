@@ -2728,6 +2728,20 @@ fn has_skip_attr(attrs: &[syn::Attribute]) -> bool {
         if attr_is(attr, &["no_mangle", "used", "export_name"]) {
             return true;
         }
+        // A proc-macro entry point is invoked by the compiler, never by a
+        // path anyone writes: code names the derive or attribute the
+        // function registers, not the function, so no workspace will ever
+        // spell its name — and deleting it breaks every crate using the
+        // macro ([#73]). Already a root (`ENTRY_POINT_ATTRS`); this keeps
+        // the entry point itself off the report.
+        //
+        // [#73]: https://github.com/rlorenzo/deadwood/issues/73
+        if attr_is(
+            attr,
+            &["proc_macro", "proc_macro_derive", "proc_macro_attribute"],
+        ) {
+            return true;
+        }
         // An item compiled only for rustdoc's doctest build has rustdoc as
         // its consumer: the `#[cfg(doctest)] pub struct ReadmeDoctests;`
         // idiom is referenced by nothing, deliberately, and deleting it — the
@@ -4494,6 +4508,39 @@ mod tests {
             )
             .is_empty()
         );
+    }
+
+    /// The compiler is a proc-macro entry point's only caller: code spells
+    /// the derive or attribute the function registers, never the function,
+    /// so no resolved path in any workspace will ever name it — and deleting
+    /// it, the advice the finding gives, breaks every crate using the macro
+    /// ([#73](https://github.com/rlorenzo/deadwood/issues/73)).
+    #[test]
+    fn a_proc_macro_entry_point_is_quiet_and_keeps_what_it_reaches() {
+        for attribute in [
+            "#[proc_macro]",
+            "#[proc_macro_derive(Linked, attributes(linked))]",
+            "#[proc_macro_attribute]",
+        ] {
+            assert!(
+                unused_in_binary_root(&format!(
+                    "pub fn helper() -> u32 {{ 1 }}\n{attribute}\npub fn entry() -> u32 {{ helper() }}\n"
+                ))
+                .is_empty(),
+                "`{attribute}` is the compiler's to call, and what it reaches is alive"
+            );
+            // The library shape a proc-macro crate actually is: the entry
+            // point sits on the public surface, which roots what it reaches
+            // but reports the surface itself when nothing names it — except
+            // an item whose caller can never write a path.
+            assert_eq!(
+                unused_in_root(&format!(
+                    "{attribute}\npub fn entry() -> u32 {{ 1 }}\npub fn orphan() -> u32 {{ 2 }}\n"
+                )),
+                vec!["orphan"],
+                "`{attribute}` answers for the entry point, not its neighbours"
+            );
+        }
     }
 
     /// A macro name lives in its own namespace, so neither a generic

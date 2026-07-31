@@ -322,6 +322,24 @@ fn unresolvable_paths_keep_their_targets_alive() {
     );
 }
 
+/// A proc-macro crate's entry points are the compiler's to call: consumers
+/// spell the derive, attribute, or macro the function registers — often under
+/// a re-exported path in another workspace entirely — never the function, and
+/// deleting it breaks every one of them ([#73]). The neighbour that registers
+/// nothing still answers for itself.
+///
+/// [#73]: https://github.com/rlorenzo/deadwood/issues/73
+#[test]
+fn proc_macro_entry_points_are_never_unused() {
+    let analysis = analyze_fixture("procmacro");
+
+    assert_eq!(
+        reported(&analysis, FindingKind::UnusedPubItem),
+        vec![("src/lib.rs".to_string(), "orphan")],
+        "the compiler calls `derive_linked`, `host_fn` and `make_ident`; nothing calls `orphan`"
+    );
+}
+
 /// A dead subsystem comes out in one run, not one layer per run: `orphan` is
 /// named by nothing, so `helper` — which only `orphan` calls — is dead too,
 /// and so is `deeper` below that.
