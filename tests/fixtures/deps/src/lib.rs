@@ -55,3 +55,15 @@ pub fn gated() {
 pub fn on_windows() {
     platform_used_crate::go();
 }
+
+// The serde/serde_derive pair (#64): the derive is `widget_derive`'s macro,
+// and by the proc-macro convention its *expansion* is what names `widget` —
+// no source line in this package does.
+use widget_derive::FromWidget;
+
+#[derive(FromWidget)]
+pub struct Gadget;
+
+// The boundary: `_derived` is not a companion suffix, so this mention keeps
+// `lonely_derived` itself alive and spares `lonely` nothing.
+use lonely_derived::Tool;

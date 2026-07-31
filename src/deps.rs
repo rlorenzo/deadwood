@@ -276,6 +276,13 @@
 //!
 //! - A dependency reachable only through a glob import of another crate's
 //!   prelude (a derive macro re-exported by a facade crate) is invisible.
+//! - A dependency named only by the code a derive expands to is kept alive by
+//!   its companion: a mentioned `X_derive`, `X_macros` or `X_impl` declared
+//!   beside `X` counts as evidence for `X`
+//!   ([#64](https://github.com/rlorenzo/deadwood/issues/64)), because the
+//!   expansion names the base crate (`#[derive(Serialize)]` emits
+//!   `extern crate serde as _serde;`). The price is the mirror image: a
+//!   genuinely stale `X` beside a live companion is missed, never invented.
 //! - Only the source tree in front of us counts. A crate unpacked from a
 //!   published `.crate` archive usually has its `tests/` and `benches/`
 //!   stripped, so the dev-dependencies those used are correctly reported as
@@ -771,7 +778,10 @@ pub fn find_unused(
             }
         }
         let name = dependency.crate_name();
-        if !references.names.contains_key(&name) && !named_by_features.contains(&name) {
+        if !references.names.contains_key(&name)
+            && !named_by_features.contains(&name)
+            && !companion_mentioned(package, references, &name)
+        {
             unused.push(UnusedDependency {
                 name: dependency.manifest_name().to_string(),
                 kind: dependency.dependency_kind(),
@@ -1050,6 +1060,32 @@ fn warn_skipped(warnings: &mut Vec<String>, package: &str, mut names: Vec<String
         "unused-dependency check skipped for {} in package `{package}`: {reason}",
         names.join(", ")
     ));
+}
+
+/// The proc-macro companion suffixes: a crate named `X_derive`, `X_macros`
+/// or `X_impl` conventionally expands to code that names `X`.
+const COMPANION_SUFFIXES: &[&str] = &["_derive", "_macros", "_impl"];
+
+/// Whether a declared proc-macro companion of `base` is mentioned, which is
+/// evidence for `base` itself.
+///
+/// `#[derive(Serialize)]` is serde_derive's macro, but its expansion emits
+/// `extern crate serde as _serde;` — the base crate must be declared even
+/// though no source line names it, and cargo-machete special-cases the same
+/// pair for the same reason
+/// ([#64](https://github.com/rlorenzo/deadwood/issues/64)). The companion
+/// must be *declared beside* the entry: a stray `serde_derive` in a doc
+/// comment of a package that never declared it proves nothing. The cost runs
+/// the safe way — a genuinely stale `serde` beside a live `serde_derive` is
+/// missed, never invented.
+fn companion_mentioned(package: &Package, references: &CrateReferences, base: &str) -> bool {
+    package.dependencies.iter().any(|other| {
+        let other_name = other.crate_name();
+        COMPANION_SUFFIXES
+            .iter()
+            .any(|suffix| other_name.strip_suffix(suffix) == Some(base))
+            && references.names.contains_key(&other_name)
+    })
 }
 
 /// The text of a `doc = "..."` attribute body, or `None` when the bracketed
@@ -1564,6 +1600,52 @@ mod tests {
         let refs = references(&["fn go() { engine_core::start(); }\n"]);
         let manifest = package(vec![dependency("engine-core")]);
         assert!(unused(&manifest, &refs).0.is_empty());
+    }
+
+    /// The serde/serde_derive pair ([#64]): `#[derive(Serialize)]` is
+    /// serde_derive's macro, but its expansion emits
+    /// `extern crate serde as _serde;`, so `serde` must be declared even
+    /// though no source line names it. tokio's `examples/` package hit this
+    /// live: removing the "unused" `serde` breaks the build.
+    ///
+    /// [#64]: https://github.com/rlorenzo/deadwood/issues/64
+    #[test]
+    fn a_base_crate_is_kept_alive_by_its_mentioned_derive_companion() {
+        let refs = references(&[
+            "use serde_derive::Serialize;\n#[derive(Serialize)]\npub struct Message;\n",
+        ]);
+        let manifest = package(vec![dependency("serde"), dependency("serde_derive")]);
+        assert!(unused(&manifest, &refs).0.is_empty());
+    }
+
+    /// The `_macros` spelling of the same convention (`tokio`/`tokio-macros`).
+    #[test]
+    fn the_macros_suffix_is_a_companion_too() {
+        let refs = references(&["use gadget_macros::main;\n"]);
+        let manifest = package(vec![dependency("gadget"), dependency("gadget-macros")]);
+        assert!(unused(&manifest, &refs).0.is_empty());
+    }
+
+    /// The boundary: the companion must be *declared beside* the entry. A
+    /// stray `serde_derive` in the text of a package that never declared it
+    /// proves nothing about `serde`, and an unrelated suffix is no companion.
+    #[test]
+    fn a_companion_counts_only_when_declared_and_only_by_suffix() {
+        let refs = references(&["fn f() { serde_derive::whatever(); }\n"]);
+        let manifest = package(vec![dependency("serde")]);
+        assert_eq!(
+            unused(&manifest, &refs).0,
+            vec!["serde"],
+            "an undeclared companion is no evidence"
+        );
+
+        let refs = references(&["fn f() { serde_derived::whatever(); }\n"]);
+        let manifest = package(vec![dependency("serde"), dependency("serde_derived")]);
+        assert_eq!(
+            unused(&manifest, &refs).0,
+            vec!["serde"],
+            "`_derived` is not a companion suffix"
+        );
     }
 
     /// tokio documents `select!` inside a `doc! { macro_rules! ... }`

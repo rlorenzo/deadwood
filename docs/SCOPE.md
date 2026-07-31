@@ -132,17 +132,24 @@ alternatives, corpus measurements and mutation runs written down in full in
     comment. Ten invented findings gone across regex, clap, tokio and
     rust-lang/rust. Closes #63.
 
+30. **A derive's expansion names its base crate** — a mentioned `X_derive`,
+    `X_macros` or `X_impl` declared beside `X` counts as evidence for `X`,
+    because `#[derive(Serialize)]` emits `extern crate serde as _serde;` and
+    the manifest must satisfy it. The invented finding in tokio's `examples`
+    package gone; the price is the mirror image, a genuinely stale base
+    beside a live companion, missed rather than invented. Closes #64.
+
 ## Next (sequenced, one slice at a time)
 
 Filed from a sweep of ten public workspaces (ripgrep, regex, clap, serde,
 tokio, rust-lang/rust, deno, rustdesk, tauri, zed), each with its population
 measured in the issue:
 
-1. **A dependency named only by derive-expanded code is reported unused**
-   (#64) — the serde/serde_derive pair.
-2. **A dependency whose lib target name differs from its package name is
-   reported unused** (#62) — deno's `md-5`/`rustls-webpki`; needs a decision
-   on attempting full `cargo metadata` before the heuristic.
+1. **A dependency whose lib target name differs from its package name is
+   reported unused** (#62) — deno's `md-5`/`rustls-webpki`; the fix in
+   progress reads lib target names from a full `cargo metadata --offline`
+   where a cached resolution exists, falling back to the package-name
+   heuristic where it does not.
 
 The roadmap and the issue list say the same thing, so neither can quietly
 rot. What shipped is in the index above and in [`HISTORY.md`](HISTORY.md).
