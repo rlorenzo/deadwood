@@ -298,6 +298,10 @@ Or straight from the repository:
 $ cargo install --locked --git https://github.com/rlorenzo/deadwood
 ```
 
+Prebuilt binaries — Linux (x86_64 and aarch64), macOS (Intel and Apple
+silicon), and Windows, each with a SHA-256 checksum beside it — are attached
+to every [GitHub release](https://github.com/rlorenzo/deadwood/releases).
+
 ## Usage
 
 ```console

@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# The same gate CI runs, before the commit exists. Opt in once with:
+#
+#   git config core.hooksPath .githooks
+#
+# and skip it in an emergency with `git commit --no-verify` — CI runs the
+# identical script either way, so nothing rides on the hook being active.
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+exec scripts/check.sh
