@@ -4315,6 +4315,118 @@ fn a_baseline_written_before_aliases_resolved_still_matches() {
     );
 }
 
+/// One file reached under two spellings, because a symlinked directory gives
+/// it two. serde symlinks `serde/src/core` at `serde_core/src`, so the crate
+/// root that `serde_core` compiles as `serde_core/src/lib.rs` is walked again
+/// as `serde/src/core/lib.rs` while `serde` builds — and was reported dead,
+/// against a package that never claimed it.
+///
+/// Built here rather than checked in: a committed symlink is not a symlink on
+/// a Windows checkout without `core.symlinks`, and a fixture that quietly
+/// becomes a text file is a test that quietly stops testing.
+#[test]
+#[cfg(unix)]
+fn a_file_reached_through_a_symlink_is_not_dead_under_its_other_name() {
+    let root = std::env::temp_dir().join(format!("deadwood-symlink-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let real = root.join("real");
+    std::fs::create_dir_all(real.join("src")).unwrap();
+    std::fs::create_dir_all(root.join("front")).unwrap();
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[workspace]\nresolver = \"2\"\nmembers = [\"real\", \"front\"]\n",
+    )
+    .unwrap();
+    for (package, path) in [("real", "src/lib.rs"), ("front", "lib.rs")] {
+        std::fs::write(
+            root.join(package).join("Cargo.toml"),
+            format!(
+                "[package]\nname = \"{package}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
+                 [lib]\npath = \"{path}\"\n"
+            ),
+        )
+        .unwrap();
+    }
+    std::fs::write(real.join("src/lib.rs"), "pub fn used() {}\n").unwrap();
+    // `front/` holds only the symlink, so the sole `.rs` file the walk finds
+    // under it is `real/src/lib.rs` wearing a different name.
+    std::fs::write(root.join("front/lib.rs"), "pub fn other() {}\n").unwrap();
+    std::os::unix::fs::symlink(real.join("src"), root.join("front/borrowed")).unwrap();
+
+    let analysis = analyze(&root, None).expect("analysis should succeed");
+    let dead: Vec<String> = analysis
+        .findings
+        .iter()
+        .filter(|f| f.kind == FindingKind::DeadFile)
+        .map(|f| f.file.to_string_lossy().into_owned())
+        .collect();
+    std::fs::remove_dir_all(&root).ok();
+    assert!(
+        dead.is_empty(),
+        "`real/src/lib.rs` is a crate root, whichever path arrives at it: {dead:?}"
+    );
+}
+
+/// A `mod` whose file is named by `#[cfg_attr(.., path = "..")]` rather than
+/// by a plain `#[path]`, which serde uses for the only module of
+/// `serde_derive_internals` — one arm per build, condition never evaluated.
+///
+/// Reading neither arm left the module unresolved, and an unresolved module is
+/// not a wrong finding but the absence of every finding: the package's checks
+/// skipped, and the workspace-wide unused-pub check skipped along with them.
+/// On serde that silence hid five real items.
+#[test]
+fn a_cfg_attr_path_names_the_file_its_mod_resolves_to() {
+    let analysis = analyze_fixture("cfgattrpath");
+
+    assert!(
+        analysis.warnings.is_empty(),
+        "both arms name a real file, so nothing is unresolved: {:?}",
+        analysis.warnings
+    );
+    assert!(
+        analysis.findings.is_empty(),
+        "the arm this build does not take is spared, not reported dead: {:?}",
+        analysis.findings
+    );
+}
+
+/// A package whose crate root is not under `src/`. `src/` is a convention and
+/// the manifest is the authority, so the dead-file check walks the directories
+/// the targets actually point at.
+///
+/// Assuming `src/` does not misreport anything — it reports *nothing*, which
+/// is why this went unnoticed until bun, where all 101 crates say `[lib] path
+/// = "lib.rs"` and the whole check was silently inert across a million lines.
+/// The fixture also pins the two limits that keep such a walk from running
+/// away once its root is the package directory itself.
+#[test]
+fn dead_files_are_found_where_the_manifest_puts_the_crate_root() {
+    let analysis = analyze_fixture("flatlayout");
+
+    let mut dead_files: Vec<String> = analysis
+        .findings
+        .iter()
+        .filter(|f| f.kind == FindingKind::DeadFile)
+        .map(|f| f.file.to_string_lossy().replace('\\', "/"))
+        .collect();
+    dead_files.sort();
+    assert_eq!(
+        dead_files,
+        vec![
+            // Reported against the nested package, whose own tree decides it
+            // — never against the outer one whose root directory contains it.
+            "inner/stray.rs",
+            // Beside the crate root, and one directory down from it.
+            "nested/buried.rs",
+            "orphan.rs",
+        ],
+        "the walk follows the manifest, stops at a nested package, and leaves \
+         `tests/` alone: {:?}",
+        analysis.findings
+    );
+}
+
 /// The module tree a macro token stream declares
 /// ([#60](https://github.com/rlorenzo/deadwood/issues/60)): tokio's 381
 /// dead-file findings were live subtrees behind `cfg_fs!`-style wrappers,
@@ -4343,9 +4455,16 @@ fn a_mod_declared_only_in_a_macro_token_stream_spares_its_file() {
     // its items are not admitted to resolution — the module path the macro
     // gives them is unknowable without expansion — so the `pub fn` in
     // `wrapped.rs` that nothing references is not a finding either.
+    //
+    // The paths such a file *writes* are the opposite case, and the assertion
+    // below is the one that matters: `wrapped.rs` holds the only reference to
+    // `reached_from_macro_mod::only_the_macro_mod_calls_me`, and dropping it
+    // would not lose a finding but invent one. Being wrong about a reference
+    // costs a finding; being wrong about a definition costs precision, which
+    // is why only one of the two halves is admitted.
     assert!(
         reported(&analysis, FindingKind::UnusedPubItem).is_empty(),
-        "nothing in a macro-reached file becomes an item finding: {:?}",
+        "a macro-reached file defines no findings and silences no references: {:?}",
         analysis.findings
     );
 }

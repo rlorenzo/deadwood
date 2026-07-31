@@ -168,6 +168,22 @@ pub(crate) struct CrateUnit {
     /// `#[test]` functions. See [`EntryPoint`].
     pub test_code: bool,
     pub files: Vec<ParsedFile>,
+    /// Files reached only through an `include!` or a macro token stream, which
+    /// contribute the paths they *write* but none of the items they define.
+    ///
+    /// The asymmetry is the whole point. A definition admitted at a guessed
+    /// module path is a finding population of its own — the path a macro gives
+    /// its items is unknowable without expanding it, and getting it wrong
+    /// invents claims about items nothing can name. A *reference* costs
+    /// nothing to be wrong about: resolving one only ever marks definitions
+    /// reached, so a path read out of code the macro turns out to discard
+    /// loses a finding and can never invent one.
+    ///
+    /// Dropping them, which is what came before, is the direction that does
+    /// invent: bun declares whole subsystems inside `cfg_jsc! { ... }`, and
+    /// every crate those files use was reported unused because the only paths
+    /// naming it were written in here.
+    pub spliced: Vec<ParsedFile>,
 }
 
 /// Whether something outside the workspace's own paths reaches a definition,
@@ -742,18 +758,43 @@ impl SymbolTable {
     }
 
     /// Resolve every path in `crates`, marking the definitions they name.
+    ///
+    /// Spliced files are walked here and nowhere else: they write paths that
+    /// keep definitions alive, and define nothing the table admits. Because
+    /// their items were never collected, [`RefWalker::defined_at`] finds no
+    /// definition at any of their sites and every path in one is attributed to
+    /// [`Referrer::Root`] — "counts on its own", which is the reading
+    /// `Referrer::Root` already exists to give code we cannot see into, and
+    /// the only sound one here. Attributing such a path to an enclosing item
+    /// we could not name would hang it on a definition the reachability walk
+    /// can never reach, and condemn the target.
     pub(crate) fn record_references(&mut self, crates: &[CrateUnit]) {
         for (krate, unit) in crates.iter().enumerate() {
-            for file in &unit.files {
+            for file in unit.files.iter().chain(&unit.spliced) {
                 let Some(ast) = &file.ast else { continue };
-                let Some(&module) = self.by_path.get(&(krate, file.module.clone())) else {
-                    continue;
+                // A spliced file's module path can be a guess at a module that
+                // was never collected — the macro that declares it is not
+                // expanded, so nothing put it in the table. Fall back to the
+                // nearest ancestor that is there, ending at the crate root,
+                // which always is. Only relative paths read the module at all,
+                // and resolving one against a wider scope than it was written
+                // in can mark the wrong definition used, never invent a
+                // finding.
+                let mut path = file.module.as_slice();
+                let module = loop {
+                    if let Some(&module) = self.by_path.get(&(krate, path.to_vec())) {
+                        break module;
+                    }
+                    match path.split_last() {
+                        Some((_, rest)) => path = rest,
+                        None => break self.roots[krate],
+                    }
                 };
                 let mut walker = RefWalker {
                     table: self,
                     krate,
                     module,
-                    module_path: file.module.clone(),
+                    module_path: path.to_vec(),
                     impl_self: None,
                     pos: PathPos::Other,
                     value_scopes: Vec::new(),
@@ -2921,6 +2962,7 @@ mod tests {
         CrateUnit {
             names: vec!["fixture".to_string()],
             test_code: false,
+            spliced: Vec::new(),
             files: sources
                 .iter()
                 .map(|(module, source)| ParsedFile {
@@ -3282,6 +3324,7 @@ mod tests {
         let crates = [CrateUnit {
             names: Vec::new(),
             test_code: false,
+            spliced: Vec::new(),
             files: unit(sources).files,
         }];
         let mut table = SymbolTable::build(&crates);
@@ -3335,6 +3378,7 @@ mod tests {
         let caller = CrateUnit {
             names: Vec::new(),
             test_code: false,
+            spliced: Vec::new(),
             files: unit(&[("", "fn go() { shared::contested(); }\n")]).files,
         };
 
@@ -4526,6 +4570,7 @@ mod tests {
         let target = CrateUnit {
             names: Vec::new(),
             test_code: true,
+            spliced: Vec::new(),
             files: unit(&[("", "mod support;\nfn main() { support::from_target(); }\n")])
                 .files
                 .into_iter()
@@ -4543,6 +4588,7 @@ mod tests {
         let target = CrateUnit {
             names: Vec::new(),
             test_code: false,
+            spliced: Vec::new(),
             files: unit(&[("", "mod support;\nfn main() { support::from_target(); }\n")])
                 .files
                 .into_iter()

@@ -4,9 +4,11 @@
 //! `cargo metadata`, resolves each package's module tree, and runs the
 //! detectors that are currently implemented:
 //!
-//! - **Dead module files**: `.rs` files under a package's `src/` that are not
-//!   reachable from any target root through `mod` declarations, and that no
-//!   `include!` Deadwood can read splices into the build either.
+//! - **Dead module files**: `.rs` files in the directories a package's crate
+//!   roots sit in — `src/` by convention, wherever the manifest says in fact —
+//!   that no target root in the *workspace* reaches through `mod`
+//!   declarations, and that no `include!` Deadwood can read splices into the
+//!   build either.
 //! - **Unused public items and re-exports**: fully-`pub` items, and `pub use`
 //!   re-exports, that nothing live in the workspace reaches. Usage is
 //!   established by resolving `use` declarations and qualified paths against
@@ -335,6 +337,18 @@ pub fn analyze_with(
     // Packages whose module tree did not resolve are left out entirely.
     let mut references: Vec<(&metadata::Package, deps::CrateReferences, cfg::Gates<'_>)> =
         Vec::new();
+    // Whether a file is compiled at all is a question about the workspace, not
+    // about one package: `bun_runtime` mounts a file that sits in `bun_jsc`'s
+    // directory with `#[path = "../jsc/generated_classes_list.rs"]`, and asking
+    // only `bun_jsc` — whose own module tree quite correctly never reaches it —
+    // reports a file the build compiles. So the three sets are unioned across
+    // every package and the check runs once, after the loop.
+    let mut reachable: HashSet<PathBuf> = HashSet::new();
+    let mut excluded: HashSet<PathBuf> = HashSet::new();
+    let mut spliced: HashSet<PathBuf> = HashSet::new();
+    // The packages whose module tree resolved, and the directories to walk for
+    // each. Held until the union above is complete.
+    let mut dead_file_scans: Vec<(&metadata::Package, Vec<PathBuf>, PathBuf)> = Vec::new();
 
     for package in &meta.packages {
         let manifest_dir = package
@@ -369,7 +383,7 @@ pub fn analyze_with(
                     gate_sites.record(&file.path, &package.name, gates.gate_sites(ast));
                 }
             }
-            package_spliced.extend(resolved.spliced.into_iter().map(|file| file.path));
+            package_spliced.extend(resolved.spliced.iter().map(|file| file.path.clone()));
             package_excluded.extend(resolved.excluded);
             // Every target of the package can name a dependency, including
             // its tests, examples, benches, and build script — and *which*
@@ -387,8 +401,18 @@ pub fn analyze_with(
                 // no consumer of the package runs.
                 test_code: deps::is_dev_target(target),
                 files: resolved.files,
+                // Their paths count; their items stay out of the table. See
+                // `CrateUnit::spliced` for why those two halves separate.
+                spliced: resolved.spliced,
             });
         }
+
+        // Unioned before the skip below: a file another package reaches is
+        // compiled whatever went wrong here, and a package that cannot answer
+        // for itself can still answer for its neighbours.
+        reachable.extend(package_reachable.iter().cloned());
+        excluded.extend(package_excluded.iter().cloned());
+        spliced.extend(package_spliced.iter().cloned());
 
         // An unparsable file or unresolved `mod` means the reachable set is
         // incomplete, and files it would have reached would be reported as
@@ -422,15 +446,67 @@ pub fn analyze_with(
         package_references.add_unreached_sources(manifest_dir, &already_read);
         references.push((package, package_references, gates));
 
-        // Dead-file detection only covers src/: tests/, examples/, and
-        // benches/ roots are auto-discovered targets and already covered
-        // above, but stray helper files there are usually intentional.
-        let src_dir = manifest_dir.join("src");
-        if src_dir.is_dir() {
-            for file in modtree::rs_files_under(&src_dir) {
-                if !package_reachable.contains(&file)
-                    && !package_excluded.contains(&file)
-                    && !package_spliced.contains(&file)
+        // Which directories to walk is decided here, where the manifest is in
+        // hand; whether a file in one is dead is decided after the loop, once
+        // every package has contributed what it reaches.
+        dead_file_scans.push((
+            package,
+            dead_file_roots(package, manifest_dir),
+            manifest_dir.to_path_buf(),
+        ));
+    }
+
+    // The same three sets again, by the identity the filesystem gives a file
+    // rather than the path that reached it. A symlinked directory gives one
+    // file two spellings, and the walk below meets it under whichever one it
+    // arrived by: serde symlinks `serde/src/core` at `serde_core/src`, so the
+    // crate root reached as `serde_core/src/lib.rs` is walked a second time as
+    // `serde/src/core/lib.rs` and matches nothing it is compared against.
+    // `modtree`'s normalization is deliberately lexical — it settles `.` and
+    // `..` without touching the disk — so the question has to be asked here.
+    //
+    // Built once, and only when there is something to compare it with.
+    let canonical: HashSet<PathBuf> = if dead_file_scans.is_empty() {
+        HashSet::new()
+    } else {
+        reachable
+            .iter()
+            .chain(&excluded)
+            .chain(&spliced)
+            .filter_map(|file| file.canonicalize().ok())
+            .collect()
+    };
+
+    // Dead-file detection covers the directories the package's own crate roots
+    // sit in — usually just `src/`, but a manifest decides that and plenty do
+    // not say `src/`. See `dead_file_roots`.
+    for (package, roots, manifest_dir) in &dead_file_scans {
+        for root in roots {
+            for file in modtree::rs_files_under_pruned(root, &|dir| {
+                // Another package's directory is that package's business: its
+                // own entry here covers it, against its own module tree.
+                // Without this a crate root at the package directory — bun's
+                // layout, and the workspace-root single-crate layout — would
+                // sweep every member below it.
+                dir.join("Cargo.toml").is_file()
+                    // Never source. Cargo's own, and anything a build put there.
+                    || dir.file_name().is_some_and(|name| name == "target")
+                    // The auto-discovered target directories, but only where
+                    // Cargo looks for them. `src/tests/` is an ordinary module
+                    // directory and stays in; `<package>/tests/` is a target
+                    // root already walked above, and its stray helpers are
+                    // usually deliberate.
+                    || (dir.parent() == Some(manifest_dir.as_path())
+                        && dir.file_name().is_some_and(|name| {
+                            name == "tests" || name == "examples" || name == "benches"
+                        }))
+            }) {
+                if !reachable.contains(&file)
+                    && !excluded.contains(&file)
+                    && !spliced.contains(&file)
+                    && !file
+                        .canonicalize()
+                        .is_ok_and(|real| canonical.contains(&real))
                 {
                     findings.push(Finding {
                         kind: FindingKind::DeadFile,
@@ -870,6 +946,54 @@ fn relative_to(path: &Path, root: &Path) -> PathBuf {
         return relative.to_path_buf();
     }
     path.to_path_buf()
+}
+
+/// The directories the dead-file check walks for a package.
+///
+/// `src/` is a convention, not a rule: the manifest says where a crate root
+/// lives, and `[lib] path = "lib.rs"` puts it in the package directory
+/// itself. Deriving the directories from the targets instead of assuming the
+/// convention is the difference between covering such a package and silently
+/// covering nothing — bun lays out all 101 of its crates that way, so the
+/// check walked `<package>/src`, found no such directory, and reported
+/// nothing for the entire workspace.
+///
+/// Only the targets whose module trees are the package's own library and
+/// binaries count. A `test`, `example` or `bench` root is auto-discovered
+/// code whose stray helpers are usually deliberate, and a build script sits
+/// in the package directory, which would widen every conventional package to
+/// its whole directory for the sake of one file that is already a target
+/// root.
+///
+/// Roots nested inside other roots are dropped, so the usual package —
+/// `src/lib.rs` plus auto-discovered `src/bin/*.rs` — yields exactly `src/`,
+/// which is what this check always walked.
+fn dead_file_roots(package: &metadata::Package, manifest_dir: &Path) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = package
+        .targets
+        .iter()
+        .filter(|target| {
+            !deps::is_dev_target(target) && !target.kind.iter().any(|kind| kind == "custom-build")
+        })
+        .filter_map(|target| target.src_path.parent().map(Path::to_path_buf))
+        // A target root outside the package directory is somebody else's file
+        // — the same file `#[path]`-shared into two packages, most often — and
+        // walking it would report its neighbours against this package's tree.
+        .filter(|dir| dir.starts_with(manifest_dir))
+        .collect();
+    roots.sort();
+    roots.dedup();
+    let nested: Vec<PathBuf> = roots
+        .iter()
+        .filter(|dir| {
+            roots
+                .iter()
+                .any(|other| other != *dir && dir.starts_with(other))
+        })
+        .cloned()
+        .collect();
+    roots.retain(|dir| !nested.contains(dir) && dir.is_dir());
+    roots
 }
 
 /// The names other crates can use for `target` in paths.

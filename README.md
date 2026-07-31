@@ -22,7 +22,7 @@ assessment this project was bootstrapped from.
 
 | Check | What it finds | Why rustc doesn't |
 | --- | --- | --- |
-| **Dead files** | `.rs` files under `src/` not reachable from any target root via `mod` declarations — including ones a macro token stream declares, which are followed without expanding it — or through an `include!` naming a file we can read | Files outside the module tree are never compiled, so no lint ever sees them |
+| **Dead files** | `.rs` files in the directories a package's crate roots sit in — `src/`, or wherever the manifest points — not reachable from any target root in the workspace via `mod` declarations — including ones a macro token stream declares, which are followed without expanding it — or through an `include!` naming a file we can read | Files outside the module tree are never compiled, so no lint ever sees them |
 | **Unused pub items** | Fully-`pub` fns, structs, enums, traits, type aliases, consts, statics, and unions that nothing live in the workspace reaches — either no path resolves to them, or every path that does is written inside something itself unreachable | `dead_code` assumes `pub` items have external consumers |
 | **Unused re-exports** | `pub use` re-exports nothing live in the workspace goes through, where outside code cannot reach them either | `unused_imports` only sees imports the crate itself does not use, not ones re-exported for nobody |
 | **Unused dependencies** | `Cargo.toml` entries — normal, dev, or build — whose crate name the declaring package's code never mentions | Cargo has no reason to look, and an unused entry still costs build time and supply-chain surface |

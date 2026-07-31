@@ -1,0 +1,15 @@
+# Test fixture: a `mod` whose file is named by `#[cfg_attr(.., path = "..")]`
+# rather than by a plain `#[path]` — serde declares `serde_derive_internals`'s
+# only module with a pair of them, one per build.
+#
+# The condition is never evaluated. The first arm naming a file that exists is
+# the module; the other names a file no build compiles alongside it, and is
+# spared rather than reported dead. Reading neither left the module unresolved,
+# which skipped every check for the package *and* the workspace-wide unused-pub
+# check with it — silence, not a wrong answer, which is why it went unnoticed.
+[package]
+name = "cfgattrpath"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]

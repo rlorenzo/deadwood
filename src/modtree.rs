@@ -43,15 +43,23 @@
 //! includer's. [`child_base`] decides the first; [`Pending::module`] carries
 //! the second.
 //!
-//! What this phase does with the second answer is nothing: files reached
-//! through an `include!` are returned in [`Resolved::spliced`], apart from
-//! [`Resolved::files`], and the caller feeds them to the dead-file check and
-//! to nothing else. They are parsed, gated and given their module paths all
-//! the same, so the boundary is one filter rather than a missing answer — but
-//! admitting a generated API surface's items to resolution is a finding
-//! population of its own, and it is not this phase's to create. A file both an
-//! `include!` and a `mod` chain reach is *analyzed*: the `mod` walk is drained
-//! before any `include!` target is followed, so the ordinary route wins.
+//! Files reached through an `include!` are returned in [`Resolved::spliced`],
+//! apart from [`Resolved::files`], and the caller admits them to two things:
+//! the dead-file check, which they are spared by, and the *reference* half of
+//! resolution, which reads the paths they write. Their items stay out. They
+//! are parsed, gated and given their module paths all the same, so the
+//! boundary is one filter rather than a missing answer — but admitting a
+//! generated API surface's items to resolution is a finding population of its
+//! own, and it is not this phase's to create.
+//!
+//! The two halves separate because being wrong about them costs opposite
+//! things. A definition admitted at a module path we guessed invents claims
+//! about items nothing can name; a reference resolved from the wrong scope
+//! only ever marks *something* reached, so the worst it does is lose a
+//! finding. Dropping the references is what invents — see the note on macro
+//! token streams below. A file both an `include!` and a `mod` chain reach is
+//! fully *analyzed*: the `mod` walk is drained before any `include!` target is
+//! followed, so the ordinary route wins.
 //!
 //! An `include!` whose path only a build knows —
 //! `include!(concat!(env!("OUT_DIR"), ...))` — is left alone here, silently.
@@ -94,9 +102,21 @@
 //! until the walk has nothing else to do and re-checked each round
 //! ([`MacroScan::invocations`]). Everything queued this way lands in
 //! [`Resolved::spliced`], and inherits exactly the `include!` boundary: the
-//! file is spared from the dead-file check, and its items are not admitted to
-//! resolution — the module path a macro gives its items is unknowable without
-//! expansion, so admitting them would trade one invented finding for another.
+//! file is spared from the dead-file check and the paths it writes are
+//! resolved, while its items are not admitted — the module path a macro gives
+//! its items is unknowable without expansion, so admitting them would trade
+//! one invented finding for another.
+//!
+//! Reading the paths is not a softening of that rule but the same rule applied
+//! to the other half. bun declares whole subsystems inside `cfg_jsc! { ... }`,
+//! and while those files were spared correctly, every item they were the sole
+//! caller of was reported unused — a claim invented out of code that was read
+//! and then discarded. A path is safe to be wrong about in a way a definition
+//! is not: resolving one can only mark definitions reached, so a path the
+//! macro turns out to throw away costs a finding and can never manufacture
+//! one. Because the items were never collected, every path in such a file is
+//! attributed to [`crate::resolve`]'s "counts on its own" referrer rather than
+//! to an enclosing definition the reachability walk could never reach.
 //!
 //! [#60]: https://github.com/rlorenzo/deadwood/issues/60
 //!
@@ -495,6 +515,30 @@ pub fn resolve(
                     queue_speculative(&mut deferred, &site, &declared, ident);
                 }
             }
+            // `#[path = $f] mod $m;` puts the file name in the invocation as a
+            // string literal, and the module name beside it as an ident that
+            // says nothing about the file — bun's matcher table pairs
+            // `"toBeArrayOfSize.rs"` with `to_be_array_of_size`, and no rule
+            // turns one into the other. So the literals are probed as `#[path]`
+            // targets, under the same module name the ident probe would use
+            // when there is one to pair with; the module path a speculative
+            // claim carries decides nothing that a wrong guess could invent,
+            // and a literal naming no file is dropped in silence like the rest.
+            for prefix in &emission.dollar_path_prefixes {
+                for (index, literal) in invocation.literals.iter().enumerate() {
+                    let name = invocation
+                        .idents
+                        .get(index)
+                        .cloned()
+                        .unwrap_or_else(|| literal.clone());
+                    let declared = TokenMod {
+                        prefix: prefix.clone(),
+                        path_attr: Some(literal.clone()),
+                        name: name.clone(),
+                    };
+                    queue_speculative(&mut deferred, &site, &declared, &name);
+                }
+            }
         }
         if deferred.is_empty() {
             let spliced = resolved.files.split_off(drained);
@@ -615,6 +659,12 @@ struct MacroEmission {
     /// so its invocation idents are probed under `targets/`. An unwrapped
     /// `mod $x` contributes the empty prefix.
     dollar_prefixes: Vec<Vec<String>>,
+    /// The same, for rules that say `#[path = $f] mod $m;` — bun declares its
+    /// forty-odd Jest matcher modules with one, and the file names live in
+    /// the invocation as string literals (`"toBe.rs" => to_be`) because the
+    /// module names are not derivable from them. Probing the idents finds
+    /// `to_be.rs`; the file is `toBe.rs`.
+    dollar_path_prefixes: Vec<Vec<String>>,
     /// Literal `mod name` declarations in the rules, re-resolved at every
     /// invocation site: serde's `crate_root!` declares its whole module tree
     /// this way, `#[path]` attributes included, and the paths are relative to
@@ -632,6 +682,10 @@ struct MacroInvocation {
     /// emission's prefixes; the ones that name no file are dropped without a
     /// sound.
     idents: Vec<String>,
+    /// Every string literal in the invocation's arguments, probed as a
+    /// `#[path]` target if the macro turns out to emit `#[path = $f] mod $m;`.
+    /// Dropped without a sound when they name nothing, like the idents.
+    literals: Vec<String>,
     /// Where the invocation's children would live ([`Under::base`]) and the
     /// directory `#[path]` attributes resolve from ([`Declaring::dir`]).
     base: PathBuf,
@@ -661,8 +715,15 @@ struct TokenMods {
     declared: Vec<TokenMod>,
     /// Bare identifiers, for probing when the macro emits `mod $x`.
     idents: Vec<String>,
+    /// String literals, for probing when the macro emits
+    /// `#[path = $f] mod $m;` — there the file names are the caller's
+    /// literals, and the idents are only the module names they are bound to.
+    literals: Vec<String>,
     /// The inline-module prefixes under which `mod $` was seen.
     dollar_prefixes: Vec<Vec<String>>,
+    /// The inline-module prefixes under which `mod $` was seen carrying a
+    /// `#[path = $..]` whose value is a metavariable too.
+    dollar_path_prefixes: Vec<Vec<String>>,
 }
 
 /// Scan a macro token stream for module declarations, without expanding it.
@@ -687,6 +748,8 @@ fn scan_token_mods(tokens: TokenStream, prefix: &[String], found: &mut TokenMods
     // A `#[path = "..."]` (or `#[cfg_attr(.., path = "..")]`) seen since the
     // last declaration-shaped token, waiting for the `mod` it sits above.
     let mut pending_path: Option<String> = None;
+    // The same slot for `#[path = $f]`, whose value only an invocation has.
+    let mut pending_path_meta = false;
     while let Some(tree) = iter.next() {
         match tree {
             TokenTree::Ident(ident) => {
@@ -698,6 +761,7 @@ fn scan_token_mods(tokens: TokenStream, prefix: &[String], found: &mut TokenMods
                     // other item.
                     if word != "pub" {
                         pending_path = None;
+                        pending_path_meta = false;
                     }
                     found.idents.push(word);
                     continue;
@@ -714,11 +778,13 @@ fn scan_token_mods(tokens: TokenStream, prefix: &[String], found: &mut TokenMods
                                     unreachable!("peeked a group");
                                 };
                                 pending_path = None;
+                                pending_path_meta = false;
                                 let mut child_prefix = prefix.to_vec();
                                 child_prefix.push(name.clone());
                                 scan_token_mods(group.stream(), &child_prefix, found);
                             }
                             _ => {
+                                pending_path_meta = false;
                                 found.declared.push(TokenMod {
                                     prefix: prefix.to_vec(),
                                     path_attr: pending_path.take(),
@@ -727,11 +793,20 @@ fn scan_token_mods(tokens: TokenStream, prefix: &[String], found: &mut TokenMods
                             }
                         }
                     }
-                    Some(TokenTree::Punct(punct))
-                        if punct.as_char() == '$'
-                            && !found.dollar_prefixes.contains(&prefix.to_vec()) =>
-                    {
-                        found.dollar_prefixes.push(prefix.to_vec());
+                    Some(TokenTree::Punct(punct)) if punct.as_char() == '$' => {
+                        // `#[path = $f] mod $m;` names its file from the
+                        // invocation's literals, and `mod $m;` alone from its
+                        // idents. Both are recorded: a rule can be read
+                        // through either arm at different invocations, and a
+                        // probe that names no file costs nothing.
+                        let here = prefix.to_vec();
+                        if pending_path_meta && !found.dollar_path_prefixes.contains(&here) {
+                            found.dollar_path_prefixes.push(here.clone());
+                        }
+                        if !found.dollar_prefixes.contains(&here) {
+                            found.dollar_prefixes.push(here);
+                        }
+                        pending_path_meta = false;
                     }
                     _ => {}
                 }
@@ -742,6 +817,8 @@ fn scan_token_mods(tokens: TokenStream, prefix: &[String], found: &mut TokenMods
                 {
                     if let Some(literal) = path_attr_in_tokens(group.stream()) {
                         pending_path = Some(literal);
+                    } else if path_attr_is_metavariable(group.stream()) {
+                        pending_path_meta = true;
                     }
                     let Some(TokenTree::Group(group)) = iter.next() else {
                         unreachable!("peeked a group");
@@ -754,8 +831,15 @@ fn scan_token_mods(tokens: TokenStream, prefix: &[String], found: &mut TokenMods
                 // restriction; anything else ends an attribute's reach.
                 if group.delimiter() != Delimiter::Parenthesis {
                     pending_path = None;
+                    pending_path_meta = false;
                 }
                 scan_token_mods(group.stream(), prefix, found);
+            }
+            TokenTree::Literal(literal) => {
+                let tokens = TokenStream::from(TokenTree::Literal(literal.clone()));
+                if let Ok(lit) = syn::parse2::<syn::LitStr>(tokens) {
+                    found.literals.push(lit.value());
+                }
             }
             _ => {}
         }
@@ -796,6 +880,41 @@ fn path_attr_in_tokens(tokens: TokenStream) -> Option<String> {
         }
     }
     None
+}
+
+/// Whether an attribute's tokens bind `path` to a *metavariable* rather than
+/// to a literal — `#[path = $file]`, which is a `macro_rules!` body's way of
+/// saying "the caller names the file".
+///
+/// The declaration such a rule emits has neither a name nor a path this scan
+/// can read: `#[path = $file] pub mod $mod;` puts both in the invocation. What
+/// can be read is that the *invocation's string literals* are candidate file
+/// paths, which is what [`MacroEmission::dollar_path_prefixes`] records.
+fn path_attr_is_metavariable(tokens: TokenStream) -> bool {
+    let mut iter = tokens.into_iter().peekable();
+    while let Some(tree) = iter.next() {
+        match tree {
+            TokenTree::Ident(ident) if ident == "path" => {
+                if let Some(TokenTree::Punct(punct)) = iter.peek()
+                    && punct.as_char() == '='
+                {
+                    iter.next();
+                    if let Some(TokenTree::Punct(punct)) = iter.peek()
+                        && punct.as_char() == '$'
+                    {
+                        return true;
+                    }
+                }
+            }
+            TokenTree::Group(group) => {
+                if path_attr_is_metavariable(group.stream()) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Queue the file a speculative `mod` claim names, if there is one.
@@ -909,6 +1028,36 @@ fn scan_macro_item(
         let name = declared.name.clone();
         queue_speculative(walk.deferred, &site, declared, &name);
     }
+    // A stream that both declares `mod $x` *and* carries the arguments for it
+    // settles itself, here, without ever reaching `MacroScan`. That happens
+    // when a `macro_rules!` is defined and invoked inside another macro's
+    // tokens, which the item-level reader never sees as items at all: bun
+    // wraps `macro_rules! matchers` and its forty-nine-entry invocation
+    // together inside one `cfg_jsc! { pub mod expect { .. } }`, so neither
+    // half is an `ItemMacro` and the pairing has to be read off the one stream
+    // holding both. Probing costs a `stat` per candidate and spares a file
+    // when it hits, which is the only thing a claim out of a token stream is
+    // allowed to do.
+    for prefix in &found.dollar_path_prefixes {
+        for literal in &found.literals {
+            // The module name is the caller's other metavariable, and pairing
+            // it with the right literal means parsing the macro's own rules.
+            // The file stem stands in instead: these files land in
+            // `Resolved::spliced`, where the module path names nothing that
+            // resolution consults, so a stem that is not the name the macro
+            // binds spares exactly the same file.
+            let name = Path::new(literal)
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().into_owned())
+                .unwrap_or_else(|| literal.clone());
+            let declared = TokenMod {
+                prefix: prefix.clone(),
+                path_attr: Some(literal.clone()),
+                name: name.clone(),
+            };
+            queue_speculative(walk.deferred, &site, &declared, &name);
+        }
+    }
     if mac.mac.path.is_ident("macro_rules") {
         if let Some(name) = &mac.ident
             && (!found.declared.is_empty() || !found.dollar_prefixes.is_empty())
@@ -920,6 +1069,11 @@ fn scan_macro_item(
                     emission.dollar_prefixes.push(prefix);
                 }
             }
+            for prefix in found.dollar_path_prefixes {
+                if !emission.dollar_path_prefixes.contains(&prefix) {
+                    emission.dollar_path_prefixes.push(prefix);
+                }
+            }
         }
         return;
     }
@@ -929,6 +1083,7 @@ fn scan_macro_item(
     walk.macros.invocations.push(MacroInvocation {
         name: name.ident.to_string(),
         idents: found.idents,
+        literals: found.literals,
         base: site.base,
         dir: site.dir,
         module: site.module,
@@ -1027,8 +1182,24 @@ fn collect_mod_decls(
             }
             // External module: find the file it refers to.
             None => {
-                if let Some(explicit) = path_attr(&m.attrs) {
-                    let target = under.path_base.join(explicit);
+                let named = path_attrs(&m.attrs);
+                if let Some(first) = named.first() {
+                    let targets: Vec<PathBuf> = named
+                        .iter()
+                        .map(|explicit| under.path_base.join(explicit))
+                        .collect();
+                    // The first that exists is the module; the rest are the
+                    // other arms of a `cfg_attr` pair, which no build compiles
+                    // alongside it. They are spared rather than analyzed —
+                    // attributing two files to one module path would report
+                    // whichever is not in this build.
+                    let target = targets.iter().find(|target| target.is_file()).cloned();
+                    for other in &targets {
+                        if Some(other) != target.as_ref() {
+                            exclude_subtree(Some(other), under.base, &name, walk.excluded);
+                        }
+                    }
+                    let target = target.unwrap_or_else(|| under.path_base.join(first));
                     if target.is_file() {
                         // A `#[path]` target owns its parent directory whatever
                         // it is called — rustc treats every one of them as
@@ -1207,24 +1378,62 @@ fn exclude_subtree(
     excluded.extend(rs_files_under(&directory));
 }
 
-/// Extract the value of a `#[path = "..."]` attribute, if present.
-fn path_attr(attrs: &[syn::Attribute]) -> Option<String> {
+/// Every file a `mod`'s attributes name, in the order they are written.
+///
+/// Usually none or one. More than one comes from `#[cfg_attr(cond, path =
+/// "..")]`, whose condition this function does not evaluate — the same reading
+/// [`path_attr_in_tokens`] already gives a `#[path]` inside a macro, and for
+/// the same reason: a gate that does not hold spares a file, and sparing is
+/// the safe direction. serde declares its `internals` module with a pair of
+/// them, one path per build, and reading neither left the module unresolved
+/// and the whole package's checks skipped:
+///
+/// ```ignore
+/// #[cfg_attr(serde_build_from_git, path = "../serde_derive/src/internals/mod.rs")]
+/// #[cfg_attr(not(serde_build_from_git), path = "src/mod.rs")]
+/// mod internals;
+/// ```
+///
+/// The caller resolves the module to the first candidate that is a file and
+/// spares the rest from the dead-file check: no build compiles more than one
+/// of them, so analyzing more than one would attribute two files to a single
+/// module path and report whichever is not in this build.
+fn path_attrs(attrs: &[syn::Attribute]) -> Vec<String> {
+    let mut found = Vec::new();
     for attr in attrs {
-        if !attr.path().is_ident("path") {
-            continue;
-        }
-        if let syn::Meta::NameValue(nv) = &attr.meta
-            && let syn::Expr::Lit(lit) = &nv.value
-            && let syn::Lit::Str(s) = &lit.lit
+        if attr.path().is_ident("path") {
+            if let syn::Meta::NameValue(nv) = &attr.meta
+                && let syn::Expr::Lit(lit) = &nv.value
+                && let syn::Lit::Str(s) = &lit.lit
+            {
+                found.push(s.value());
+            }
+        } else if attr.path().is_ident("cfg_attr")
+            && let syn::Meta::List(list) = &attr.meta
+            && let Some(value) = path_attr_in_tokens(list.tokens.clone())
         {
-            return Some(s.value());
+            found.push(value);
         }
     }
-    None
+    found
+}
+
+/// The first file a `mod`'s attributes name, which is the one it resolves to.
+fn path_attr(attrs: &[syn::Attribute]) -> Option<String> {
+    path_attrs(attrs).into_iter().next()
 }
 
 /// All `.rs` files under `dir`, recursively, skipping hidden directories.
 pub fn rs_files_under(dir: &Path) -> Vec<PathBuf> {
+    rs_files_under_pruned(dir, &|_| false)
+}
+
+/// [`rs_files_under`], not descending into a directory `prune` rejects.
+///
+/// `prune` is asked about directories only, and only about ones below `dir` —
+/// the root is walked whatever it says, so a caller cannot prune away the
+/// thing it asked about.
+pub fn rs_files_under_pruned(dir: &Path, prune: &dyn Fn(&Path) -> bool) -> Vec<PathBuf> {
     let mut files = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
     while let Some(current) = stack.pop() {
@@ -1236,7 +1445,7 @@ pub fn rs_files_under(dir: &Path) -> Vec<PathBuf> {
             let name = entry.file_name();
             let name = name.to_string_lossy();
             if path.is_dir() {
-                if !name.starts_with('.') {
+                if !name.starts_with('.') && !prune(&path) {
                     stack.push(path);
                 }
             } else if name.ends_with(".rs") {

@@ -7,6 +7,10 @@
 #[macro_use]
 mod machinery;
 
+// Ordinary, in the `mod` tree, and referenced from nowhere but the file
+// `wrapper!` declares below.
+pub mod reached_from_macro_mod;
+
 // The tokio shape: a literal `mod` inside a macro invocation's arguments
 // (`cfg_fs! { pub mod fs; }`).
 wrapper! {
