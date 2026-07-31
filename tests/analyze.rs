@@ -1509,6 +1509,9 @@ fn dependencies_declared_in_the_wrong_table_are_reported() {
             "nested_test_fn_crate",
             "outline_test_crate",
             "stale_build_crate",
+            // The dev copy of a doubled crate that no dev code names: a stale
+            // duplicate, reported on its own absent evidence.
+            "stale_dev_copy_crate",
             "test_fn_crate",
             "test_only_crate",
             "tool_attr_dev_crate",
@@ -1560,6 +1563,10 @@ fn dependencies_declared_in_the_wrong_table_are_reported() {
         "single_segment_attr_dev_crate",
         "core_prelude_test_dev_crate",
         "attr_macro_impl_dev_crate",
+        // Declared in both tables with dev code naming it: the library
+        // mentions are the `[dependencies]` copy's evidence, the dev mention
+        // is the dev copy's own, and both copies are where they belong.
+        "doubled_features_crate",
         // A `[build-dependencies]` entry named only from a `#[test] fn` inside
         // `build.rs`. A build script has no test harness, so its test
         // functions are build-script code like the rest of the file.
@@ -2069,6 +2076,35 @@ fn an_attribute_macro_in_a_dev_target_changes_nothing() {
     assert!(
         reported_names.contains(&"attr_macro_test_target_crate"),
         "{:?}",
+        analysis.findings
+    );
+}
+
+/// The doubled manifest [#55](https://github.com/rlorenzo/deadwood/issues/55)
+/// filed, in both of its spellings. `doubled_features_crate` is declared in
+/// both tables and named by both kinds of code: the library mentions justify
+/// the `[dependencies]` copy, the `tests/it.rs` mention justifies the dev
+/// copy, and reporting either — the dev copy was reported as belonging in
+/// `[dependencies]` — indicts a manifest that compiles.
+/// `stale_dev_copy_crate` is doubled with *no* dev mention anywhere: its dev
+/// copy duplicates an entry the library already justifies, and that claim
+/// rests on the dev code's silence — this entry's own evidence — so it stays
+/// a finding, exactly as `stale_build_crate`'s build copy does.
+#[test]
+fn a_doubled_crate_moves_only_on_its_own_entrys_evidence() {
+    let analysis = analyze_fixture("depkinds");
+    let reported_names: Vec<&str> = reported(&analysis, FindingKind::MisplacedDependency)
+        .into_iter()
+        .map(|(_, name)| name)
+        .collect();
+    assert!(
+        !reported_names.contains(&"doubled_features_crate"),
+        "both copies carry their own table's mentions: {:?}",
+        analysis.findings
+    );
+    assert!(
+        reported_names.contains(&"stale_dev_copy_crate"),
+        "a dev copy nothing dev names is a stale duplicate: {:?}",
         analysis.findings
     );
 }

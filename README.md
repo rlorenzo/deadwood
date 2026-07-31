@@ -187,6 +187,12 @@ Everything else stays quiet, by design:
   mention justifies it where it is. It moves *up* on a single runtime mention,
   since the library cannot link it at all — test code naming it too changes
   nothing about the build that fails.
+- **A crate declared in both `[dependencies]` and `[dev-dependencies]`** —
+  usually so the tests get extra features, the way `zerocopy-derive` declares
+  `syn` twice — is judged per entry: the library mentions justify the normal
+  copy and are never held against the dev copy, whose own evidence is the dev
+  mentions. A doubled dev copy dev code names is correctly placed; one nothing
+  dev names is reported as the stale duplicate it is.
 
 `cfg` gates are evaluated rather than always followed, but the *default* set of
 builds analyzed is the union of every possibility — every feature on and off,

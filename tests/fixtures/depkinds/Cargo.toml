@@ -22,6 +22,14 @@ example_only_crate = "1"
 # The library names it, so the entry is right where it is — the stale
 # `[build-dependencies]` copy below is the finding.
 stale_build_crate = "1"
+# Declared here *and* under `[dev-dependencies]`, in both spellings of that
+# doubling: `doubled_features_crate` is also named by dev code (the dev copy
+# is the features-for-tests idiom, and neither copy is a finding), while
+# `stale_dev_copy_crate` is named by the library alone (the dev copy is a
+# stale duplicate, and it is a finding). Both `[dependencies]` copies are
+# justified by the library mention either way.
+doubled_features_crate = "1"
+stale_dev_copy_crate = "1"
 # Named only by `src/outline_tests.rs`, which is the body of a `#[cfg(test)]
 # mod` whose gate is written in `src/lib.rs`. Test code that happens to live in
 # its own file is still test code: the same finding as `test_only_crate`, in
@@ -188,6 +196,18 @@ tool_attr_dev_crate = "1"
 # Named only from an `#[inline] fn`. A built-in attribute rewrites nothing, so
 # the mention is library code and this manifest does not compile: a finding.
 builtin_attr_dev_crate = "1"
+# The `zerocopy-derive` shape: the same crate as the `[dependencies]` entry
+# above, redeclared here so the tests get extra features. The library mentions
+# belong to that entry, not this one; the `tests/it.rs` mention is this one's
+# own and justifies it. Not a finding for either copy — reporting this one was
+# the invented finding #55 filed.
+doubled_features_crate = { version = "1", features = ["full"] }
+# Doubled like the entry above, but no dev code names the crate at all: a
+# stale duplicate of the `[dependencies]` entry that carries the real use. The
+# claim rests on the absence of dev mentions, which is this entry's own
+# evidence — a finding, exactly as the stale `[build-dependencies]` copy below
+# is one.
+stale_dev_copy_crate = "1"
 
 [build-dependencies]
 # Named by `build.rs`, the only target that can use a build-dependency.
