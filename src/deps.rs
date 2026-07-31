@@ -316,7 +316,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use proc_macro2::{TokenStream, TokenTree};
+use proc_macro2::{Delimiter, TokenStream, TokenTree};
 use syn::visit::Visit;
 
 use crate::cfg::{Gates, Site, TargetVerdict};
@@ -1052,6 +1052,29 @@ fn warn_skipped(warnings: &mut Vec<String>, package: &str, mut names: Vec<String
     ));
 }
 
+/// The text of a `doc = "..."` attribute body, or `None` when the bracketed
+/// tokens are some other attribute.
+fn doc_attr_text(tokens: &TokenStream) -> Option<String> {
+    let mut iter = tokens.clone().into_iter();
+    match (iter.next(), iter.next(), iter.next()) {
+        (
+            Some(TokenTree::Ident(ident)),
+            Some(TokenTree::Punct(punct)),
+            Some(TokenTree::Literal(literal)),
+        ) if ident == "doc" && punct.as_char() == '=' => {
+            // Parsed rather than stringified, so the raw and escaped
+            // spellings yield the documentation text alone — `r#"…"#`
+            // stringified would shed spurious one-letter "words" into the
+            // mention set. A non-string literal is not documentation.
+            let tokens = TokenStream::from(TokenTree::Literal(literal));
+            syn::parse2::<syn::LitStr>(tokens)
+                .ok()
+                .map(|lit| lit.value())
+        }
+        _ => None,
+    }
+}
+
 /// Every identifier-shaped word in a piece of text.
 fn words_into(names: &mut HashMap<String, Contexts>, text: &str, context: Contexts) {
     for word in text
@@ -1208,11 +1231,30 @@ impl Collector<'_, '_> {
     ///
     /// `strings` also mines string literals, which is right for attributes
     /// (where paths hide in strings) but not for macro bodies, where literals
-    /// are usually data.
+    /// are usually data. One kind of literal is mined even there: the text of
+    /// a `#[doc = "..."]` attribute, which is what a `///` comment becomes in
+    /// tokens. tokio documents `select!` inside a `doc! { macro_rules! ... }`
+    /// wrapper, and the doctests in those comments are the only place its
+    /// `futures-concurrency` dev-dependency is named — data the crate ships,
+    /// not data the macro consumes
+    /// ([#63](https://github.com/rlorenzo/deadwood/issues/63)).
     fn tokens(&mut self, tokens: &TokenStream, strings: bool) {
-        for tree in tokens.clone() {
+        let mut iter = tokens.clone().into_iter().peekable();
+        while let Some(tree) = iter.next() {
             match tree {
                 TokenTree::Ident(ident) => self.insert_opaque(ident.to_string()),
+                TokenTree::Punct(punct) if punct.as_char() == '#' => {
+                    // The group is deliberately *not* consumed: the next
+                    // iteration recurses into it as before, so the attribute's
+                    // own idents keep counting and this arm only ever adds
+                    // mentions — mining can never cost one.
+                    if let Some(TokenTree::Group(group)) = iter.peek()
+                        && group.delimiter() == Delimiter::Bracket
+                        && let Some(text) = doc_attr_text(&group.stream())
+                    {
+                        self.words_in(&text);
+                    }
+                }
                 TokenTree::Group(group) => self.tokens(&group.stream(), strings),
                 TokenTree::Literal(literal) if strings => self.words_in(&literal.to_string()),
                 _ => {}
@@ -1522,6 +1564,42 @@ mod tests {
         let refs = references(&["fn go() { engine_core::start(); }\n"]);
         let manifest = package(vec![dependency("engine-core")]);
         assert!(unused(&manifest, &refs).0.is_empty());
+    }
+
+    /// tokio documents `select!` inside a `doc! { macro_rules! ... }`
+    /// wrapper, and the doctests in those comments are the only place its
+    /// `futures-concurrency` dev-dependency is named. The text of a
+    /// `#[doc = "..."]` attribute is documentation wherever it sits, so its
+    /// words count — as opaque mentions, alive and unjudged
+    /// ([#63](https://github.com/rlorenzo/deadwood/issues/63)).
+    #[test]
+    fn a_doc_attribute_inside_a_macro_body_keeps_its_names_alive() {
+        let refs = references(&[
+            "doc_wrap! {\n    /// Libraries such as [`merge_crate`] merge streams.\n    macro_rules! merged { () => {}; }\n}\n",
+        ]);
+        let manifest = package(vec![dependency("merge_crate")]);
+        assert!(unused(&manifest, &refs).0.is_empty());
+    }
+
+    /// The boundary that keeps the rule above from mining data: a plain
+    /// string literal inside a macro body is the macro's input, not
+    /// documentation, and a crate named only there stays reported.
+    #[test]
+    fn a_plain_literal_inside_a_macro_body_is_still_data() {
+        let refs = references(&["data! { \"plain_crate\" }\n"]);
+        let manifest = package(vec![dependency("plain_crate")]);
+        assert_eq!(unused(&manifest, &refs).0, vec!["plain_crate"]);
+    }
+
+    /// And only `doc` gets the exemption: a `#[path = "..."]`-style
+    /// name-value attribute inside a macro body carries a file name, not
+    /// documentation, and a crate spelled only inside that string stays
+    /// reported.
+    #[test]
+    fn a_non_doc_attribute_literal_inside_a_macro_body_is_still_data() {
+        let refs = references(&["wrap! {\n    #[path = \"stringy_crate.rs\"]\n    mod x;\n}\n"]);
+        let manifest = package(vec![dependency("stringy_crate")]);
+        assert_eq!(unused(&manifest, &refs).0, vec!["stringy_crate"]);
     }
 
     #[test]

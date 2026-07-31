@@ -2687,6 +2687,16 @@ fn has_skip_attr(attrs: &[syn::Attribute]) -> bool {
         if attr_is(attr, &["no_mangle", "used", "export_name"]) {
             return true;
         }
+        // An item compiled only for rustdoc's doctest build has rustdoc as
+        // its consumer: the `#[cfg(doctest)] pub struct ReadmeDoctests;`
+        // idiom is referenced by nothing, deliberately, and deleting it — the
+        // advice an unused-item finding gives — silently drops the README's
+        // doctest coverage ([#63]).
+        //
+        // [#63]: https://github.com/rlorenzo/deadwood/issues/63
+        if requires_doctest(attr) {
+            return true;
+        }
         if attr_is(attr, &["allow", "expect"])
             && let syn::Meta::List(list) = &attr.meta
         {
@@ -2766,7 +2776,54 @@ fn entry_point_attr(attrs: &[syn::Attribute], test_context: bool) -> EntryPoint 
     {
         return EntryPoint::of_context(test_context);
     }
+    // An item gated to rustdoc's doctest build serves a consumer Deadwood
+    // cannot see — rustdoc itself. The idiom is
+    // `#[cfg(doctest)] #[doc = include_str!("../README.md")] pub struct
+    // ReadmeDoctests;`, which exists to run a README's examples as doctests
+    // and is referenced by nothing, deliberately; reporting it tells a
+    // project to delete its README's test coverage
+    // ([#63](https://github.com/rlorenzo/deadwood/issues/63)). Rooted in both
+    // walks, like the linker exports: the consumer is a tool, not the tests.
+    if attrs.iter().any(requires_doctest) {
+        return EntryPoint::NonTest;
+    }
     EntryPoint::None
+}
+
+/// Whether `attr` is a `cfg` whose predicate requires `doctest` — `doctest`
+/// named as a bare path outside any `not(...)`.
+///
+/// `not(doctest)` is deliberately no match: an item gated *away from* the
+/// doctest build is ordinary code, and rooting it would silence real
+/// findings across every crate using that idiom.
+fn requires_doctest(attr: &syn::Attribute) -> bool {
+    if !attr_is(attr, &["cfg"]) {
+        return false;
+    }
+    let syn::Meta::List(list) = &attr.meta else {
+        return false;
+    };
+    fn mentions(tokens: proc_macro2::TokenStream) -> bool {
+        let mut iter = tokens.into_iter().peekable();
+        while let Some(tree) = iter.next() {
+            match tree {
+                proc_macro2::TokenTree::Ident(ident) if ident == "doctest" => return true,
+                // `not` owns the group after it; nothing inside that group
+                // can *require* doctest.
+                proc_macro2::TokenTree::Ident(ident) if ident == "not" => {
+                    if let Some(proc_macro2::TokenTree::Group(_)) = iter.peek() {
+                        iter.next();
+                    }
+                }
+                proc_macro2::TokenTree::Group(group) if mentions(group.stream()) => {
+                    return true;
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+    mentions(list.tokens.clone())
 }
 
 /// Whether `attr` is an `allow` or `expect` listing one of `lints`.
@@ -2790,6 +2847,36 @@ fn allows_lint(attr: &syn::Attribute, lints: &[&str]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The boundary of the doctest exemption ([#63]): a gate *requires*
+    /// `doctest` when it names it as a bare path outside any `not(...)`. A
+    /// `not(doctest)` item is ordinary code — rooting it would silence real
+    /// findings in every crate using that idiom — and a feature merely
+    /// *named* "doctest" is a string, not the cfg.
+    ///
+    /// [#63]: https://github.com/rlorenzo/deadwood/issues/63
+    #[test]
+    fn a_cfg_gate_requires_doctest_only_as_a_bare_path_outside_not() {
+        let file: syn::File = syn::parse_str(
+            "#[cfg(doctest)]\nstruct A;\n\
+             #[cfg(any(test, doctest))]\nstruct B;\n\
+             #[cfg(not(doctest))]\nstruct C;\n\
+             #[cfg(feature = \"doctest\")]\nstruct D;\n\
+             #[cfg(all(not(doctest), unix))]\nstruct E;\n",
+        )
+        .unwrap();
+        let gated = |index: usize| {
+            let syn::Item::Struct(item) = &file.items[index] else {
+                panic!("fixture is all structs");
+            };
+            item.attrs.iter().any(requires_doctest)
+        };
+        assert!(gated(0));
+        assert!(gated(1), "any(test, doctest) can require it");
+        assert!(!gated(2), "not(doctest) is ordinary code");
+        assert!(!gated(3), "a feature string is not the cfg");
+        assert!(!gated(4), "not() shields its whole group");
+    }
 
     /// The kind-to-namespace table, spelled out where a reviewer can check it
     /// against the language rather than against the code that reads it.

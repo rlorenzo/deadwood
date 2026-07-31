@@ -2616,3 +2616,71 @@ nothing.
 Closes [#60](https://github.com/rlorenzo/deadwood/issues/60).
 
 [#60]: https://github.com/rlorenzo/deadwood/issues/60
+
+## Phase 29 — a reference that exists only for rustdoc claims nothing false (shipped)
+
+Rustdoc compiles doctests in a build of its own: `cfg(doctest)` set,
+dev-dependencies linked, and no consumer anywhere near it. Deadwood read that
+build's code as ordinary library code, which invented findings in three
+shapes across the ten-workspace sweep ([#63]) — regex's
+`#[cfg(doctest)] doc_comment::doctest!("../README.md")` had its `doc-comment`
+dev-dependency reported as "cannot link a dev-dependency" against a manifest
+that compiles (twice, with regex-automata); clap's
+`#[cfg(doctest)] pub struct ReadmeDoctests;` idiom was reported unused in six
+crates, where following the advice deletes the README's doctest coverage; and
+tokio's `futures-concurrency` dev-dependency, named only from the doctests in
+`select!`'s documentation — doc comments that sit *inside* a
+`doc! { macro_rules! ... }` wrapper — was reported never referenced.
+
+### Three mechanisms, one build
+
+- **`doctest` rides the `test` axis.** `eval` reads `cfg(doctest)` exactly as
+  `cfg(test)`: the doctest build links `[dev-dependencies]` as `cargo test`
+  does, and no build a consumer makes sets either cfg, so telling them apart
+  buys nothing any check needs. `#[cfg(doctest)]` now confines to a test
+  build — its mentions are dev evidence — and `#[cfg(not(doctest))]` is
+  ordinary code. The placement check gains a true claim for free: a
+  `[dependencies]` entry named *only* from `cfg(doctest)` code costs every
+  consumer a build for nothing, and is now reported as belonging in
+  `[dev-dependencies]` (`doctest_only_normal_crate` pins it).
+- **An item gated to rustdoc's build has rustdoc as its consumer.**
+  `requires_doctest` — a `cfg` naming `doctest` as a bare path outside any
+  `not(...)` — joins `has_skip_attr` beside `#[no_mangle]` and friends, and
+  roots the item in both walks. The boundary is pinned: `not(doctest)` is no
+  match, and a *feature* named "doctest" is a string, not the cfg.
+- **Doc text is documentation wherever it sits.** The token walk that reads
+  macro input already declines to mine string literals — macro-body literals
+  are usually data — but the text of a `#[doc = "..."]` token tree is what a
+  `///` comment becomes, and its words now count as opaque mentions. Only
+  `doc` gets the exemption: a `#[path = "..."]` string inside a macro body
+  stays data (`a_non_doc_attribute_literal_inside_a_macro_body_is_still_data`
+  pins the boundary).
+
+### What it found
+
+Measured against the ten-workspace public corpus, combined with phase 28:
+
+- **regex: 3 → 1** (both `doc-comment` placement claims gone; the stale
+  `quickcheck` dev-dependency, verified real, remains). **clap: 7 → 1** (six
+  `ReadmeDoctests` gone; `clap_mangen::generate_to`, a true
+  never-referenced-in-workspace claim, remains). **tokio: −1**
+  (`futures-concurrency` alive through its doctests). **rust-lang/rust: −1**
+  (the same shape, found by the sweep rather than sought).
+- **Everything else byte-identical**, including zed's 424 — no doctest idiom
+  there to misread.
+- **Mutation runs, 6/6 caught**: `doctest` off the `test` axis (the cfg unit
+  test and `depkinds`), `not()` no longer shielding
+  (`a_cfg_gate_requires_doctest_only_as_a_bare_path_outside_not`), the
+  skip-attr arm dropped (`detects_dead_file_and_unused_pub_item`, whose
+  `simple` fixture now carries the `ReadmeDoctests` idiom), every attribute
+  literal mined and the mining dropped entirely (the two deps boundary
+  tests), and the plain-literal boundary.
+
+`depkinds` gained the three spellings (`doctest_only_normal_crate`,
+`cfg_doctest_dev_crate`, `doc_literal_dev_crate`); `simple` gained the clap
+idiom beside its existing findings, pinning that the unused list does not
+grow.
+
+Closes [#63](https://github.com/rlorenzo/deadwood/issues/63).
+
+[#63]: https://github.com/rlorenzo/deadwood/issues/63

@@ -105,6 +105,10 @@ fn detects_dead_file_and_unused_pub_item() {
     // `entry` and `dead_fn` are pub and referenced nowhere else in the
     // fixture workspace; `helper` is pub but called from lib.rs, and
     // `lonely` lives in a dead file, which is reported as a whole instead.
+    // `ReadmeDoctests` is pub and referenced by nothing *by design*: it is
+    // `#[cfg(doctest)]`, compiled only for rustdoc, whose doctest collection
+    // is its consumer — reporting it would tell the project to delete its
+    // README's test coverage (#63).
     assert_eq!(unused, vec!["entry", "dead_fn"]);
 
     // Findings carry 1-based line numbers pointing at the item name.
@@ -1502,6 +1506,10 @@ fn dependencies_declared_in_the_wrong_table_are_reported() {
             "attr_macro_test_target_crate",
             "bench_fn_crate",
             "builtin_attr_dev_crate",
+            // Named only from a `#[cfg(doctest)] fn`: the one build that
+            // compiles the mention links `[dev-dependencies]`, so the normal
+            // entry costs every consumer a build for nothing (#63).
+            "doctest_only_normal_crate",
             "example_only_crate",
             "helper_attr_dev_crate",
             "library_and_test_dev_crate",
@@ -1589,6 +1597,16 @@ fn dependencies_declared_in_the_wrong_table_are_reported() {
         // stops the entry being judged, even though the library mention alone
         // would place it: the guard costs a finding rather than inventing one.
         "doc_and_library_dev_crate",
+        // The regex shape (#63): a dev-dependency named only from a
+        // `#[cfg(doctest)]` item-position macro invocation. rustdoc links the
+        // dev-dependencies when it collects doctests, so the manifest
+        // compiles and the entry is exactly where it belongs.
+        "cfg_doctest_dev_crate",
+        // The tokio shape (#63): a dev-dependency named only from the text of
+        // a `#[doc = "..."]` attribute inside a macro body. Doc text is
+        // documentation wherever it sits — an opaque mention, alive and
+        // unjudged.
+        "doc_literal_dev_crate",
     ] {
         assert!(
             !analysis
