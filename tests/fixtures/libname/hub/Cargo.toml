@@ -1,0 +1,12 @@
+[package]
+name = "hub"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Declared by package name, spelled `rim::` in code: not a finding.
+rim-parts = { path = "../rim-parts" }
+# On no registry, so the workspace's full resolution fails — which is the
+# point: the member's lib rename has to survive that. Named below, so this
+# entry is not a finding either.
+phantom_crate = "1"

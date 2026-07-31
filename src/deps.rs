@@ -726,6 +726,7 @@ pub struct UnusedDependency {
 /// than the manifest keys `allowed` exempts from the check entirely.
 pub fn find_unused(
     package: &Package,
+    lib_names: &HashMap<String, String>,
     references: &CrateReferences,
     allowed: &DependencyAllowList,
     gates: &Gates<'_>,
@@ -777,10 +778,10 @@ pub fn find_unused(
                 }
             }
         }
-        let name = dependency.crate_name();
+        let name = dependency.crate_name(lib_names);
         if !references.names.contains_key(&name)
             && !named_by_features.contains(&name)
-            && !companion_mentioned(package, references, &name)
+            && !companion_mentioned(package, lib_names, references, &name)
         {
             unused.push(UnusedDependency {
                 name: dependency.manifest_name().to_string(),
@@ -843,6 +844,7 @@ pub struct MisplacedDependency {
 /// reason and [`find_unused`] has already named them.
 pub fn find_misplaced(
     package: &Package,
+    lib_names: &HashMap<String, String>,
     references: &CrateReferences,
     allowed: &DependencyAllowList,
     gates: &Gates<'_>,
@@ -871,7 +873,7 @@ pub fn find_misplaced(
         {
             continue;
         }
-        let crate_name = dependency.crate_name();
+        let crate_name = dependency.crate_name(lib_names);
         // An entry the `[features]` table names is load bearing for a reason
         // that has no code and therefore no target — and `[features]` cannot
         // refer to a dev-dependency at all, so moving it would break the
@@ -893,7 +895,7 @@ pub fn find_misplaced(
             .then(|| {
                 package.dependencies.iter().find(|other| {
                     other.dependency_kind() == DependencyKind::Normal
-                        && other.crate_name() == crate_name
+                        && other.crate_name(lib_names) == crate_name
                 })
             })
             .flatten();
@@ -1078,9 +1080,14 @@ const COMPANION_SUFFIXES: &[&str] = &["_derive", "_macros", "_impl"];
 /// comment of a package that never declared it proves nothing. The cost runs
 /// the safe way — a genuinely stale `serde` beside a live `serde_derive` is
 /// missed, never invented.
-fn companion_mentioned(package: &Package, references: &CrateReferences, base: &str) -> bool {
+fn companion_mentioned(
+    package: &Package,
+    lib_names: &HashMap<String, String>,
+    references: &CrateReferences,
+    base: &str,
+) -> bool {
     package.dependencies.iter().any(|other| {
-        let other_name = other.crate_name();
+        let other_name = other.crate_name(lib_names);
         COMPANION_SUFFIXES
             .iter()
             .any(|suffix| other_name.strip_suffix(suffix) == Some(base))
@@ -1574,6 +1581,7 @@ mod tests {
         let mut warnings = Vec::new();
         let found = find_unused(
             package,
+            &HashMap::new(),
             refs,
             &DependencyAllowList::default(),
             &Gates::new(matrix, package),
@@ -1600,6 +1608,68 @@ mod tests {
         let refs = references(&["fn go() { engine_core::start(); }\n"]);
         let manifest = package(vec![dependency("engine-core")]);
         assert!(unused(&manifest, &refs).0.is_empty());
+    }
+
+    /// A dependency whose lib target name differs from its package name is
+    /// spelled by the *lib* name in code — deno declares `md-5` and writes
+    /// `md5::Md5Core`, declares `rustls-webpki` and writes `webpki::Error` —
+    /// and both were reported unused against code that uses them
+    /// ([#62](https://github.com/rlorenzo/deadwood/issues/62)). With the lib
+    /// name known, the mention matches; without it (a cold cache), the
+    /// package-name heuristic runs exactly as before.
+    #[test]
+    fn a_dependency_is_matched_by_its_lib_name_when_it_differs() {
+        let refs = references(&["fn f() { md5::compute(); }\n"]);
+        let manifest = package(vec![dependency("md-5")]);
+        let libs = HashMap::from([("md-5".to_string(), "md5".to_string())]);
+        let mut warnings = Vec::new();
+        let found = find_unused(
+            &manifest,
+            &libs,
+            &refs,
+            &DependencyAllowList::default(),
+            &Gates::new(&crate::cfg::Matrix::default(), &manifest),
+            &mut warnings,
+        );
+        assert!(found.is_empty(), "the lib name is what code spells");
+
+        // Without the map — a cold cache — the heuristic runs as it always
+        // has, and the entry is (wrongly but conservatively-knowingly)
+        // reported. This is the documented fallback, not a bug pin.
+        assert_eq!(unused(&manifest, &refs).0, vec!["md-5"]);
+    }
+
+    /// A `rename` sets the extern name outright, lib name or no lib name:
+    /// `hashing = { package = "md-5" }` is spelled `hashing::` in code, and a
+    /// stray `md5::` belongs to nothing.
+    #[test]
+    fn a_rename_wins_over_the_lib_name() {
+        let renamed = Dependency {
+            rename: Some("hashing".to_string()),
+            ..dependency("md-5")
+        };
+        let libs = HashMap::from([("md-5".to_string(), "md5".to_string())]);
+        assert_eq!(renamed.crate_name(&libs), "hashing");
+
+        let refs = references(&["fn f() { md5::compute(); }\n"]);
+        let manifest = package(vec![renamed]);
+        let mut warnings = Vec::new();
+        let found = find_unused(
+            &manifest,
+            &libs,
+            &refs,
+            &DependencyAllowList::default(),
+            &Gates::new(&crate::cfg::Matrix::default(), &manifest),
+            &mut warnings,
+        );
+        assert_eq!(
+            found
+                .into_iter()
+                .map(|entry| entry.name)
+                .collect::<Vec<_>>(),
+            vec!["hashing"],
+            "the rename is the extern name, so the lib-name mention is nobody's"
+        );
     }
 
     /// The serde/serde_derive pair ([#64]): `#[derive(Serialize)]` is
@@ -2044,6 +2114,7 @@ mod tests {
         let mut warnings = Vec::new();
         let found = find_misplaced(
             package,
+            &HashMap::new(),
             refs,
             allowed,
             &Gates::new(&matrix, package),
@@ -2349,6 +2420,7 @@ mod tests {
         let mut warnings = Vec::new();
         let found = find_misplaced(
             &manifest,
+            &HashMap::new(),
             &refs,
             &DependencyAllowList::default(),
             &Gates::new(&crate::cfg::Matrix::default(), &manifest),

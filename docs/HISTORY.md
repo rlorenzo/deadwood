@@ -2731,3 +2731,60 @@ a finding).
 Closes [#64](https://github.com/rlorenzo/deadwood/issues/64).
 
 [#64]: https://github.com/rlorenzo/deadwood/issues/64
+
+## Phase 31 — a dependency is spelled by its lib target name (shipped)
+
+deno declares `md-5` and writes `md5::Md5Core`; declares `rustls-webpki` and
+writes `webpki::Error`. Deadwood matched mentions against the manifest key
+with dashes normalized — the only name `cargo metadata --no-deps` can see for
+a third-party package — and reported both entries unused against code that
+uses them ([#62]): the one shape where the package name is simply not the
+name code spells.
+
+### Exact where possible, unchanged where not
+
+`crate_name` now consults three sources in the order cargo does: a `rename`
+sets the extern name outright; otherwise the dependency's *lib target name*
+where it is known; and the normalized package name where it is not — which
+is also every crate whose lib keeps the default name, i.e. almost all of
+them. Lib names come from two places:
+
+- **A full `cargo metadata --frozen`**, attempted once per run beside the
+  `--no-deps` call — frozen, not merely offline, because a full resolution
+  can write the workspace's `Cargo.lock`, and a linter must not leave a mark
+  on the tree it reads. It succeeds wherever a current lockfile and cached
+  resolution exist — any
+  checkout that has built once, which is to say any machine whose developer
+  would run a linter — and its failure of any kind yields the empty map,
+  silently: the fallback is the heuristic that has always run, and a warning
+  would fire on every fresh checkout for a gap that costs findings rather
+  than inventing them. Frozen implies offline, so the tenet holds: Deadwood never
+  reaches for the network, it only reads what some build already fetched.
+- **The `--no-deps` view itself for workspace members**, whose targets are
+  in front of us with or without a resolvable graph — so a member's lib
+  rename never depends on the cache at all.
+
+### What it found
+
+- **deno: 16 → 13 unused dependencies.** Both verified false positives gone
+  (`md-5` in `deno_node_crypto`, `rustls-webpki` in `deno_node`); the third
+  `rustls-webpki`, declared by `deno_fetch` which names it nowhere, is
+  verified real and correctly remains. Wall clock ~4s including the extra
+  metadata call.
+- **Everything else byte-identical** — a cold cache leaves every workspace
+  exactly as the heuristic left it, and no other corpus workspace declares a
+  lib-renamed dependency it fails to name.
+- **Mutation runs, 3/3 caught**: the lib-name lookup dropped
+  (`a_dependency_is_matched_by_its_lib_name_when_it_differs`, whose second
+  half also pins the cold-cache fallback as *documented* behavior), the lib
+  name beating a rename (`a_rename_wins_over_the_lib_name`), and the member
+  loop dropped (`a_members_lib_rename_survives_an_unresolvable_workspace`,
+  against the `libname` fixture whose full resolution deliberately fails).
+
+The `crosscrate` fixture gained `spoked` (lib name `wheel`) for the
+end-to-end member path; the new `libname` fixture pins the same claim where
+the full resolution cannot help.
+
+Closes [#62](https://github.com/rlorenzo/deadwood/issues/62).
+
+[#62]: https://github.com/rlorenzo/deadwood/issues/62

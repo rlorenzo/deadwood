@@ -1,0 +1,10 @@
+[package]
+name = "rim-parts"
+version = "0.1.0"
+edition = "2021"
+
+# The md-5 shape: the lib target keeps a name of its own, and code in the
+# depending package spells *that*, never `rim_parts`.
+[lib]
+name = "rim"
+path = "src/lib.rs"

@@ -19,6 +19,21 @@ pub struct Metadata {
     /// With `--no-deps` this contains only workspace members.
     pub packages: Vec<Package>,
     pub workspace_root: PathBuf,
+    /// Lib and proc-macro target names that differ from their package's
+    /// name, keyed by package name — `md-5` builds a lib named `md5`,
+    /// `rustls-webpki` one named `webpki`, and code spells the *lib* name,
+    /// so matching mentions against the package name reports such an entry
+    /// unused against code that uses it
+    /// ([#62](https://github.com/rlorenzo/deadwood/issues/62)).
+    ///
+    /// Filled by a full `cargo metadata --frozen` when the workspace has a
+    /// current lockfile and a cached dependency graph — true of any checkout
+    /// that has built once — plus every workspace member's own targets, and
+    /// empty otherwise, which leaves the package-name
+    /// heuristic exactly as it was. Exact where possible, unchanged where
+    /// not.
+    #[serde(skip)]
+    pub lib_names: HashMap<String, String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -143,7 +158,20 @@ impl Dependency {
 
     /// The identifier code spells this dependency with; cargo normalizes `-`
     /// to `_` in crate names.
-    pub fn crate_name(&self) -> String {
+    ///
+    /// Three sources, in the order cargo consults them: a `rename` sets the
+    /// extern name outright; otherwise the dependency's own lib target name
+    /// is what code spells — `md-5` builds a lib named `md5`, and
+    /// `lib_names` carries every such difference a frozen resolution or the
+    /// member list could see ([`Metadata::lib_names`]); and with neither, the package
+    /// name normalized, which is also every crate whose lib keeps the
+    /// default name.
+    pub fn crate_name(&self, lib_names: &HashMap<String, String>) -> String {
+        if self.rename.is_none()
+            && let Some(lib) = lib_names.get(&self.name)
+        {
+            return lib.clone();
+        }
         self.manifest_name().replace('-', "_")
     }
 }
@@ -185,5 +213,79 @@ pub fn load(path: &Path) -> Result<Metadata> {
         );
     }
 
-    serde_json::from_slice(&output.stdout).context("failed to parse `cargo metadata` output")
+    let mut metadata: Metadata = serde_json::from_slice(&output.stdout)
+        .context("failed to parse `cargo metadata` output")?;
+    metadata.lib_names = lib_names(&manifest);
+    // Workspace members are in front of us with or without a resolvable
+    // graph, so a member's renamed lib never depends on the cache the full
+    // resolution needs.
+    for package in &metadata.packages {
+        if let Some((name, lib_name)) = renamed_lib(&package.name, &package.targets) {
+            metadata.lib_names.insert(name, lib_name);
+        }
+    }
+    Ok(metadata)
+}
+
+/// The package's lib (or proc-macro) target name when it differs from the
+/// package name — the key is the package name verbatim, dashes and all,
+/// because that is how a `Dependency` names its package; only the *value* is
+/// normalized to the underscore spelling code uses.
+fn renamed_lib(package: &str, targets: &[Target]) -> Option<(String, String)> {
+    const LIB_KINDS: &[&str] = &["lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro"];
+    let lib = targets.iter().find(|target| {
+        target
+            .kind
+            .iter()
+            .any(|kind| LIB_KINDS.contains(&kind.as_str()))
+    })?;
+    let lib_name = lib.name.replace('-', "_");
+    (lib_name != package.replace('-', "_")).then(|| (package.to_string(), lib_name))
+}
+
+/// The renamed lib targets of every dependency a full, *frozen* resolution
+/// can see: package name to lib (or proc-macro) target name, kept only where
+/// the two differ.
+///
+/// Failure of any kind — a missing or outdated lockfile, a cold registry
+/// cache, an unresolvable fixture manifest — yields the empty map, silently: the fallback is the
+/// package-name heuristic that has always run, and a warning here would fire
+/// on every fresh checkout for a gap that costs findings rather than
+/// inventing them. Frozen implies offline, so the tenet holds: Deadwood
+/// never reaches for the network, it only reads what some build already
+/// fetched.
+fn lib_names(manifest: &Path) -> HashMap<String, String> {
+    #[derive(Deserialize)]
+    struct Full {
+        packages: Vec<FullPackage>,
+    }
+    #[derive(Deserialize)]
+    struct FullPackage {
+        name: String,
+        targets: Vec<Target>,
+    }
+
+    // `--frozen` rather than `--offline` alone: a full resolution can write
+    // or update the workspace's `Cargo.lock`, and a linter must not leave a
+    // mark on the tree it reads. Frozen asserts the lockfile is present and
+    // current and errs into the fallback otherwise — the missing-lock case
+    // is a fresh project the heuristic already serves.
+    let Ok(output) = Command::new("cargo")
+        .args(["metadata", "--format-version", "1", "--frozen"])
+        .arg("--manifest-path")
+        .arg(manifest)
+        .output()
+    else {
+        return HashMap::new();
+    };
+    if !output.status.success() {
+        return HashMap::new();
+    }
+    let Ok(full) = serde_json::from_slice::<Full>(&output.stdout) else {
+        return HashMap::new();
+    };
+    full.packages
+        .into_iter()
+        .filter_map(|package| renamed_lib(&package.name, &package.targets))
+        .collect()
 }

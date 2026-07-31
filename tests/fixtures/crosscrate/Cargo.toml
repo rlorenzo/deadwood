@@ -4,4 +4,4 @@
 # keep reporting the items over there that nobody reaches.
 [workspace]
 resolver = "2"
-members = ["engine-core", "app", "aliased"]
+members = ["engine-core", "app", "aliased", "spoked"]
