@@ -906,10 +906,8 @@ fn path_attr_is_metavariable(tokens: TokenStream) -> bool {
                     }
                 }
             }
-            TokenTree::Group(group) => {
-                if path_attr_is_metavariable(group.stream()) {
-                    return true;
-                }
+            TokenTree::Group(group) if path_attr_is_metavariable(group.stream()) => {
+                return true;
             }
             _ => {}
         }
