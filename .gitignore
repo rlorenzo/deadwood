@@ -7,3 +7,7 @@
 # Neither is input to anything, and both churn with the toolchain.
 tests/fixtures/**/target/
 tests/fixtures/**/Cargo.lock
+
+# Scratch report the code-review skill writes at the repository root while a
+# slice is under review. Input to that loop only, never to the build.
+agent-code-review.md
