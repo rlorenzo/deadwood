@@ -22,7 +22,7 @@ assessment this project was bootstrapped from.
 
 | Check | What it finds | Why rustc doesn't |
 | --- | --- | --- |
-| **Dead files** | `.rs` files under `src/` not reachable from any target root via `mod` declarations, or through an `include!` naming a file we can read | Files outside the module tree are never compiled, so no lint ever sees them |
+| **Dead files** | `.rs` files under `src/` not reachable from any target root via `mod` declarations — including ones a macro token stream declares, which are followed without expanding it — or through an `include!` naming a file we can read | Files outside the module tree are never compiled, so no lint ever sees them |
 | **Unused pub items** | Fully-`pub` fns, structs, enums, traits, type aliases, consts, statics, and unions that nothing live in the workspace reaches — either no path resolves to them, or every path that does is written inside something itself unreachable | `dead_code` assumes `pub` items have external consumers |
 | **Unused re-exports** | `pub use` re-exports nothing live in the workspace goes through, where outside code cannot reach them either | `unused_imports` only sees imports the crate itself does not use, not ones re-exported for nobody |
 | **Unused dependencies** | `Cargo.toml` entries — normal, dev, or build — whose crate name the declaring package's code never mentions | Cargo has no reason to look, and an unused entry still costs build time and supply-chain surface |
@@ -671,8 +671,14 @@ toolchain is pinned to `stable` with `clippy` and `rustfmt` via
   counts as a use of every workspace item with that name. The same goes for
   attribute arguments, including paths hidden in strings
   (`#[serde(with = "crate::codec")]` keeps everything in `codec` alive).
-  Macro-*generated* `mod` declarations and items are invisible to the parser
-  entirely.
+  A `mod` declaration inside a macro token stream *is* read — as a claim, not
+  a resolution: the file it names is spared from the dead-file check
+  (tokio's `cfg_fs! { pub mod fs; }`, serde's `crate_root!`, and the
+  invocation idents of a macro whose rules say `mod $x`, like
+  `rustc_target`'s `supported_targets!`, all count), but the items *in* such
+  a file are still invisible to resolution: the module path the macro gives
+  them is unknowable without expansion, so they are neither reported nor able
+  to keep anything else alive.
 - Lexical scopes are tracked syntactically, so a binding a macro expands to
   shadows nothing — though an identifier in macro input already counts as a
   use of every item with that name, so the two errors point the same way. A

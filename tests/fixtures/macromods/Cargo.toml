@@ -1,0 +1,10 @@
+# Test fixture: module declarations that only a macro token stream makes.
+# Deadwood cannot expand macros, so each shape here pins the conservative
+# token scan that spares these files from the dead-file check (#60) — while
+# `src/orphan.rs`, which no macro and no `mod` names, stays a finding.
+[package]
+name = "macromods"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]

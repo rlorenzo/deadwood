@@ -64,6 +64,42 @@
 //! nothing: an incomplete module tree skips the whole package's dead-file
 //! check, turning an unreadable `include!` into silence.
 //!
+//! # Macro token streams, which are claims rather than resolutions
+//!
+//! A `mod` declaration can live where the parser cannot follow it: inside a
+//! macro. tokio wraps whole subtrees in `cfg_fs! { pub mod fs; }`, serde
+//! writes its module tree in a `macro_rules!` body, and `rustc_target`'s
+//! `supported_targets!` builds `mod $module;` out of its input — between
+//! them, some 800 live files across three workspaces that this walk once
+//! reported dead ([#60]).
+//!
+//! Deadwood does not expand macros, so what it reads out of a token stream is
+//! a *claim*: `mod` is a keyword and can be nothing else in any stream, but
+//! the macro may discard it, rewrite it, or never be invoked. Claims are
+//! therefore used in the one direction the tenets allow — to *spare* files,
+//! never to warn, and never to report. Three shapes are read
+//! ([`scan_token_mods`]):
+//!
+//! - a literal `mod name` in an invocation's arguments, resolved at the
+//!   invocation site;
+//! - a literal `mod name` in a `macro_rules!` body — `#[path]` attributes
+//!   included, read through `#[cfg_attr]` without evaluating the condition,
+//!   which makes such a declaration a claim on *two* files — resolved at the
+//!   definition site and again at every invocation site
+//!   ([`MacroScan::emitting`]);
+//! - the bare idents of an invocation whose macro's rules say `mod $x`,
+//!   probed under the inline-module prefix the rules wrap them in.
+//!
+//! Definitions and invocations need not share a file, so invocations are held
+//! until the walk has nothing else to do and re-checked each round
+//! ([`MacroScan::invocations`]). Everything queued this way lands in
+//! [`Resolved::spliced`], and inherits exactly the `include!` boundary: the
+//! file is spared from the dead-file check, and its items are not admitted to
+//! resolution — the module path a macro gives its items is unknowable without
+//! expansion, so admitting them would trade one invented finding for another.
+//!
+//! [#60]: https://github.com/rlorenzo/deadwood/issues/60
+//!
 //! Known simplifications, tracked for later:
 //! - `#[path]` is resolved relative to the declaring file's directory, which
 //!   matches rustc for the common cases but not every inline-module corner.
@@ -84,6 +120,8 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+
+use proc_macro2::{Delimiter, TokenStream, TokenTree};
 
 use crate::cfg::{Gates, Site};
 use crate::config::Ignore;
@@ -239,6 +277,7 @@ pub fn resolve(
     // count of files no `include!` was needed to reach.
     let mut deferred: Vec<Pending> = Vec::new();
     let mut spliced_from: Option<usize> = None;
+    let mut macros = MacroScan::default();
 
     loop {
         while let Some(Pending {
@@ -296,6 +335,10 @@ pub fn resolve(
                             excluded: &mut Vec::new(),
                             warnings: &mut Vec::new(),
                             inline_mods: &mut inline_mods,
+                            // A scratch: the first walk of this file already
+                            // recorded its macro claims, and recording them
+                            // again would probe every invocation twice.
+                            macros: &mut MacroScan::default(),
                         },
                     );
                 }
@@ -355,6 +398,7 @@ pub fn resolve(
                         excluded: &mut resolved.excluded,
                         warnings,
                         inline_mods: &mut inline_mods,
+                        macros: &mut macros,
                     },
                 );
                 // After the walk: the declarations above are read from the file as
@@ -379,9 +423,45 @@ pub fn resolve(
         }
 
         // The `mod` walk has run out. Everything pushed from here on was
-        // reached by following an `include!`, and everything before it was
-        // not — which is the whole of how the two lists are told apart.
+        // reached by following an `include!` or a macro token stream, and
+        // everything before it was not — which is the whole of how the two
+        // lists are told apart.
         let drained = *spliced_from.get_or_insert(resolved.files.len());
+        // Invocations of macros now known to declare modules have the
+        // definition's claims resolved at their site: literal `mod`s from the
+        // body, and their own idents under every `mod $x` prefix. Held until
+        // here because a macro's definition can be parsed after its first
+        // invocation, and re-checked every round because a file this round
+        // spliced in can hold the definition that settles one from an
+        // earlier round.
+        let unsettled = std::mem::take(&mut macros.invocations);
+        for invocation in unsettled {
+            let Some(emission) = macros.emitting.get(&invocation.name) else {
+                macros.invocations.push(invocation);
+                continue;
+            };
+            let site = SpliceSite {
+                base: invocation.base,
+                dir: invocation.dir,
+                module: invocation.module,
+                test_only: invocation.test_only,
+                include_depth: invocation.include_depth,
+            };
+            for declared in &emission.declared {
+                let name = declared.name.clone();
+                queue_speculative(&mut deferred, &site, declared, &name);
+            }
+            for prefix in &emission.dollar_prefixes {
+                for ident in &invocation.idents {
+                    let declared = TokenMod {
+                        prefix: prefix.clone(),
+                        path_attr: None,
+                        name: ident.clone(),
+                    };
+                    queue_speculative(&mut deferred, &site, &declared, ident);
+                }
+            }
+        }
         if deferred.is_empty() {
             let spliced = resolved.files.split_off(drained);
             resolved.spliced = spliced;
@@ -441,8 +521,9 @@ struct Under<'a> {
 /// declarations that resolved to nothing.
 struct Walk<'a> {
     queue: &'a mut Vec<Pending>,
-    /// `include!` targets, held back until the queue above has drained so that
-    /// a file the `mod` walk also reaches is resolved as a module first.
+    /// `include!` targets — and every file a macro token stream declares —
+    /// held back until the queue above has drained so that a file the `mod`
+    /// walk also reaches is resolved as a module first.
     deferred: &'a mut Vec<Pending>,
     excluded: &'a mut Vec<PathBuf>,
     warnings: &'a mut Vec<String>,
@@ -450,6 +531,345 @@ struct Walk<'a> {
     /// confined to a test build. Reduced to [`ParsedFile::test_only_mods`] by
     /// [`confined_inline_mods`].
     inline_mods: &'a mut Vec<(Vec<String>, bool)>,
+    /// What the macro token streams of the files walked so far have said —
+    /// see [`MacroScan`].
+    macros: &'a mut MacroScan,
+}
+
+/// What macro token streams contribute to the module tree, accumulated across
+/// the whole walk because a macro's definition and its invocations need not
+/// share a file — tokio's `cfg_fs!` lives in `src/macros/cfg.rs` and is
+/// invoked from `src/lib.rs` ([#60]).
+///
+/// [#60]: https://github.com/rlorenzo/deadwood/issues/60
+#[derive(Default)]
+struct MacroScan {
+    /// What each `macro_rules!` definition whose body declares modules would
+    /// contribute at an invocation site, by macro name.
+    emitting: HashMap<String, MacroEmission>,
+    /// Every macro invocation passed so far that has not yet matched a name
+    /// in `emitting`, kept until the walk runs out of other work: the
+    /// definition that settles a macro may be parsed after its first
+    /// invocation.
+    invocations: Vec<MacroInvocation>,
+}
+
+/// The module declarations a macro's rules make, relative to wherever the
+/// macro is invoked.
+#[derive(Default)]
+struct MacroEmission {
+    /// Inline-module prefixes under which the rules say `mod $x` —
+    /// `supported_targets!` wraps its `mod $module;` in `mod targets { .. }`,
+    /// so its invocation idents are probed under `targets/`. An unwrapped
+    /// `mod $x` contributes the empty prefix.
+    dollar_prefixes: Vec<Vec<String>>,
+    /// Literal `mod name` declarations in the rules, re-resolved at every
+    /// invocation site: serde's `crate_root!` declares its whole module tree
+    /// this way, `#[path]` attributes included, and the paths are relative to
+    /// the file that *invokes* it.
+    declared: Vec<TokenMod>,
+}
+
+/// One macro invocation and the context its candidate modules would resolve
+/// in, recorded where it was written.
+struct MacroInvocation {
+    /// The macro's name, as the last segment of the invoked path.
+    name: String,
+    /// Every bare identifier in the invocation's arguments. If the macro
+    /// turns out to emit `mod $x`, each is probed as a module name under the
+    /// emission's prefixes; the ones that name no file are dropped without a
+    /// sound.
+    idents: Vec<String>,
+    /// Where the invocation's children would live ([`Under::base`]) and the
+    /// directory `#[path]` attributes resolve from ([`Declaring::dir`]).
+    base: PathBuf,
+    dir: PathBuf,
+    module: Vec<String>,
+    test_only: bool,
+    include_depth: usize,
+}
+
+/// One `mod` declaration read out of a token stream, relative to the stream's
+/// expansion site.
+#[derive(Clone)]
+struct TokenMod {
+    /// Inline modules the declaration is nested under within the stream.
+    prefix: Vec<String>,
+    /// The value of a `#[path = "..."]` attribute directly above it — read
+    /// through `#[cfg_attr(.., path = "...")]` as well, without evaluating
+    /// the condition: following a gate that does not hold spares a file, and
+    /// sparing is this scan's only power.
+    path_attr: Option<String>,
+    name: String,
+}
+
+/// What one scan of a macro token stream found.
+#[derive(Default)]
+struct TokenMods {
+    declared: Vec<TokenMod>,
+    /// Bare identifiers, for probing when the macro emits `mod $x`.
+    idents: Vec<String>,
+    /// The inline-module prefixes under which `mod $` was seen.
+    dollar_prefixes: Vec<Vec<String>>,
+}
+
+/// Scan a macro token stream for module declarations, without expanding it.
+///
+/// A `mod` here is a *claim*, not a resolution: the macro may discard its
+/// input, rewrite it, or never be invoked at all. Everything found is
+/// therefore speculative in the one direction the tenets allow — a candidate
+/// that names a real file spares it from the dead-file check, and a candidate
+/// that names nothing is dropped silently, warning about nobody. `mod` cannot
+/// be an identifier anywhere else in a token stream (it is a keyword), so the
+/// scan does not mistake ordinary code for a declaration; what it can do is
+/// read a declaration the macro would have thrown away, which loses a finding
+/// rather than inventing one.
+///
+/// An inline `mod name { ... }` group is entered with the name pushed onto
+/// `prefix`, exactly as [`collect_mod_decls`] enters the parsed form; every
+/// other group — arm bodies, parentheses, attribute brackets — is entered
+/// with the prefix unchanged, because the tokens inside it land wherever the
+/// macro puts them and this scan's answer must not depend on that.
+fn scan_token_mods(tokens: TokenStream, prefix: &[String], found: &mut TokenMods) {
+    let mut iter = tokens.into_iter().peekable();
+    // A `#[path = "..."]` (or `#[cfg_attr(.., path = "..")]`) seen since the
+    // last declaration-shaped token, waiting for the `mod` it sits above.
+    let mut pending_path: Option<String> = None;
+    while let Some(tree) = iter.next() {
+        match tree {
+            TokenTree::Ident(ident) => {
+                let word = ident.to_string();
+                if word != "mod" {
+                    // `pub` and its `(crate)` group are the only tokens that
+                    // legally stand between an attribute and its `mod`;
+                    // anything else means the attribute belonged to some
+                    // other item.
+                    if word != "pub" {
+                        pending_path = None;
+                    }
+                    found.idents.push(word);
+                    continue;
+                }
+                match iter.peek() {
+                    Some(TokenTree::Ident(name)) => {
+                        let name = name.to_string();
+                        iter.next();
+                        match iter.peek() {
+                            Some(TokenTree::Group(group))
+                                if group.delimiter() == Delimiter::Brace =>
+                            {
+                                let Some(TokenTree::Group(group)) = iter.next() else {
+                                    unreachable!("peeked a group");
+                                };
+                                pending_path = None;
+                                let mut child_prefix = prefix.to_vec();
+                                child_prefix.push(name.clone());
+                                scan_token_mods(group.stream(), &child_prefix, found);
+                            }
+                            _ => {
+                                found.declared.push(TokenMod {
+                                    prefix: prefix.to_vec(),
+                                    path_attr: pending_path.take(),
+                                    name,
+                                });
+                            }
+                        }
+                    }
+                    Some(TokenTree::Punct(punct))
+                        if punct.as_char() == '$'
+                            && !found.dollar_prefixes.contains(&prefix.to_vec()) =>
+                    {
+                        found.dollar_prefixes.push(prefix.to_vec());
+                    }
+                    _ => {}
+                }
+            }
+            TokenTree::Punct(punct) if punct.as_char() == '#' => {
+                if let Some(TokenTree::Group(group)) = iter.peek()
+                    && group.delimiter() == Delimiter::Bracket
+                {
+                    if let Some(literal) = path_attr_in_tokens(group.stream()) {
+                        pending_path = Some(literal);
+                    }
+                    let Some(TokenTree::Group(group)) = iter.next() else {
+                        unreachable!("peeked a group");
+                    };
+                    scan_token_mods(group.stream(), prefix, found);
+                }
+            }
+            TokenTree::Group(group) => {
+                // A parenthesis group directly after `pub` is its
+                // restriction; anything else ends an attribute's reach.
+                if group.delimiter() != Delimiter::Parenthesis {
+                    pending_path = None;
+                }
+                scan_token_mods(group.stream(), prefix, found);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The string a `path = "..."` assignment binds anywhere in an attribute's
+/// tokens — which reads `#[path = ".."]` and `#[cfg_attr(cond, path = "..")]`
+/// with one rule, and reads nothing into attributes that merely contain the
+/// word.
+fn path_attr_in_tokens(tokens: TokenStream) -> Option<String> {
+    let mut iter = tokens.clone().into_iter().peekable();
+    while let Some(tree) = iter.next() {
+        match tree {
+            TokenTree::Ident(ident) if ident == "path" => {
+                if let Some(TokenTree::Punct(punct)) = iter.peek()
+                    && punct.as_char() == '='
+                {
+                    iter.next();
+                    if let Some(TokenTree::Literal(literal)) = iter.peek() {
+                        // Parsed as a string literal rather than trimmed by
+                        // hand, so the raw (`r"..."`) and escaped spellings
+                        // read the path they mean; a non-string literal
+                        // parses as nothing and claims nothing.
+                        let tokens = TokenStream::from(TokenTree::Literal(literal.clone()));
+                        if let Ok(lit) = syn::parse2::<syn::LitStr>(tokens) {
+                            return Some(lit.value());
+                        }
+                    }
+                }
+            }
+            TokenTree::Group(group) => {
+                if let Some(found) = path_attr_in_tokens(group.stream()) {
+                    return Some(found);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Queue the file a speculative `mod` claim names, if there is one.
+///
+/// The out-of-line resolution rule of [`collect_mod_decls`], minus the
+/// warning: a claim read out of a token stream proves nothing when it misses,
+/// so a miss is silence rather than an unresolved-module warning that would
+/// skip the package's checks.
+fn queue_speculative(
+    deferred: &mut Vec<Pending>,
+    site: &SpliceSite,
+    declared: &TokenMod,
+    name: &str,
+) {
+    let base = declared
+        .prefix
+        .iter()
+        .fold(site.base.clone(), |base, step| base.join(step));
+    // A `#[path]` read out of tokens may sit inside a `#[cfg_attr(..)]` whose
+    // condition this scan never evaluates, and such a `mod` has *two*
+    // possible files — the attribute's target in the builds where the
+    // condition holds, the stem-named file everywhere else (serde's
+    // `crate_root!` declares its whole tree this way). Both are probed and
+    // every hit is queued: sparing a file is this function's only power, so
+    // following a branch that does not hold costs nothing but a lost finding.
+    let mut candidates = Vec::new();
+    if let Some(explicit) = &declared.path_attr {
+        let target = site.dir.join(explicit);
+        if target.is_file() {
+            let owns_dir = target.file_name().is_some_and(|n| n == "mod.rs");
+            candidates.push((target, owns_dir));
+        }
+    }
+    let as_file = base.join(format!("{name}.rs"));
+    let as_dir = base.join(name).join("mod.rs");
+    if as_file.is_file() {
+        candidates.push((as_file, false));
+    } else if as_dir.is_file() {
+        candidates.push((as_dir, true));
+    }
+    for (path, is_mod_root) in candidates {
+        let mut module = site.module.clone();
+        module.extend(declared.prefix.iter().cloned());
+        module.push(name.to_string());
+        deferred.push(Pending {
+            path,
+            is_mod_root,
+            module,
+            test_only: site.test_only,
+            include_depth: site.include_depth,
+        });
+    }
+}
+
+/// Where a macro's claimed modules land: the invocation (or definition) site
+/// whose directories and module path they resolve against.
+struct SpliceSite {
+    base: PathBuf,
+    dir: PathBuf,
+    module: Vec<String>,
+    test_only: bool,
+    include_depth: usize,
+}
+
+/// Read one macro item — definition or invocation — for the module
+/// declarations its tokens claim.
+///
+/// A `macro_rules!` definition contributes its literal `mod`s and its
+/// `mod $x` prefixes to [`MacroScan::emitting`], and has the literals probed
+/// at the definition site too — a macro used in the file that defines it
+/// resolves the same files either way. An invocation contributes its literal
+/// `mod`s (tokio's `cfg_fs! { pub mod fs; }`) immediately, and its bare
+/// idents to [`MacroScan::invocations`], held until the macro's definition
+/// settles what they are: `supported_targets!` passes 330 module names as
+/// plain idents, and serde's `crate_root!` puts the whole module tree —
+/// `#[path]` attributes included — in the macro body, to be resolved from
+/// the invoking file.
+fn scan_macro_item(
+    mac: &syn::ItemMacro,
+    declaring: &Declaring<'_>,
+    under: Under<'_>,
+    walk: &mut Walk<'_>,
+) {
+    if !declaring.gates.compiled(&mac.attrs) {
+        return;
+    }
+    let test_only = under.test_only || declaring.gates.test_only(&mac.attrs, Site::Other);
+    let mut found = TokenMods::default();
+    scan_token_mods(mac.mac.tokens.clone(), &[], &mut found);
+    let site = SpliceSite {
+        base: under.base.to_path_buf(),
+        dir: declaring.dir.to_path_buf(),
+        module: under.module.to_vec(),
+        test_only,
+        include_depth: declaring.include_depth,
+    };
+    for declared in &found.declared {
+        let name = declared.name.clone();
+        queue_speculative(walk.deferred, &site, declared, &name);
+    }
+    if mac.mac.path.is_ident("macro_rules") {
+        if let Some(name) = &mac.ident
+            && (!found.declared.is_empty() || !found.dollar_prefixes.is_empty())
+        {
+            let emission = walk.macros.emitting.entry(name.to_string()).or_default();
+            emission.declared.extend(found.declared);
+            for prefix in found.dollar_prefixes {
+                if !emission.dollar_prefixes.contains(&prefix) {
+                    emission.dollar_prefixes.push(prefix);
+                }
+            }
+        }
+        return;
+    }
+    let Some(name) = mac.mac.path.segments.last() else {
+        return;
+    };
+    walk.macros.invocations.push(MacroInvocation {
+        name: name.ident.to_string(),
+        idents: found.idents,
+        base: site.base,
+        dir: site.dir,
+        module: site.module,
+        test_only,
+        include_depth: declaring.include_depth,
+    });
 }
 
 /// The inline modules a gate confines to a test build, with the alternatives
@@ -490,6 +910,7 @@ fn collect_mod_decls(
     for item in items {
         if let syn::Item::Macro(mac) = item {
             queue_include(mac, declaring, under, walk);
+            scan_macro_item(mac, declaring, under, walk);
             continue;
         }
         let syn::Item::Mod(m) = item else { continue };
@@ -954,6 +1375,176 @@ mod tests {
             ],
             "only a `cfg` gate can confine a file"
         );
+    }
+
+    /// Write a `src/` tree into a fresh temp directory and resolve it,
+    /// returning the reached file names — [`Resolved::files`] and
+    /// [`Resolved::spliced`] together, since sparing from the dead-file check
+    /// is the one claim the macro scan makes.
+    fn reached(label: &str, files: &[(&str, &str)]) -> Vec<String> {
+        let root =
+            std::env::temp_dir().join(format!("deadwood-modtree-{label}-{}", std::process::id()));
+        // Self-healing against a panicked earlier run: a stale tree under the
+        // same pid would add files the assertions never wrote.
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("src");
+        for (name, source) in files {
+            let path = dir.join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, source).unwrap();
+        }
+        let config = crate::config::Config::default();
+        let package = crate::cfg::tests_support::bare_package();
+        let gates = crate::cfg::Gates::new(config.cfg(), &package);
+        let mut warnings = Vec::new();
+        let resolved = resolve(&dir.join("lib.rs"), config.ignore(), &gates, &mut warnings);
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+        let mut names: Vec<String> = resolved
+            .files
+            .iter()
+            .chain(&resolved.spliced)
+            .map(|file| {
+                file.path
+                    .strip_prefix(&dir)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// The tokio shape [#60] filed 381 times: `cfg_fs! { pub mod fs; }` — a
+    /// literal `mod` in a macro invocation's arguments. The macro need not
+    /// even be defined for the claim to spare the file; a genuinely dead file
+    /// beside it stays dead.
+    ///
+    /// [#60]: https://github.com/rlorenzo/deadwood/issues/60
+    #[test]
+    fn a_mod_declared_inside_a_macro_invocation_spares_its_file() {
+        let names = reached(
+            "invocation-mod",
+            &[
+                ("lib.rs", "cfg_x! { pub mod hidden; }\n"),
+                ("hidden.rs", "pub fn thing() {}\n"),
+                ("orphan.rs", "pub fn stranded() {}\n"),
+            ],
+        );
+        assert_eq!(names, ["hidden.rs", "lib.rs"], "orphan.rs stays dead");
+    }
+
+    /// The serde shape: the module tree lives as literal `mod`s inside a
+    /// `macro_rules!` body defined in one file and invoked from another, so
+    /// the declarations resolve at the invocation site — which is parsed
+    /// *before* the definition here, pinning the held-until-settled ordering.
+    #[test]
+    fn a_macro_definitions_literal_mods_resolve_at_its_invocation_sites() {
+        let names = reached(
+            "definition-mods",
+            &[
+                ("lib.rs", "#[macro_use]\nmod machinery;\ntree!();\n"),
+                (
+                    "machinery.rs",
+                    "macro_rules! tree {\n    () => {\n        mod tucked;\n    };\n}\n",
+                ),
+                ("tucked.rs", "pub fn thing() {}\n"),
+            ],
+        );
+        assert_eq!(names, ["lib.rs", "machinery.rs", "tucked.rs"]);
+    }
+
+    /// The `supported_targets!` shape, 330 files of `rustc_target`: the rules
+    /// say `mod $m` under an inline `mod grouped { .. }`, so the invocation's
+    /// idents are probed under `grouped/` — and only the idents actually
+    /// passed, so a decoy file in the same directory stays dead.
+    #[test]
+    fn an_emitting_macros_invocation_idents_are_probed_under_its_prefixes() {
+        let names = reached(
+            "emitting-idents",
+            &[
+                (
+                    "lib.rs",
+                    "#[macro_use]\nmod machinery;\nemit_mods!(alpha, beta);\n",
+                ),
+                (
+                    "machinery.rs",
+                    "macro_rules! emit_mods {\n    ($($m:ident),*) => {\n        mod grouped { $(pub mod $m;)* }\n    };\n}\n",
+                ),
+                ("grouped/alpha.rs", "pub fn a() {}\n"),
+                ("grouped/beta.rs", "pub fn b() {}\n"),
+                ("grouped/gamma.rs", "pub fn dead() {}\n"),
+            ],
+        );
+        assert_eq!(
+            names,
+            [
+                "grouped/alpha.rs",
+                "grouped/beta.rs",
+                "lib.rs",
+                "machinery.rs"
+            ],
+            "gamma.rs was passed to nothing and stays dead"
+        );
+    }
+
+    /// The `declare_passes!` shape of `rustc_mir_transform`: the invocation
+    /// writes `mod abort_unwinding_calls : AbortUnwindingCalls;` — a `mod`
+    /// with tokens between the name and the semicolon that only the macro
+    /// understands. The name is the claim; what follows it is the macro's
+    /// business.
+    #[test]
+    fn a_mod_with_trailing_tokens_inside_an_invocation_still_counts() {
+        let names = reached(
+            "trailing-tokens",
+            &[
+                ("lib.rs", "declare! { mod lowered : Lowered; }\n"),
+                ("lowered.rs", "pub struct Lowered;\n"),
+            ],
+        );
+        assert_eq!(names, ["lib.rs", "lowered.rs"]);
+    }
+
+    /// The boundary that keeps the scan from gutting the check: a macro whose
+    /// rules declare no `mod` gets no ident probing, so passing `ghost` to an
+    /// ordinary macro does not spare `ghost.rs`.
+    #[test]
+    fn a_quiet_macros_idents_are_not_probed() {
+        let names = reached(
+            "quiet-idents",
+            &[
+                ("lib.rs", "#[macro_use]\nmod machinery;\nquiet!(ghost);\n"),
+                (
+                    "machinery.rs",
+                    "macro_rules! quiet {\n    ($x:ident) => {\n        fn $x() {}\n    };\n}\n",
+                ),
+                ("ghost.rs", "pub fn dead() {}\n"),
+            ],
+        );
+        assert_eq!(names, ["lib.rs", "machinery.rs"], "ghost.rs stays dead");
+    }
+
+    /// A `#[cfg_attr(cond, path = "...")] mod` inside a macro body has two
+    /// possible files — the attribute's target where the condition holds and
+    /// the stem-named file everywhere else — and the scan never evaluates the
+    /// condition, so both are spared.
+    #[test]
+    fn a_cfg_attr_path_mod_in_a_macro_body_spares_both_files() {
+        let names = reached(
+            "cfg-attr-path",
+            &[
+                (
+                    "lib.rs",
+                    // The raw-string spelling on purpose: the literal is
+                    // parsed, not trimmed, so `r"..."` reads the path it
+                    // means.
+                    "wrap! {\n    #[cfg_attr(feature = \"alt\", path = r\"alt/actual.rs\")]\n    mod plain;\n}\n",
+                ),
+                ("plain.rs", "pub fn stem() {}\n"),
+                ("alt/actual.rs", "pub fn attributed() {}\n"),
+            ],
+        );
+        assert_eq!(names, ["alt/actual.rs", "lib.rs", "plain.rs"]);
     }
 
     /// One file can declare `mod imp` twice under disjoint `cfg`s, and the
