@@ -1141,7 +1141,9 @@ mod tests {
     /// The three answers stay apart: a path that cannot be a baseline —
     /// here, a path under a plain file — is an error, never "no baseline",
     /// because passing silently would run without the baseline the
-    /// configuration promised.
+    /// configuration promised. Unix only: Windows maps this stat to
+    /// `NotFound`, where `Ok(false)` is the correct reading.
+    #[cfg(unix)]
     #[test]
     fn a_stat_error_other_than_not_found_is_surfaced() {
         let dir = std::env::temp_dir().join(format!("deadwood-exists-{}", std::process::id()));
