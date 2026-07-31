@@ -38,7 +38,7 @@ jobs:
           tool: cargo-semver-checks
       - name: Check against the previous tag
         run: |
-          prev=$(git tag -l 'v*' --sort=-v:refname | grep -vx "$GITHUB_REF_NAME" | head -1)
+          prev=$(git tag -l 'v*' --sort=-v:refname | grep -vxF "$GITHUB_REF_NAME" | head -1)
           if [ -z "$prev" ]; then
             echo "no previous release tag; nothing to compare against"
             exit 0

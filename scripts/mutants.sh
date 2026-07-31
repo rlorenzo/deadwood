@@ -11,7 +11,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 base="${1:-main}"
-diff_file=$(mktemp)
+diff_file=$(mktemp "${TMPDIR:-/tmp}/mutants-diff.XXXXXX")
 trap 'rm -f "$diff_file"' EXIT
 git diff "$base"...HEAD > "$diff_file"
 if [[ ! -s "$diff_file" ]]; then
