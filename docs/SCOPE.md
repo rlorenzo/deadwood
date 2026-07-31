@@ -156,13 +156,10 @@ alternatives, corpus measurements and mutation runs written down in full in
 
 ## Next (sequenced, one slice at a time)
 
-1. **The five bun items behind ordinary functions** — with proc-macro entry
-   points (#73) and possible macro-written exports (#74) both closed, five
-   hand-audited false positives remain on bun's tree whose callers are
-   plain, unannotated functions; every isolated resolution shape they use
-   micro-reproduces correctly, so the break is somewhere between an FFI
-   entry and the caller, at a scale no extraction has survived. Needs the
-   bun tree at `cbe3e18` to reproduce. #77, population measured there.
+Nothing is queued. The issue list is empty and this index says the same
+thing, which is the invariant this section exists to keep: the next slice
+starts by being *filed*, with its population measured, so that neither the
+roadmap nor the tracker can quietly rot.
 
 The roadmap and the issue list say the same thing, so neither can quietly
 rot. What shipped is in the index above and in [`HISTORY.md`](HISTORY.md).

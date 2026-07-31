@@ -1,0 +1,9 @@
+# Test fixture: the import shapes that hid five live items in bun (#77).
+# `app` binds `core_like` with a `{self, ...}` import — a target spelled
+# with the name being bound — and then reaches an item through the crate
+# root's glob re-export and a module alias. The self-import must step aside
+# for its own head, or every later `core_like::`-headed path in the module
+# is cut short at the alias depth cap.
+[workspace]
+members = ["core_like", "app"]
+resolver = "2"

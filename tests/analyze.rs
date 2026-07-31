@@ -322,6 +322,24 @@ fn unresolvable_paths_keep_their_targets_alive() {
     );
 }
 
+/// The import shape that hid five live items in bun ([#77]): a
+/// `use core_like::{self}` binding whose target is spelled with its own
+/// name must step aside when resolving its own head, so a later path
+/// through the crate root's glob re-export and a module alias still lands
+/// on the item it names.
+///
+/// [#77]: https://github.com/rlorenzo/deadwood/issues/77
+#[test]
+fn a_self_import_does_not_cut_the_paths_beside_it() {
+    let analysis = analyze_fixture("selfuse");
+
+    assert_eq!(
+        reported(&analysis, FindingKind::UnusedPubItem),
+        vec![("core_like/src/Global.rs".to_string(), "orphan")],
+        "`tracked_inc` is reached through the self-imported crate; `orphan` is not"
+    );
+}
+
 /// A proc-macro crate's entry points are the compiler's to call: consumers
 /// spell the derive, attribute, or macro the function registers — often under
 /// a re-exported path in another workspace entirely — never the function, and
