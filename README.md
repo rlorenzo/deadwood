@@ -507,6 +507,28 @@ and the other appears in the same run, the second pass reads it as a move. That
 shape occurs once in the reportable `pub` definitions of the corpus every phase
 measures on, and produces no finding today.
 
+## GitHub Action
+
+This repository doubles as a composite GitHub Action, so gating a workflow
+takes two lines — the exit codes already say everything CI needs (`0` clean,
+`1` denied findings, `2` error):
+
+```yaml
+- uses: actions/checkout@v4
+- uses: rlorenzo/deadwood@main # pin a tag once one exists
+  with:
+    path: .       # workspace to analyze (default `.`)
+    args: ""      # extra arguments for `deadwood check`, e.g. `--json`
+```
+
+By default the action builds Deadwood from its own pinned ref, so the ref
+your workflow names *is* the tool version it runs — no published release
+required — and a `--write-baseline` file committed to your repository is
+picked up exactly as it is locally. Set `version: 1.0.0-beta.1` to install a published
+release from crates.io instead. The runner needs stable Rust on `PATH`,
+which every GitHub-hosted runner ships; this repository's own CI runs the
+action against itself on every push.
+
 ## Configuration
 
 Deadwood needs no configuration, and with no `deadwood.toml` present it

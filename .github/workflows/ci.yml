@@ -17,6 +17,17 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # The action in `action.yml` is exercised exactly as a consumer would use
+  # it — runner-provided stable Rust, no setup steps — against this
+  # repository, which analyzes clean. A broken action fails here before it
+  # fails in someone else's CI.
+  action:
+    name: action self-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: ./
+
   check:
     name: fmt, clippy, test
     runs-on: ubuntu-latest

@@ -1,0 +1,60 @@
+# The repository doubles as a composite GitHub Action. By default the action
+# builds Deadwood from its own checked-out source, so the ref a workflow pins
+# (`rlorenzo/deadwood@main`, later a tag) *is* the tool version it runs — no
+# published release required, though dependencies still come from crates.io
+# as any build's do. The `version` input switches to installing a published
+# release instead.
+#
+# Inputs are passed to the shell through `env` rather than interpolated into
+# the script, so a value can never be read as code.
+name: Deadwood
+description: >-
+  Find dead files, unused pub items and re-exports, unused and misplaced
+  dependencies, and cfg gates that can never hold in a Rust workspace.
+branding:
+  icon: crosshair
+  color: orange
+
+inputs:
+  path:
+    description: Path to the workspace directory or Cargo.toml to analyze.
+    required: false
+    default: "."
+  args:
+    description: >-
+      Extra arguments for `deadwood check`, e.g. `--json` or
+      `--config deadwood.toml`.
+    required: false
+    default: ""
+  version:
+    description: >-
+      A published deadwood-rs version to install from crates.io instead of
+      building the action's own ref, e.g. `1.0.0-beta.1`.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Install deadwood
+      shell: bash
+      env:
+        DEADWOOD_VERSION: ${{ inputs.version }}
+        DEADWOOD_SRC: ${{ github.action_path }}
+      run: |
+        if [ -n "$DEADWOOD_VERSION" ]; then
+          cargo install deadwood-rs --locked --version "$DEADWOOD_VERSION"
+        else
+          cargo install --locked --path "$DEADWOOD_SRC"
+        fi
+    - name: Check
+      shell: bash
+      env:
+        DEADWOOD_PATH: ${{ inputs.path }}
+        DEADWOOD_ARGS: ${{ inputs.args }}
+      # `args` is a list of flags: split on whitespace through `read`, which
+      # — unlike an unquoted expansion — never glob-expands a `*` into
+      # whatever the working directory happens to hold.
+      run: |
+        read -ra args <<< "$DEADWOOD_ARGS"
+        deadwood check "$DEADWOOD_PATH" ${args[@]+"${args[@]}"}
