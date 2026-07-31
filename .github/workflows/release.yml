@@ -1,0 +1,112 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+# Creating the release and uploading its assets writes to repository
+# contents; nothing here needs more, and the jobs that only build inherit
+# the same narrow grant.
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Drafted first so a half-uploaded release is never public: the assets
+  # land on the draft, and the last job flips it live only after every
+  # target built.
+  draft:
+    name: draft release
+    runs-on: ubuntu-latest
+    steps:
+      # No checkout: `gh` addresses the repository with `-R`, and a job that
+      # only talks to the release API has no business holding the sources.
+      - name: Draft the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # The view-guard makes a re-run after a partial failure work: the
+        # draft from the first attempt is reused rather than tripped over —
+        # and the changelog link pins the tag, so each release's notes point
+        # at the changelog that shipped with it rather than whatever `main`
+        # says later.
+        run: |
+          if ! gh release view -R "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            gh release create -R "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" --draft --verify-tag \
+              --title "$GITHUB_REF_NAME" \
+              --notes "Prebuilt \`deadwood\` binaries are attached below; \
+          [CHANGELOG.md](https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_REF_NAME/CHANGELOG.md) \
+          records what changed."
+          fi
+
+  build:
+    name: ${{ matrix.target }}
+    needs: draft
+    strategy:
+      # One failed target should not strand the others: whatever built still
+      # uploads, and the release stays a draft until everything has.
+      fail-fast: false
+      matrix:
+        include:
+          # Every entry builds natively or arch-to-arch on one vendor's
+          # toolchain — no cross-compilation toolchains to trust. The Intel
+          # mac build runs on the Apple-silicon runner because Xcode carries
+          # both architectures and the crate has no C dependencies.
+          - { target: x86_64-unknown-linux-gnu, runner: ubuntu-latest }
+          - { target: aarch64-unknown-linux-gnu, runner: ubuntu-24.04-arm }
+          - { target: aarch64-apple-darwin, runner: macos-latest }
+          - { target: x86_64-apple-darwin, runner: macos-latest }
+          - { target: x86_64-pc-windows-msvc, runner: windows-latest }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable branch, 2026-07-24
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Package
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          name="deadwood-$GITHUB_REF_NAME-$TARGET"
+          mkdir "$name"
+          cp README.md LICENSE CHANGELOG.md "$name/"
+          if [[ "$TARGET" == *windows* ]]; then
+            cp "target/$TARGET/release/deadwood.exe" "$name/"
+            7z a "$name.zip" "$name" > /dev/null
+            asset="$name.zip"
+          else
+            cp "target/$TARGET/release/deadwood" "$name/"
+            tar czf "$name.tar.gz" "$name"
+            asset="$name.tar.gz"
+          fi
+          # macOS spells it `shasum`, the Linux and Windows runners
+          # `sha256sum`; the file format is the same either way.
+          if command -v sha256sum > /dev/null; then
+            sha256sum "$asset" > "$asset.sha256"
+          else
+            shasum -a 256 "$asset" > "$asset.sha256"
+          fi
+          echo "ASSET=$asset" >> "$GITHUB_ENV"
+      - name: Upload
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # `--clobber` for the same reason the draft job guards its create:
+        # a re-run replaces the assets it already uploaded instead of failing.
+        run: gh release upload --clobber "$GITHUB_REF_NAME" "$ASSET" "$ASSET.sha256"
+
+  publish:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      # No checkout here either, for the draft job's reason.
+      - name: Undraft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit -R "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" --draft=false

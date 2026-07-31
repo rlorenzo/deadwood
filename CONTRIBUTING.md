@@ -19,6 +19,16 @@ CI (`.github/workflows/ci.yml`) runs exactly this on every push and PR. The
 toolchain is pinned to `stable` via `rust-toolchain.toml`; `unsafe_code` is
 forbidden crate-wide.
 
+To run the gate before every commit instead of finding out in CI, opt into
+the tracked hook once:
+
+```console
+$ git config core.hooksPath .githooks
+```
+
+`git commit --no-verify` skips it in an emergency; CI runs the identical
+script either way, so nothing rides on the hook being active.
+
 ## Before writing code
 
 - **File an issue first.** The roadmap in
