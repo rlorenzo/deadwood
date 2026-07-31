@@ -445,6 +445,7 @@ enum Target {
 }
 
 /// The result of walking a whole path.
+#[derive(Debug)]
 enum Outcome {
     /// Every segment resolved, ending at this module.
     Module(usize),
@@ -634,6 +635,47 @@ impl SymbolTable {
             }
         }
 
+        // A spliced file's `use` declarations, admitted as plain imports:
+        // resolution-only bindings, never reportable, at the module path the
+        // splice guessed. The file's *items* stay out — a definition at a
+        // guessed path invents claims — but an import can only route a
+        // reference somewhere, so the worst a mis-guessed one does is mark
+        // the wrong definition used, which loses a finding rather than
+        // inventing one. Without them, a path in the file that leans on its
+        // own `use` — `Output::enable_buffering_scope()` under
+        // `use bun_core::Output;` — resolves to a certain-sounding "absent"
+        // in a scope that was never fully read, and the target it names is
+        // reported dead ([#77]).
+        //
+        // [#77]: https://github.com/rlorenzo/deadwood/issues/77
+        for (krate, unit) in crates.iter().enumerate() {
+            for file in &unit.spliced {
+                let Some(ast) = &file.ast else { continue };
+                let module = table.module_for(krate, &file.module);
+                let test_context = unit.test_code || file.test_only;
+                let before = table.defs.len();
+                for item in &ast.items {
+                    let mut nested = NestedUses {
+                        table: &mut table,
+                        module,
+                        file,
+                        test_context,
+                    };
+                    nested.visit_item(item);
+                }
+                // Rooted, like every other path a spliced file writes: the
+                // file is compiled by a chain we could not follow, so its
+                // imports count on their own the way its calls do. Leaving
+                // them ordinary nodes would put a new referrer between the
+                // opaque rescue an item had and the item — "referenced only
+                // from items that nothing reaches", invented by the very
+                // import that proves something references it.
+                for id in before..table.defs.len() {
+                    table.rooted.insert(id);
+                }
+            }
+        }
+
         table.resolve_globs();
         // Last, because it is the only step that asks the finished table a
         // question: an alias's namespace is its target's, and no target can be
@@ -738,7 +780,7 @@ impl SymbolTable {
         // The same walk the marking pass makes over the same path, `in_use`
         // included, so this pass cannot disagree with it about where an alias
         // leads: one walker, asked a second question.
-        match self.walk_path(module, path, true, 0, &mut reached) {
+        match self.walk_path(module, path, true, 0, &mut reached, None) {
             Outcome::Item | Outcome::Module(_) => {}
             Outcome::Opaque(_) | Outcome::Foreign => return None,
         }
@@ -1227,10 +1269,10 @@ impl SymbolTable {
     /// unfollowable `use` makes nothing reachable here for the same reason an
     /// unfollowable glob does not: it is its module's *opacity* that answers
     /// for it, and opaque is already a root in every walk.
-    fn module_a_reexport_names(&self, def: usize) -> Option<usize> {
-        let def = &self.defs[def];
+    fn module_a_reexport_names(&self, id: usize) -> Option<usize> {
+        let def = &self.defs[id];
         let target = def.target.as_ref()?;
-        match self.walk_path(def.module, target, true, 0, &mut Vec::new()) {
+        match self.walk_path(def.module, target, true, 0, &mut Vec::new(), Some(id)) {
             Outcome::Module(id) => Some(id),
             Outcome::Item | Outcome::Foreign | Outcome::Opaque(_) => None,
         }
@@ -1537,7 +1579,7 @@ impl SymbolTable {
             let before = pending.len();
             let mut still_pending = Vec::new();
             for (module, glob, exported) in pending {
-                match self.walk_path(module, &glob, true, 0, &mut Vec::new()) {
+                match self.walk_path(module, &glob, true, 0, &mut Vec::new(), None) {
                     Outcome::Module(target) => {
                         self.modules[module].glob_sources.push(target);
                         if exported {
@@ -1626,7 +1668,14 @@ impl SymbolTable {
                 def.child
             } else if def.kind.is_alias() {
                 let Some(target) = &def.target else { continue };
-                match self.walk_path(def.module, target, true, depth + 1, &mut Vec::new()) {
+                match self.walk_path(
+                    def.module,
+                    target,
+                    true,
+                    depth + 1,
+                    &mut Vec::new(),
+                    Some(id),
+                ) {
                     Outcome::Module(id) => Some(id),
                     // An alias to a concrete item or to something outside the
                     // workspace ends the path here.
@@ -1713,6 +1762,7 @@ impl SymbolTable {
         in_use: bool,
         depth: usize,
         reached: &mut Vec<Vec<usize>>,
+        skip: Option<usize>,
     ) -> Outcome {
         if depth > MAX_ALIAS_DEPTH {
             return Outcome::Opaque(0);
@@ -1729,7 +1779,7 @@ impl SymbolTable {
 
         while index < segments.len() {
             let name = &segments[index];
-            let mut step = self.lookup(current, name);
+            let mut step = without(self.lookup(current, name), skip);
             if at_head && matches!(step, Step::Absent) {
                 if self.ambiguous_externs.contains(name.as_str()) {
                     return Outcome::Opaque(index);
@@ -1743,7 +1793,10 @@ impl SymbolTable {
                 }
                 if in_use {
                     // Edition 2015 `use` paths start at the crate root.
-                    step = self.lookup(self.roots[self.modules[module].krate], name);
+                    step = without(
+                        self.lookup(self.roots[self.modules[module].krate], name),
+                        skip,
+                    );
                 }
             }
             at_head = false;
@@ -1776,7 +1829,7 @@ impl SymbolTable {
     /// Mark everything `path`, written inside `from` in `module`, refers to.
     fn mark_path_used(&mut self, from: &Referrer, module: usize, path: &RefPath, in_use: bool) {
         let mut reached = Vec::new();
-        let outcome = self.walk_path(module, path, in_use, 0, &mut reached);
+        let outcome = self.walk_path(module, path, in_use, 0, &mut reached, None);
         for id in reached.into_iter().flatten() {
             self.mark_def_used(from, id);
         }
@@ -1799,7 +1852,7 @@ impl SymbolTable {
     /// nothing" would report everything it calls as dead.
     fn owner_defs(&self, module: usize, path: &RefPath) -> Option<Vec<usize>> {
         let mut reached = Vec::new();
-        match self.walk_path(module, path, false, 0, &mut reached) {
+        match self.walk_path(module, path, false, 0, &mut reached, None) {
             Outcome::Item | Outcome::Module(_) => {}
             Outcome::Opaque(_) | Outcome::Foreign => return None,
         }
@@ -1844,7 +1897,7 @@ impl SymbolTable {
             return None;
         }
         let mut reached = Vec::new();
-        match self.walk_path(module, path, false, 0, &mut reached) {
+        match self.walk_path(module, path, false, 0, &mut reached, None) {
             Outcome::Item | Outcome::Module(_) => {}
             Outcome::Opaque(_) | Outcome::Foreign => return None,
         }
@@ -2729,6 +2782,30 @@ fn describe(
             &i.vis,
         )),
         _ => None,
+    }
+}
+
+/// `step` with the definition an alias is currently resolving removed.
+///
+/// An import is not in scope for its own target: letting it answer would
+/// read `use a::{self};` — a binding whose target is spelled with its own
+/// name — as a cycle bottoming out at the alias depth cap, instead of the
+/// crate the head goes on to name once the import steps aside
+/// ([#77](https://github.com/rlorenzo/deadwood/issues/77)). Filtering to
+/// empty answers [`Step::Absent`], which is what routes the head to the
+/// extern fallback the way rustc itself resolves it.
+fn without(step: Step, skip: Option<usize>) -> Step {
+    let Some(skip) = skip else { return step };
+    match step {
+        Step::Defs(mut defs) => {
+            defs.retain(|&def| def != skip);
+            if defs.is_empty() {
+                Step::Absent
+            } else {
+                Step::Defs(defs)
+            }
+        }
+        other => other,
     }
 }
 
@@ -4586,6 +4663,100 @@ mod tests {
                 "pub fn helper() -> u32 { 1 }\n#[unsafe(export_name = \"x\")]\npub fn exported() -> u32 { helper() }\n"
             )
             .is_empty()
+        );
+    }
+
+    /// `use fixture::{self};` binds the crate's own name — a target spelled
+    /// with the name being bound. The import is not in scope for its own
+    /// head, so the target resolves to the extern crate, exactly as rustc
+    /// reads it; letting the import answer would chase itself to the alias
+    /// depth cap and cut every later `fixture::`-headed path short
+    /// ([#77](https://github.com/rlorenzo/deadwood/issues/77)).
+    #[test]
+    fn a_self_import_of_a_crate_is_the_crate() {
+        let dep = unit(&[("", "pub mod m {\n    pub fn f() -> u32 { 1 }\n}\n")]);
+        let app = CrateUnit {
+            names: vec!["app".to_string()],
+            test_code: false,
+            spliced: Vec::new(),
+            files: unit(&[("", "use fixture::{self, m};\nfn main() { m::f(); }\n")]).files,
+        };
+        let crates = [dep, app];
+        let mut table = SymbolTable::build(&crates);
+        table.record_references(&crates);
+        assert!(
+            table.unused_definitions(&PublicApi::default()).is_empty(),
+            "`m::f` resolves through the import beside the self-binding"
+        );
+    }
+
+    /// The same-module flavor: `use x::{self};` beside `mod x` puts two
+    /// definitions behind one name, and the import must resolve through the
+    /// module rather than through itself.
+    #[test]
+    fn a_self_import_beside_its_module_still_resolves() {
+        assert!(
+            unused_in_binary_root(
+                "mod x {\n    pub fn f() -> u32 { 1 }\n}\nuse x::{self};\nfn main() { x::f(); }\n"
+            )
+            .is_empty(),
+            "`x::f` goes through the module whichever binding answers"
+        );
+    }
+
+    /// A spliced file's `use` declarations are admitted as plain imports:
+    /// a path in one that leans on its own import —
+    /// `Output::enable()` under `use fixture::Output;` — must resolve, or
+    /// the target it names is reported dead out of a scope that was never
+    /// fully read ([#77](https://github.com/rlorenzo/deadwood/issues/77)).
+    #[test]
+    fn a_spliced_files_imports_resolve_its_paths() {
+        let dep = unit(&[(
+            "",
+            "pub mod output {\n    pub fn enable() -> u32 { 1 }\n}\npub use output as Output;\n",
+        )]);
+        let mut app = CrateUnit {
+            names: vec!["app".to_string()],
+            test_code: false,
+            spliced: Vec::new(),
+            files: unit(&[("", "fn main() {}\n")]).files,
+        };
+        app.spliced = unit(&[(
+            "gen",
+            "use fixture::Output;\npub fn probe() { Output::enable(); }\n",
+        )])
+        .files;
+        let crates = [dep, app];
+        let mut table = SymbolTable::build(&crates);
+        table.record_references(&crates);
+        let unused = table.unused_definitions(&PublicApi::default());
+        assert!(
+            !unused.iter().any(|def| def.name == "enable"),
+            "the spliced probe names `enable` through its own import"
+        );
+    }
+
+    /// A spliced file's imports are rooted like the rest of its paths: the
+    /// file is compiled by a chain resolution could not follow, so an import
+    /// nothing visibly routes through still keeps its target alive — an
+    /// ordinary unreached import here would demote the target to
+    /// "referenced only from items that nothing reaches", a finding invented
+    /// by the admission itself.
+    #[test]
+    fn a_spliced_files_import_keeps_its_target_alive_unrouted() {
+        let mut app = CrateUnit {
+            names: Vec::new(),
+            test_code: false,
+            spliced: Vec::new(),
+            files: unit(&[("", "pub fn kept() -> u32 { 1 }\nfn main() {}\n")]).files,
+        };
+        app.spliced = unit(&[("gen", "use crate::kept;\n")]).files;
+        let crates = [app];
+        let mut table = SymbolTable::build(&crates);
+        table.record_references(&crates);
+        assert!(
+            table.unused_definitions(&PublicApi::default()).is_empty(),
+            "the spliced import is the file's claim on `kept`, and the file is compiled"
         );
     }
 

@@ -10,7 +10,7 @@ this file is the short version, newest first.
 
 ### Fixed
 
-Nine bugs, all found by running the analyzer over
+Eleven bugs, all found by running the analyzer over
 [bun](https://github.com/oven-sh/bun)'s Rust tree — a 108-crate, ~1M-line
 workspace, and the first in the corpus laid out flat, declared through macros,
 and entered from C++. Every rule below was settled by handing rustc the
@@ -120,6 +120,40 @@ entirely clean, with nothing added and no other finding kind moved. A
 `pub fn` is not callable over the C ABI, and bun's `*_sys` crates carry
 genuinely-unreached blanket `pub` — findings the audit confirmed correct —
 that a crate-type rule would have silenced wholesale.
+
+**A `{self}` import is not its own meaning**, the tenth.
+`use bun_core::{self, Output};` binds the crate's name through a target
+spelled with that same name, and resolution let the import answer for its
+own head: the chase bottomed out at the alias depth cap and every later
+`bun_core::`-headed path in that module was cut short — with certainty
+rather than doubt, so nothing was even kept alive by name. The import now
+steps aside when resolving its own target, which is how rustc reads it, and
+the head lands on the extern crate: full precision restored, no
+conservatism spent. Four of the five hand-audited false positives behind
+ordinary functions were this.
+
+**A spliced file's imports are part of its references**, the eleventh. The
+earlier fix walked a spliced file's paths but not its `use` declarations,
+so a path leaning on one — `Output::enable_buffering_scope()` under
+`use bun_core::Output;` — resolved to a certain-sounding "absent" in a
+scope that was never fully read, and the item it names was reported dead.
+A spliced file's `use` declarations are now admitted as plain imports:
+resolution-only bindings, never reportable, at the module path the splice
+guessed. An import can only route a reference somewhere, so the worst a
+mis-guessed one does is mark the wrong definition used — a lost finding,
+never an invented one. The fifth audited false positive was this.
+
+Together on bun: all five items #77 hand-audited as live are quiet, 19
+findings removed in total, nothing added. Across the 1265-crate registry
+sweep, 35 findings over 8 crates disappear — backtrace, whose windows half
+hangs from exactly these import shapes, now runs entirely clean — and 5
+appear: every one a `pub` surface item nothing in its own workspace names
+(loom's `alloc::dealloc`, time's `refresh_tz` pair, in both unpacked
+versions), previously rescued by the blanket name-marking of a resolution
+that was failing beside a `pub(crate) use self::submodule::{...}` import.
+The masking-then-unmasking shape of #48 and #55 again: the imprecision
+that hid them was never what made the answer right, and each was
+hand-checked to have no caller in its workspace before being accepted.
 
 ## 1.0.0-beta.1 — 2026-07-30
 
