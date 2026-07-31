@@ -1567,6 +1567,12 @@ fn dependencies_declared_in_the_wrong_table_are_reported() {
         // mentions are the `[dependencies]` copy's evidence, the dev mention
         // is the dev copy's own, and both copies are where they belong.
         "doubled_features_crate",
+        // Declared in both tables with *nothing* dev naming it, but the dev
+        // copy enables what the `[dependencies]` copy does not — an extra
+        // feature for one, default features for the other. The copy is load
+        // bearing without being named (#61), so neither is a finding.
+        "loadbearing_dev_copy_crate",
+        "defaults_off_crate",
         // A `[build-dependencies]` entry named only from a `#[test] fn` inside
         // `build.rs`. A build script has no test harness, so its test
         // functions are build-script code like the rest of the file.
@@ -1646,6 +1652,36 @@ fn a_dev_dependency_the_library_names_is_reported_as_belonging_in_dependencies()
     assert!(
         !message.contains("only by the test"),
         "that is the other direction's evidence: {message}"
+    );
+}
+
+/// A doubled dev copy is claimed as the duplicate it is, not as a move.
+///
+/// The move wording — "referenced by the library, …, which cannot link a
+/// dev-dependency" — is false on both counts for a doubled crate: the
+/// `[dependencies]` copy links it and the manifest compiles. What is true of
+/// `stale_dev_copy_crate` is that the copy adds nothing, and the message says
+/// exactly that ([#61](https://github.com/rlorenzo/deadwood/issues/61)).
+#[test]
+fn a_stale_dev_copy_is_worded_as_a_duplicate_rather_than_a_move() {
+    let analysis = analyze_fixture("depkinds");
+    let message = analysis
+        .findings
+        .iter()
+        .find(|finding| finding.name.as_deref() == Some("stale_dev_copy_crate"))
+        .map(|finding| finding.message.clone())
+        .unwrap_or_default();
+    assert!(
+        message.contains("duplicates the `[dependencies]` entry"),
+        "the claim is the duplication: {message}"
+    );
+    assert!(
+        message.contains("stale"),
+        "and the advice is removal, not a move: {message}"
+    );
+    assert!(
+        !message.contains("cannot link"),
+        "the move wording is false here — the `[dependencies]` copy links it: {message}"
     );
 }
 

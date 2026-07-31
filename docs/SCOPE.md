@@ -104,17 +104,36 @@ alternatives, corpus measurements and mutation runs written down in full in
     configured on every platform: when the workspace root and a config-derived
     path disagree about a symlink (macOS's `/var`), the display strips against
     the canonical spelling of both. The macOS gate runs clean. Closes #53.
+27. **A doubled dev copy is judged on what it enables** — a dev copy that
+    turns on a feature the `[dependencies]` copy does not, default features
+    it opted out of, or that sits beside an `optional` normal copy, is load
+    bearing however silent the tests are; only a copy with neither dev
+    mentions nor anything extra to enable is a stale duplicate, and it is
+    worded as one rather than as a move. 42 invented findings in zed gone, 6
+    more re-worded to the claim that is actually true of them. Closes #61.
 
 ## Next (sequenced, one slice at a time)
 
-Nothing is queued. The issue list is empty and this index says the same
-thing, which is the invariant this section exists to keep: the next slice
-starts by being *filed*, with its population measured, so that neither the
-roadmap nor the tracker can quietly rot.
+Filed from a sweep of ten public workspaces (ripgrep, regex, clap, serde,
+tokio, rust-lang/rust, deno, rustdesk, tauri, zed), each with its population
+measured in the issue:
 
-Everything above is filed; the roadmap and the issue list say the same thing,
-so neither can quietly rot. What shipped is in the index above and in
-[`HISTORY.md`](HISTORY.md).
+1. **A `mod` declaration inside a macro token stream is invisible** (#60) —
+   the largest false-positive source found anywhere: ~800 dead-file findings
+   across tokio (381), serde (36) and rust-lang/rust (~403) are live subtrees
+   declared through `cfg_fs!`-style wrappers, `crate_root!`, or
+   `supported_targets!`.
+2. **A reference that exists only for rustdoc invents dependency findings**
+   (#63) — `cfg(doctest)` gates and doctest code blocks: nine findings across
+   regex, tokio and clap.
+3. **A dependency named only by derive-expanded code is reported unused**
+   (#64) — the serde/serde_derive pair.
+4. **A dependency whose lib target name differs from its package name is
+   reported unused** (#62) — deno's `md-5`/`rustls-webpki`; needs a decision
+   on attempting full `cargo metadata` before the heuristic.
+
+The roadmap and the issue list say the same thing, so neither can quietly
+rot. What shipped is in the index above and in [`HISTORY.md`](HISTORY.md).
 
 ## Explicitly out of scope for now
 

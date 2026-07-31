@@ -1153,6 +1153,8 @@ mod tests {
                     kind: None,
                     optional: true,
                     target: None,
+                    features: Vec::new(),
+                    uses_default_features: true,
                 })
                 .collect(),
             features: features
