@@ -1,0 +1,23 @@
+# Test fixture: a package whose crate root sits in the package directory
+# rather than in `src/`, which is what every crate in bun's Rust tree does.
+#
+# The dead-file check has to walk the directory the manifest actually points
+# at. Assuming `src/` covers nothing here — and covering nothing is silent,
+# which is the failure mode this fixture exists to catch.
+#
+# It also pins the two things that stop such a walk running away: a nested
+# package is its own business, and `tests/` beside the crate root is an
+# auto-discovered target root whose helpers are deliberate.
+[package]
+name = "flatlayout"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+inner = { path = "inner" }
+
+[workspace]
+members = ["inner"]

@@ -1,0 +1,8 @@
+# A nested package. Its files are its own run's business, never this one's.
+[package]
+name = "inner"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "lib.rs"

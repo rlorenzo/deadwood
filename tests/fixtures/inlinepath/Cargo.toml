@@ -1,0 +1,18 @@
+# Test fixture: the two halves of the `#[path]` rule that a name-derived guess
+# gets wrong, in the shapes bun's Rust tree uses them in.
+#
+#   * A `#[path]` on a `mod` inside an inline block resolves from the inline
+#     module's directory, not the declaring file's.
+#   * A `#[path]` on the inline block itself renames that directory — and
+#     resolves from the declaring file's directory, one level out.
+#   * A `#[path]` target owns the directory it sits in whatever it is named, so
+#     its own `mod` declarations name siblings.
+#
+# Every layout here is one rustc accepts; `cargo build` in this directory is
+# the check, and each alternative spelling is one rustc rejects outright.
+[package]
+name = "inlinepath"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]

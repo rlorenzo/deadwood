@@ -171,6 +171,7 @@ mod tests {
         CrateUnit {
             names: vec!["fixture".to_string()],
             test_code: false,
+            spliced: Vec::new(),
             files: sources
                 .iter()
                 .map(|(module, source)| ParsedFile {
@@ -508,6 +509,7 @@ mod tests {
         let binary = CrateUnit {
             names: Vec::new(),
             test_code: false,
+            spliced: Vec::new(),
             files: crate_of(&[
                 ("", "pub mod facade;\nfn main() {}\n"),
                 ("facade", "mod inner;\npub use inner::Exported;\n"),
@@ -550,6 +552,7 @@ mod tests {
         let consumer = CrateUnit {
             names: Vec::new(),
             test_code: false,
+            spliced: Vec::new(),
             files: vec![ParsedFile {
                 path: PathBuf::from("/ws/src/main.rs"),
                 ast: syn::parse_file("fn main() { fixture::exported(); }\n").ok(),

@@ -43,15 +43,23 @@
 //! includer's. [`child_base`] decides the first; [`Pending::module`] carries
 //! the second.
 //!
-//! What this phase does with the second answer is nothing: files reached
-//! through an `include!` are returned in [`Resolved::spliced`], apart from
-//! [`Resolved::files`], and the caller feeds them to the dead-file check and
-//! to nothing else. They are parsed, gated and given their module paths all
-//! the same, so the boundary is one filter rather than a missing answer — but
-//! admitting a generated API surface's items to resolution is a finding
-//! population of its own, and it is not this phase's to create. A file both an
-//! `include!` and a `mod` chain reach is *analyzed*: the `mod` walk is drained
-//! before any `include!` target is followed, so the ordinary route wins.
+//! Files reached through an `include!` are returned in [`Resolved::spliced`],
+//! apart from [`Resolved::files`], and the caller admits them to two things:
+//! the dead-file check, which they are spared by, and the *reference* half of
+//! resolution, which reads the paths they write. Their items stay out. They
+//! are parsed, gated and given their module paths all the same, so the
+//! boundary is one filter rather than a missing answer — but admitting a
+//! generated API surface's items to resolution is a finding population of its
+//! own, and it is not this phase's to create.
+//!
+//! The two halves separate because being wrong about them costs opposite
+//! things. A definition admitted at a module path we guessed invents claims
+//! about items nothing can name; a reference resolved from the wrong scope
+//! only ever marks *something* reached, so the worst it does is lose a
+//! finding. Dropping the references is what invents — see the note on macro
+//! token streams below. A file both an `include!` and a `mod` chain reach is
+//! fully *analyzed*: the `mod` walk is drained before any `include!` target is
+//! followed, so the ordinary route wins.
 //!
 //! An `include!` whose path only a build knows —
 //! `include!(concat!(env!("OUT_DIR"), ...))` — is left alone here, silently.
@@ -94,9 +102,21 @@
 //! until the walk has nothing else to do and re-checked each round
 //! ([`MacroScan::invocations`]). Everything queued this way lands in
 //! [`Resolved::spliced`], and inherits exactly the `include!` boundary: the
-//! file is spared from the dead-file check, and its items are not admitted to
-//! resolution — the module path a macro gives its items is unknowable without
-//! expansion, so admitting them would trade one invented finding for another.
+//! file is spared from the dead-file check and the paths it writes are
+//! resolved, while its items are not admitted — the module path a macro gives
+//! its items is unknowable without expansion, so admitting them would trade
+//! one invented finding for another.
+//!
+//! Reading the paths is not a softening of that rule but the same rule applied
+//! to the other half. bun declares whole subsystems inside `cfg_jsc! { ... }`,
+//! and while those files were spared correctly, every item they were the sole
+//! caller of was reported unused — a claim invented out of code that was read
+//! and then discarded. A path is safe to be wrong about in a way a definition
+//! is not: resolving one can only mark definitions reached, so a path the
+//! macro turns out to throw away costs a finding and can never manufacture
+//! one. Because the items were never collected, every path in such a file is
+//! attributed to [`crate::resolve`]'s "counts on its own" referrer rather than
+//! to an enclosing definition the reachability walk could never reach.
 //!
 //! [#60]: https://github.com/rlorenzo/deadwood/issues/60
 //!
@@ -193,10 +213,24 @@ pub struct ParsedFile {
 /// A file waiting to be loaded, with the context needed to place its items.
 struct Pending {
     path: PathBuf,
-    /// Whether the file owns its parent directory for child modules
-    /// (`lib.rs`/`mod.rs`, and every `include!` target) or nests them in a
-    /// stem-named directory.
+    /// Whether the file's child modules resolve from its parent directory
+    /// (`lib.rs`/`mod.rs`, every `include!` target, and every `#[path]`
+    /// target) or from a stem-named directory below it.
     is_mod_root: bool,
+    /// Whether the directory its children resolve from is the file's *alone*.
+    ///
+    /// True for a crate root, a `mod.rs`, and an ordinary `name.rs` — the
+    /// first two own the directory they sit in and the third owns `name/`, and
+    /// in every case nothing else puts children there. False for a `#[path]`
+    /// target and an `include!` target, which resolve their children from a
+    /// directory the file that declared them is already using.
+    ///
+    /// The distinction is only asked for when the file turns out not to be
+    /// part of the build: everything below a `mod.rs` leaves the build with
+    /// it, whereas sweeping the directory a `#[path]` target merely borrows
+    /// would take its live neighbours too — for `#[path = "body.rs"] mod
+    /// body;` in `src/lib.rs`, the whole crate.
+    owns_dir: bool,
     module: Vec<String>,
     /// Whether the declaration that queued this file — and every declaration
     /// above it — confines it to a test build.
@@ -267,6 +301,7 @@ pub fn resolve(
     let mut queue: Vec<Pending> = vec![Pending {
         path: root.to_path_buf(),
         is_mod_root: true,
+        owns_dir: true,
         module: Vec::new(),
         test_only: false,
         include_depth: 0,
@@ -283,6 +318,7 @@ pub fn resolve(
         while let Some(Pending {
             path,
             is_mod_root,
+            owns_dir,
             module,
             test_only,
             include_depth,
@@ -326,6 +362,7 @@ pub fn resolve(
                         &declaring,
                         Under {
                             base: &child_base(&path, is_mod_root),
+                            path_base: declaring.dir,
                             module: &file.module,
                             test_only: false,
                         },
@@ -373,7 +410,23 @@ pub fn resolve(
                 // and every module below it. Checked before the `mod` walk, or the
                 // children of a file that is not in this build would be queued.
                 if !gates.compiled(&ast.attrs) {
-                    resolved.excluded.extend(rs_files_under(&child_base));
+                    // `child_base` is where this file's children *resolve*
+                    // from, which is only what they leave with when the file
+                    // owns it. A `#[path]` target resolves them from a
+                    // directory it shares with whoever declared it, so
+                    // sweeping `child_base` there would exclude live
+                    // neighbours — and an excluded file is withheld from the
+                    // dependency check too, which turns a lost dead-file
+                    // finding into an invented unused-dependency one. Fall
+                    // back to the bounded stem-named directory, the same half
+                    // answer `exclude_subtree` settles for and for the same
+                    // reason.
+                    let leaves_with_it = if owns_dir {
+                        child_base.clone()
+                    } else {
+                        file_dir.join(path.file_stem().unwrap_or_default())
+                    };
+                    resolved.excluded.extend(rs_files_under(&leaves_with_it));
                     resolved.excluded.push(path);
                     continue;
                 }
@@ -389,6 +442,7 @@ pub fn resolve(
                     &declaring,
                     Under {
                         base: &child_base,
+                        path_base: declaring.dir,
                         module: &module,
                         test_only,
                     },
@@ -461,6 +515,30 @@ pub fn resolve(
                     queue_speculative(&mut deferred, &site, &declared, ident);
                 }
             }
+            // `#[path = $f] mod $m;` puts the file name in the invocation as a
+            // string literal, and the module name beside it as an ident that
+            // says nothing about the file — bun's matcher table pairs
+            // `"toBeArrayOfSize.rs"` with `to_be_array_of_size`, and no rule
+            // turns one into the other. So the literals are probed as `#[path]`
+            // targets, under the same module name the ident probe would use
+            // when there is one to pair with; the module path a speculative
+            // claim carries decides nothing that a wrong guess could invent,
+            // and a literal naming no file is dropped in silence like the rest.
+            for prefix in &emission.dollar_path_prefixes {
+                for (index, literal) in invocation.literals.iter().enumerate() {
+                    let name = invocation
+                        .idents
+                        .get(index)
+                        .cloned()
+                        .unwrap_or_else(|| literal.clone());
+                    let declared = TokenMod {
+                        prefix: prefix.clone(),
+                        path_attr: Some(literal.clone()),
+                        name: name.clone(),
+                    };
+                    queue_speculative(&mut deferred, &site, &declared, &name);
+                }
+            }
         }
         if deferred.is_empty() {
             let spliced = resolved.files.split_off(drained);
@@ -508,11 +586,29 @@ struct Declaring<'a> {
 }
 
 /// What the declarations of one file inherit from the ones above them: where
-/// their files are looked for, what module path their items land under, and
-/// whether they are already confined to a test build.
+/// their files are looked for, where their `#[path]` targets are resolved
+/// from, what module path their items land under, and whether they are
+/// already confined to a test build.
 #[derive(Clone, Copy)]
 struct Under<'a> {
     base: &'a Path,
+    /// Where a `#[path = "..."]` written at this level resolves from, which is
+    /// *not* `base` at the top level of a file and *is* `base` inside every
+    /// inline `mod` block.
+    ///
+    /// The reference splits the rule in two. A `#[path]` on a `mod` not inside
+    /// an inline block is relative to the directory the source file is in — so
+    /// `#[path = "b.rs"] mod b;` written in `src/a.rs` names `src/b.rs`, even
+    /// though `mod b;` without the attribute would name `src/a/b.rs`. Inside
+    /// an inline block it is relative to the directory that block's file-backed
+    /// children live in, inline components included: the same attribute inside
+    /// `mod inner { ... }` in `src/a.rs` names `src/a/inner/b.rs`, and in
+    /// `src/lib.rs` names `src/inner/b.rs`.
+    ///
+    /// `base` already tracks the second of those — it starts at
+    /// [`child_base`] and gains a component per inline block — so this field
+    /// only has to start at the declaring file's directory and then follow it.
+    path_base: &'a Path,
     module: &'a [String],
     test_only: bool,
 }
@@ -563,6 +659,12 @@ struct MacroEmission {
     /// so its invocation idents are probed under `targets/`. An unwrapped
     /// `mod $x` contributes the empty prefix.
     dollar_prefixes: Vec<Vec<String>>,
+    /// The same, for rules that say `#[path = $f] mod $m;` — bun declares its
+    /// forty-odd Jest matcher modules with one, and the file names live in
+    /// the invocation as string literals (`"toBe.rs" => to_be`) because the
+    /// module names are not derivable from them. Probing the idents finds
+    /// `to_be.rs`; the file is `toBe.rs`.
+    dollar_path_prefixes: Vec<Vec<String>>,
     /// Literal `mod name` declarations in the rules, re-resolved at every
     /// invocation site: serde's `crate_root!` declares its whole module tree
     /// this way, `#[path]` attributes included, and the paths are relative to
@@ -580,6 +682,10 @@ struct MacroInvocation {
     /// emission's prefixes; the ones that name no file are dropped without a
     /// sound.
     idents: Vec<String>,
+    /// Every string literal in the invocation's arguments, probed as a
+    /// `#[path]` target if the macro turns out to emit `#[path = $f] mod $m;`.
+    /// Dropped without a sound when they name nothing, like the idents.
+    literals: Vec<String>,
     /// Where the invocation's children would live ([`Under::base`]) and the
     /// directory `#[path]` attributes resolve from ([`Declaring::dir`]).
     base: PathBuf,
@@ -609,8 +715,15 @@ struct TokenMods {
     declared: Vec<TokenMod>,
     /// Bare identifiers, for probing when the macro emits `mod $x`.
     idents: Vec<String>,
+    /// String literals, for probing when the macro emits
+    /// `#[path = $f] mod $m;` — there the file names are the caller's
+    /// literals, and the idents are only the module names they are bound to.
+    literals: Vec<String>,
     /// The inline-module prefixes under which `mod $` was seen.
     dollar_prefixes: Vec<Vec<String>>,
+    /// The inline-module prefixes under which `mod $` was seen carrying a
+    /// `#[path = $..]` whose value is a metavariable too.
+    dollar_path_prefixes: Vec<Vec<String>>,
 }
 
 /// Scan a macro token stream for module declarations, without expanding it.
@@ -635,6 +748,8 @@ fn scan_token_mods(tokens: TokenStream, prefix: &[String], found: &mut TokenMods
     // A `#[path = "..."]` (or `#[cfg_attr(.., path = "..")]`) seen since the
     // last declaration-shaped token, waiting for the `mod` it sits above.
     let mut pending_path: Option<String> = None;
+    // The same slot for `#[path = $f]`, whose value only an invocation has.
+    let mut pending_path_meta = false;
     while let Some(tree) = iter.next() {
         match tree {
             TokenTree::Ident(ident) => {
@@ -646,6 +761,7 @@ fn scan_token_mods(tokens: TokenStream, prefix: &[String], found: &mut TokenMods
                     // other item.
                     if word != "pub" {
                         pending_path = None;
+                        pending_path_meta = false;
                     }
                     found.idents.push(word);
                     continue;
@@ -662,11 +778,13 @@ fn scan_token_mods(tokens: TokenStream, prefix: &[String], found: &mut TokenMods
                                     unreachable!("peeked a group");
                                 };
                                 pending_path = None;
+                                pending_path_meta = false;
                                 let mut child_prefix = prefix.to_vec();
                                 child_prefix.push(name.clone());
                                 scan_token_mods(group.stream(), &child_prefix, found);
                             }
                             _ => {
+                                pending_path_meta = false;
                                 found.declared.push(TokenMod {
                                     prefix: prefix.to_vec(),
                                     path_attr: pending_path.take(),
@@ -675,11 +793,20 @@ fn scan_token_mods(tokens: TokenStream, prefix: &[String], found: &mut TokenMods
                             }
                         }
                     }
-                    Some(TokenTree::Punct(punct))
-                        if punct.as_char() == '$'
-                            && !found.dollar_prefixes.contains(&prefix.to_vec()) =>
-                    {
-                        found.dollar_prefixes.push(prefix.to_vec());
+                    Some(TokenTree::Punct(punct)) if punct.as_char() == '$' => {
+                        // `#[path = $f] mod $m;` names its file from the
+                        // invocation's literals, and `mod $m;` alone from its
+                        // idents. Both are recorded: a rule can be read
+                        // through either arm at different invocations, and a
+                        // probe that names no file costs nothing.
+                        let here = prefix.to_vec();
+                        if pending_path_meta && !found.dollar_path_prefixes.contains(&here) {
+                            found.dollar_path_prefixes.push(here.clone());
+                        }
+                        if !found.dollar_prefixes.contains(&here) {
+                            found.dollar_prefixes.push(here);
+                        }
+                        pending_path_meta = false;
                     }
                     _ => {}
                 }
@@ -690,6 +817,8 @@ fn scan_token_mods(tokens: TokenStream, prefix: &[String], found: &mut TokenMods
                 {
                     if let Some(literal) = path_attr_in_tokens(group.stream()) {
                         pending_path = Some(literal);
+                    } else if path_attr_is_metavariable(group.stream()) {
+                        pending_path_meta = true;
                     }
                     let Some(TokenTree::Group(group)) = iter.next() else {
                         unreachable!("peeked a group");
@@ -702,8 +831,15 @@ fn scan_token_mods(tokens: TokenStream, prefix: &[String], found: &mut TokenMods
                 // restriction; anything else ends an attribute's reach.
                 if group.delimiter() != Delimiter::Parenthesis {
                     pending_path = None;
+                    pending_path_meta = false;
                 }
                 scan_token_mods(group.stream(), prefix, found);
+            }
+            TokenTree::Literal(literal) => {
+                let tokens = TokenStream::from(TokenTree::Literal(literal.clone()));
+                if let Ok(lit) = syn::parse2::<syn::LitStr>(tokens) {
+                    found.literals.push(lit.value());
+                }
             }
             _ => {}
         }
@@ -746,6 +882,39 @@ fn path_attr_in_tokens(tokens: TokenStream) -> Option<String> {
     None
 }
 
+/// Whether an attribute's tokens bind `path` to a *metavariable* rather than
+/// to a literal — `#[path = $file]`, which is a `macro_rules!` body's way of
+/// saying "the caller names the file".
+///
+/// The declaration such a rule emits has neither a name nor a path this scan
+/// can read: `#[path = $file] pub mod $mod;` puts both in the invocation. What
+/// can be read is that the *invocation's string literals* are candidate file
+/// paths, which is what [`MacroEmission::dollar_path_prefixes`] records.
+fn path_attr_is_metavariable(tokens: TokenStream) -> bool {
+    let mut iter = tokens.into_iter().peekable();
+    while let Some(tree) = iter.next() {
+        match tree {
+            TokenTree::Ident(ident) if ident == "path" => {
+                if let Some(TokenTree::Punct(punct)) = iter.peek()
+                    && punct.as_char() == '='
+                {
+                    iter.next();
+                    if let Some(TokenTree::Punct(punct)) = iter.peek()
+                        && punct.as_char() == '$'
+                    {
+                        return true;
+                    }
+                }
+            }
+            TokenTree::Group(group) if path_attr_is_metavariable(group.stream()) => {
+                return true;
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 /// Queue the file a speculative `mod` claim names, if there is one.
 ///
 /// The out-of-line resolution rule of [`collect_mod_decls`], minus the
@@ -771,26 +940,48 @@ fn queue_speculative(
     // following a branch that does not hold costs nothing but a lost finding.
     let mut candidates = Vec::new();
     if let Some(explicit) = &declared.path_attr {
-        let target = site.dir.join(explicit);
-        if target.is_file() {
-            let owns_dir = target.file_name().is_some_and(|n| n == "mod.rs");
-            candidates.push((target, owns_dir));
+        // Two starting points, for the same reason the `cfg_attr` case above
+        // has two. `base` is where the rules resolve a `#[path]` from given
+        // the nesting the tokens show (see `Under::path_base`); `site.dir` is
+        // the declaring file's own directory, where one written outside every
+        // inline block resolves from. They are *not* alternatives that
+        // collapse when `declared.prefix` is empty — emptying the prefix
+        // leaves `base` at `site.base`, which is `child_base` plus whatever
+        // inline blocks the invocation itself sits in, and that equals
+        // `site.dir` only for an invocation written at the top level of a
+        // mod-rs file. A macro invoked at the top of `src/foo.rs` already has
+        // them a directory apart: `src/foo/` against `src/`.
+        //
+        // Which of the two the expansion lands under is not knowable without
+        // expanding it, so both are probed and every hit is queued. Neither
+        // may be dropped on the argument that the other covers it; a probe
+        // that names no file costs a `stat`, and one that hits spares a file.
+        for start in [&base, &site.dir] {
+            let target = start.join(explicit);
+            if target.is_file() && !candidates.iter().any(|(had, _, _)| had == &target) {
+                // Resolves children from its parent directory whatever it is
+                // named, as in `collect_mod_decls`, and owns that directory
+                // only when it is literally a `mod.rs`.
+                let owns_dir = target.file_name().is_some_and(|n| n == "mod.rs");
+                candidates.push((target, true, owns_dir));
+            }
         }
     }
     let as_file = base.join(format!("{name}.rs"));
     let as_dir = base.join(name).join("mod.rs");
     if as_file.is_file() {
-        candidates.push((as_file, false));
+        candidates.push((as_file, false, true));
     } else if as_dir.is_file() {
-        candidates.push((as_dir, true));
+        candidates.push((as_dir, true, true));
     }
-    for (path, is_mod_root) in candidates {
+    for (path, is_mod_root, owns_dir) in candidates {
         let mut module = site.module.clone();
         module.extend(declared.prefix.iter().cloned());
         module.push(name.to_string());
         deferred.push(Pending {
             path,
             is_mod_root,
+            owns_dir,
             module,
             test_only: site.test_only,
             include_depth: site.include_depth,
@@ -844,6 +1035,36 @@ fn scan_macro_item(
         let name = declared.name.clone();
         queue_speculative(walk.deferred, &site, declared, &name);
     }
+    // A stream that both declares `mod $x` *and* carries the arguments for it
+    // settles itself, here, without ever reaching `MacroScan`. That happens
+    // when a `macro_rules!` is defined and invoked inside another macro's
+    // tokens, which the item-level reader never sees as items at all: bun
+    // wraps `macro_rules! matchers` and its forty-nine-entry invocation
+    // together inside one `cfg_jsc! { pub mod expect { .. } }`, so neither
+    // half is an `ItemMacro` and the pairing has to be read off the one stream
+    // holding both. Probing costs a `stat` per candidate and spares a file
+    // when it hits, which is the only thing a claim out of a token stream is
+    // allowed to do.
+    for prefix in &found.dollar_path_prefixes {
+        for literal in &found.literals {
+            // The module name is the caller's other metavariable, and pairing
+            // it with the right literal means parsing the macro's own rules.
+            // The file stem stands in instead: these files land in
+            // `Resolved::spliced`, where the module path names nothing that
+            // resolution consults, so a stem that is not the name the macro
+            // binds spares exactly the same file.
+            let name = Path::new(literal)
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().into_owned())
+                .unwrap_or_else(|| literal.clone());
+            let declared = TokenMod {
+                prefix: prefix.clone(),
+                path_attr: Some(literal.clone()),
+                name: name.clone(),
+            };
+            queue_speculative(walk.deferred, &site, &declared, &name);
+        }
+    }
     if mac.mac.path.is_ident("macro_rules") {
         if let Some(name) = &mac.ident
             && (!found.declared.is_empty() || !found.dollar_prefixes.is_empty())
@@ -855,6 +1076,11 @@ fn scan_macro_item(
                     emission.dollar_prefixes.push(prefix);
                 }
             }
+            for prefix in found.dollar_path_prefixes {
+                if !emission.dollar_path_prefixes.contains(&prefix) {
+                    emission.dollar_path_prefixes.push(prefix);
+                }
+            }
         }
         return;
     }
@@ -864,6 +1090,7 @@ fn scan_macro_item(
     walk.macros.invocations.push(MacroInvocation {
         name: name.ident.to_string(),
         idents: found.idents,
+        literals: found.literals,
         base: site.base,
         dir: site.dir,
         module: site.module,
@@ -924,7 +1151,7 @@ fn collect_mod_decls(
         // A `mod` the configured matrix rules out is not part of this build:
         // neither it nor the files under it are read, and neither is dead.
         if !declaring.gates.compiled(&m.attrs) {
-            let named = path_attr(&m.attrs).map(|explicit| declaring.dir.join(explicit));
+            let named = path_attr(&m.attrs).map(|explicit| under.path_base.join(explicit));
             exclude_subtree(named.as_deref(), under.base, &name, walk.excluded);
             continue;
         }
@@ -934,13 +1161,26 @@ fn collect_mod_decls(
             // Inline module: its own file-backed children live one directory
             // level deeper (`mod a { mod b; }` in lib.rs -> src/a/b.rs).
             Some((_, inner)) => {
-                let nested_base = under.base.join(&name);
+                // A `#[path]` on an inline `mod` names the directory its
+                // file-backed children live in, replacing the name-derived one
+                // — `#[path = "builtin"] mod builtins { mod ls; }` puts `ls` in
+                // `builtin/ls.rs`, not `builtins/ls.rs`. It is itself a
+                // `#[path]` written at this level, so it resolves from
+                // `path_base` like any other, which for an inline block at the
+                // top of `a.rs` is `a.rs`'s own directory and not `a/`.
+                let nested_base = match path_attr(&m.attrs) {
+                    Some(explicit) => under.path_base.join(explicit),
+                    None => under.base.join(&name),
+                };
                 walk.inline_mods.push((child_module.clone(), test_only));
                 collect_mod_decls(
                     inner,
                     declaring,
                     Under {
                         base: &nested_base,
+                        // Inside the block, `#[path]` and the stem-named
+                        // lookup agree on where to start: see `Under`.
+                        path_base: &nested_base,
                         module: &child_module,
                         test_only,
                     },
@@ -949,16 +1189,41 @@ fn collect_mod_decls(
             }
             // External module: find the file it refers to.
             None => {
-                if let Some(explicit) = path_attr(&m.attrs) {
-                    let target = declaring.dir.join(explicit);
+                let named = path_attrs(&m.attrs);
+                if let Some(first) = named.first() {
+                    let targets: Vec<PathBuf> = named
+                        .iter()
+                        .map(|explicit| under.path_base.join(explicit))
+                        .collect();
+                    // The first that exists is the module; the rest are the
+                    // other arms of a `cfg_attr` pair, which no build compiles
+                    // alongside it. They are spared rather than analyzed —
+                    // attributing two files to one module path would report
+                    // whichever is not in this build.
+                    let target = targets.iter().find(|target| target.is_file()).cloned();
+                    for other in &targets {
+                        if Some(other) != target.as_ref() {
+                            exclude_subtree(Some(other), under.base, &name, walk.excluded);
+                        }
+                    }
+                    let target = target.unwrap_or_else(|| under.path_base.join(first));
                     if target.is_file() {
-                        // Only a file literally named `mod.rs` owns its parent
-                        // directory; any other `#[path]` target keeps the
-                        // stem-based rule for its own children.
+                        // A `#[path]` target owns its parent directory whatever
+                        // it is called — rustc treats every one of them as
+                        // though it were a `mod.rs`. So `#[path = "body.rs"]
+                        // mod body;` in `src/lib.rs` puts `mod child;` written
+                        // inside `body.rs` at `src/child.rs`, a *sibling*, and
+                        // not at `src/body/child.rs` the way an ordinary
+                        // `src/body.rs` would. Verified against rustc, which
+                        // rejects the stem-named spelling outright.
+                        // Children resolve from the parent directory either
+                        // way; only a target literally named `mod.rs` owns it,
+                        // rather than sharing it with the declaring file.
                         let owns_dir = target.file_name().is_some_and(|n| n == "mod.rs");
                         walk.queue.push(Pending {
                             path: target,
-                            is_mod_root: owns_dir,
+                            is_mod_root: true,
+                            owns_dir,
                             module: child_module,
                             test_only,
                             include_depth: declaring.include_depth,
@@ -979,6 +1244,7 @@ fn collect_mod_decls(
                     walk.queue.push(Pending {
                         path: as_file,
                         is_mod_root: false,
+                        owns_dir: true,
                         module: child_module,
                         test_only,
                         include_depth: declaring.include_depth,
@@ -987,6 +1253,7 @@ fn collect_mod_decls(
                     walk.queue.push(Pending {
                         path: as_dir,
                         is_mod_root: true,
+                        owns_dir: true,
                         module: child_module,
                         test_only,
                         include_depth: declaring.include_depth,
@@ -1052,6 +1319,7 @@ fn queue_include(
     walk.deferred.push(Pending {
         path: declaring.dir.join(literal),
         is_mod_root: true,
+        owns_dir: false,
         module: under.module.to_vec(),
         // A macro invocation is `Site::Other`: rustc warns about `#[test]`
         // written on one and compiles the spliced code anyway, so a test
@@ -1083,10 +1351,27 @@ fn exclude_subtree(
     let (file, directory) = match named {
         Some(target) => {
             let parent = target.parent().unwrap_or(Path::new(""));
-            // The same rule `collect_mod_decls` follows when it queues one:
-            // only a file literally named `mod.rs` owns its parent directory
-            // for children, so `#[path = "sub/mod.rs"]` nests them in `sub/`
-            // and every other target nests them in a stem-named directory.
+            // Where the children *resolve* from is `parent` for every
+            // `#[path]` target, but what leaves the build with this module is
+            // only the directory it owns — the `Pending::owns_dir` split.
+            //
+            // A target literally named `mod.rs` owns `parent`, so `#[path =
+            // "sub/mod.rs"]` takes all of `sub/` with it. Any other target
+            // shares `parent` with the file that declared it, and sweeping it
+            // would exclude live neighbours: for `#[path = "body.rs"] mod
+            // body;` in `src/lib.rs`, the whole crate. That is not a
+            // conservative direction to err in either, because an excluded
+            // file is withheld from the dependency check as well as the
+            // dead-file one — over-reaching here would not merely lose a
+            // finding, it would invent an unused-dependency claim by hiding
+            // the mention that answers it.
+            //
+            // So the shared case falls back to the bounded stem-named
+            // directory the module would have owned had it been declared
+            // without the attribute. Siblings that only the excluded module
+            // declares are not covered by that and can still be reported dead
+            // — the one direction of this function that is not conservative,
+            // and the reason it is kept to gates that hold in no build at all.
             let directory = if target.file_name().is_some_and(|n| n == "mod.rs") {
                 parent.to_path_buf()
             } else {
@@ -1100,24 +1385,62 @@ fn exclude_subtree(
     excluded.extend(rs_files_under(&directory));
 }
 
-/// Extract the value of a `#[path = "..."]` attribute, if present.
-fn path_attr(attrs: &[syn::Attribute]) -> Option<String> {
+/// Every file a `mod`'s attributes name, in the order they are written.
+///
+/// Usually none or one. More than one comes from `#[cfg_attr(cond, path =
+/// "..")]`, whose condition this function does not evaluate — the same reading
+/// [`path_attr_in_tokens`] already gives a `#[path]` inside a macro, and for
+/// the same reason: a gate that does not hold spares a file, and sparing is
+/// the safe direction. serde declares its `internals` module with a pair of
+/// them, one path per build, and reading neither left the module unresolved
+/// and the whole package's checks skipped:
+///
+/// ```ignore
+/// #[cfg_attr(serde_build_from_git, path = "../serde_derive/src/internals/mod.rs")]
+/// #[cfg_attr(not(serde_build_from_git), path = "src/mod.rs")]
+/// mod internals;
+/// ```
+///
+/// The caller resolves the module to the first candidate that is a file and
+/// spares the rest from the dead-file check: no build compiles more than one
+/// of them, so analyzing more than one would attribute two files to a single
+/// module path and report whichever is not in this build.
+fn path_attrs(attrs: &[syn::Attribute]) -> Vec<String> {
+    let mut found = Vec::new();
     for attr in attrs {
-        if !attr.path().is_ident("path") {
-            continue;
-        }
-        if let syn::Meta::NameValue(nv) = &attr.meta
-            && let syn::Expr::Lit(lit) = &nv.value
-            && let syn::Lit::Str(s) = &lit.lit
+        if attr.path().is_ident("path") {
+            if let syn::Meta::NameValue(nv) = &attr.meta
+                && let syn::Expr::Lit(lit) = &nv.value
+                && let syn::Lit::Str(s) = &lit.lit
+            {
+                found.push(s.value());
+            }
+        } else if attr.path().is_ident("cfg_attr")
+            && let syn::Meta::List(list) = &attr.meta
+            && let Some(value) = path_attr_in_tokens(list.tokens.clone())
         {
-            return Some(s.value());
+            found.push(value);
         }
     }
-    None
+    found
+}
+
+/// The first file a `mod`'s attributes name, which is the one it resolves to.
+fn path_attr(attrs: &[syn::Attribute]) -> Option<String> {
+    path_attrs(attrs).into_iter().next()
 }
 
 /// All `.rs` files under `dir`, recursively, skipping hidden directories.
 pub fn rs_files_under(dir: &Path) -> Vec<PathBuf> {
+    rs_files_under_pruned(dir, &|_| false)
+}
+
+/// [`rs_files_under`], not descending into a directory `prune` rejects.
+///
+/// `prune` is asked about directories only, and only about ones below `dir` —
+/// the root is walked whatever it says, so a caller cannot prune away the
+/// thing it asked about.
+pub fn rs_files_under_pruned(dir: &Path, prune: &dyn Fn(&Path) -> bool) -> Vec<PathBuf> {
     let mut files = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
     while let Some(current) = stack.pop() {
@@ -1129,7 +1452,7 @@ pub fn rs_files_under(dir: &Path) -> Vec<PathBuf> {
             let name = entry.file_name();
             let name = name.to_string_lossy();
             if path.is_dir() {
-                if !name.starts_with('.') {
+                if !name.starts_with('.') && !prune(&path) {
                     stack.push(path);
                 }
             } else if name.ends_with(".rs") {
@@ -1169,6 +1492,63 @@ mod tests {
         assert_eq!(
             normalize(Path::new("/a/b/../c/./d.rs")),
             PathBuf::from("/a/c/d.rs")
+        );
+    }
+
+    /// Where a `#[path]` resolves from, for the three shapes a name-derived
+    /// guess gets wrong. Every layout the fixture uses is one rustc accepts
+    /// and every alternative spelling is one it rejects, so this is the rule
+    /// rather than a preference — see the fixture's manifest.
+    ///
+    /// Found by running the analyzer over bun's Rust tree, which spells its
+    /// modules this way about eight hundred times: resolution missed a hundred
+    /// and sixty files, and the unreachable-module warnings that produced took
+    /// the unused-pub check for the whole workspace down with them.
+    #[test]
+    fn a_path_attribute_resolves_from_the_inline_block_it_sits_in() {
+        let root =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/inlinepath/src/lib.rs");
+        let config = crate::config::Config::default();
+        let package = crate::cfg::tests_support::bare_package();
+        let gates = crate::cfg::Gates::new(config.cfg(), &package);
+        let mut warnings = Vec::new();
+        let resolved = resolve(&root, config.ignore(), &gates, &mut warnings);
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+
+        let src = root.parent().expect("the fixture root sits in `src/`");
+        let mut reached: Vec<String> = resolved
+            .files
+            .iter()
+            .map(|file| {
+                file.path
+                    .strip_prefix(src)
+                    .expect("every reached file is under `src/`")
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect();
+        reached.sort();
+        assert_eq!(
+            reached,
+            vec![
+                // A `#[path]` target owns the directory it sits in whatever it
+                // is called, so `body.rs` declares siblings.
+                "body.rs",
+                // `#[path = "builtin"]` renames the block's directory, and
+                // resolves from `src/` rather than from `src/builtins/`.
+                "builtin/Ls.rs",
+                // The stem-named lookup follows the renamed directory too.
+                "builtin/cat.rs",
+                "lib.rs",
+                // A renamed block inside a renamed block: each level resolves
+                // from the one above it.
+                "nested/printer/Tree.rs",
+                // No attribute on the block, so `#[path]` inside it resolves
+                // from `src/plain/`, not from `src/`.
+                "plain/Renamed.rs",
+                "sibling.rs",
+            ],
+            "a `#[path]` must resolve from the directory its own block nests in",
         );
     }
 
@@ -1233,14 +1613,17 @@ mod tests {
                 // Declared by an ungated `mod crossfile;`, and named there so
                 // the crate-root rename in `lib.rs` does not reach it.
                 ("crossfile.rs".to_string(), false),
+                // The child of `shared_view.rs`, carrying no gate of its own.
+                // It sits beside its parent rather than under it because
+                // `shared_view.rs` is reached through `#[path]`, which resolves
+                // children from the directory the target sits in.
+                ("deeper.rs".to_string(), false),
                 ("lib.rs".to_string(), false),
                 // Its only declaration is `#[cfg(test)] mod outline_tests;`.
                 ("outline_tests.rs".to_string(), true),
                 // Reached by a declaration that does not confine it, among
                 // ones that do.
                 ("shared_view.rs".to_string(), false),
-                // And so is its child, which carries no gate of its own.
-                ("shared_view/deeper.rs".to_string(), false),
             ]
         );
 
@@ -1798,7 +2181,7 @@ mod tests {
             "the unconfined declaration lifts the file itself",
         );
         assert!(
-            !confinement(&resolved.files, "shared_view/deeper.rs"),
+            !confinement(&resolved.files, "src/deeper.rs"),
             "and the file it declares with `mod`",
         );
         assert!(
