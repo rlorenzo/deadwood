@@ -10,7 +10,7 @@ this file is the short version, newest first.
 
 ### Fixed
 
-Eight bugs, all found by running the analyzer over
+Nine bugs, all found by running the analyzer over
 [bun](https://github.com/oven-sh/bun)'s Rust tree — a 108-crate, ~1M-line
 workspace, and the first in the corpus laid out flat, declared through macros,
 and entered from C++. Every rule below was settled by handing rustc the
@@ -101,6 +101,25 @@ target), the change removes 244 findings over 82 proc-macro crates — every
 one an `unused_pub_item` on an entry-point function, nothing added, no other
 finding kind moved — and 62 of those crates, `clap_derive` and
 `serde_derive` among them, now run entirely clean.
+
+**Items an attribute macro may have exported**, the ninth. An attribute
+macro Deadwood cannot expand receives its item as tokens and may emit
+anything beside it — bun's `#[bun_jsc::host_fn]` writes an `extern "C"`
+shim around 800 times, handing the item to a caller outside Rust entirely —
+so an item under one is no longer reported. The analyzer already refuses to
+read through such a macro everywhere else (the item's mentions go to the
+opaque context, and its body already keeps alive what it names); the same
+refusal now covers the claim made about the item itself, so suppression is
+the whole change and nothing below the item moves. The cost is deliberate
+and measured: across the same registry sweep, 37 findings over 11 crates
+disappear — 18 of them `#[async_trait]` items, which that macro certainly
+does not export and the rule cannot know it — while `temporal_capi`, a
+diplomat-generated C-FFI crate of exactly bun's shape, and tokio now run
+entirely clean, with nothing added and no other finding kind moved. A
+`staticlib`/`cdylib` crate-type rule was considered and rejected: a mangled
+`pub fn` is not callable over the C ABI, and bun's `*_sys` crates carry
+genuinely-unreached blanket `pub` — findings the audit confirmed correct —
+that a crate-type rule would have silenced wholesale.
 
 ## 1.0.0-beta.1 — 2026-07-30
 

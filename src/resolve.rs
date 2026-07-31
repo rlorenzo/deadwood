@@ -2724,6 +2724,20 @@ fn attr_is(attr: &syn::Attribute, names: &[&str]) -> bool {
 
 /// Attributes that mark an item as used externally or deliberately kept.
 fn has_skip_attr(attrs: &[syn::Attribute]) -> bool {
+    // An attribute macro Deadwood cannot expand received this item as tokens
+    // and may have emitted anything beside it — including the linker export
+    // bun's `#[bun_jsc::host_fn]` writes around 800 times ([#74]). The same
+    // refusal to read through the macro that moves the item's mentions to
+    // the opaque context ([`crate::cfg::unexpandable_macro`]) keeps the item
+    // itself off the report: its caller may be one no path in any workspace
+    // can spell. The item's body already roots what it names, so this
+    // changes nothing below the item; it silences only the claim made
+    // about the item itself.
+    //
+    // [#74]: https://github.com/rlorenzo/deadwood/issues/74
+    if crate::cfg::unexpandable_macro(attrs) {
+        return true;
+    }
     attrs.iter().any(|attr| {
         if attr_is(attr, &["no_mangle", "used", "export_name"]) {
             return true;
@@ -3767,15 +3781,48 @@ mod tests {
     }
 
     /// Same rule for an attribute's arguments, which a macro we do not expand
-    /// is what resolves.
+    /// is what resolves. The holder carries a `#[derive]`, which makes
+    /// `some_attr` that derive's helper — inert, so the holder answers for
+    /// itself — while the helper's argument tokens still root what they name.
+    /// (A holder under an attribute *macro* is never reported at all; that is
+    /// [`an_item_a_macro_could_have_exported_is_never_reported`].)
     #[test]
     fn an_attribute_argument_is_a_root_rather_than_an_edge() {
         assert_eq!(
             unused_in_binary_root(
-                "pub fn target() -> u32 { 1 }\n#[some_attr(target)]\npub fn dead_holder() {}\n"
+                "pub fn target() -> u32 { 1 }\n#[derive(Clone)]\n#[some_attr(target)]\npub struct DeadHolder;\n"
             ),
-            vec!["dead_holder"]
+            vec!["DeadHolder"]
         );
+    }
+
+    /// An attribute macro Deadwood cannot expand received the item as tokens
+    /// and may have emitted anything beside it — bun's `#[bun_jsc::host_fn]`
+    /// writes an `extern "C"` shim, giving the item a caller no path in any
+    /// workspace can spell — so the item is never reported
+    /// ([#74](https://github.com/rlorenzo/deadwood/issues/74)). What its body
+    /// names was already alive by the opaque rule, and its inert-attributed
+    /// neighbours still answer for themselves.
+    #[test]
+    fn an_item_a_macro_could_have_exported_is_never_reported() {
+        assert_eq!(
+            unused_in_root(
+                "#[exporter::host_fn]\npub fn entry() -> u32 { helper() }\npub fn helper() -> u32 { 1 }\n#[rustfmt::skip]\npub fn inert_orphan() -> u32 { 2 }\n"
+            ),
+            vec!["inert_orphan"],
+            "the annotated item may be exported; the tool-attributed one cannot be"
+        );
+        // A single-segment unknown beside a `#[derive]` is that derive's
+        // helper, which rewrites nothing: the inert side of the recognizer,
+        // unchanged.
+        assert_eq!(
+            unused_in_root("#[derive(Clone)]\n#[helper_attr]\npub struct DeadHolder;\n"),
+            vec!["DeadHolder"]
+        );
+        // A single-segment unknown with no derive to belong to can only be
+        // an attribute macro in scope: the same silence as the qualified
+        // spelling.
+        assert!(unused_in_root("#[rstest]\npub fn entry() -> u32 { 1 }\n").is_empty());
     }
 
     /// A `use` names its target on the bound name's behalf, so an import
