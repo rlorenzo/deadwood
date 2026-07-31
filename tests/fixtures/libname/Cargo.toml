@@ -1,0 +1,7 @@
+# Test fixture: a dependency spelled by its lib target name (#62). The
+# workspace deliberately cannot resolve fully — `phantom_crate` exists on no
+# registry — so the full `cargo metadata --offline` pass fails and the member
+# rename below must come from the `--no-deps` view alone.
+[workspace]
+resolver = "2"
+members = ["hub", "rim-parts"]

@@ -5,3 +5,8 @@ edition = "2021"
 
 [dependencies]
 engine-core = { path = "../engine-core" }
+# Declared by package name, spelled in code by its *lib* name (`wheel`).
+# Reporting this entry unused against `wheel::spin()` was #62's finding shape
+# (deno's `md-5`/`rustls-webpki`); the member's lib name is known with or
+# without a resolvable dependency graph.
+spoked = { path = "../spoked" }

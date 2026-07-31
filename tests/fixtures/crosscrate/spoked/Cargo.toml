@@ -1,0 +1,10 @@
+[package]
+name = "spoked"
+version = "0.1.0"
+edition = "2021"
+
+# The md-5 shape (#62): the lib target keeps a name of its own, and code in
+# a depending package spells *that*, not the package name.
+[lib]
+name = "wheel"
+path = "src/lib.rs"

@@ -139,17 +139,25 @@ alternatives, corpus measurements and mutation runs written down in full in
     package gone; the price is the mirror image, a genuinely stale base
     beside a live companion, missed rather than invented. Closes #64.
 
+31. **A dependency is spelled by its lib target name** — code writes
+    `md5::` for the package `md-5` and `webpki::` for `rustls-webpki`, and
+    matching mentions against the package name reported both unused against
+    code that uses them. Lib names now come from a full
+    `cargo metadata --frozen` where a current lockfile and cached
+    resolution exist — any
+    checkout that has built once — from the `--no-deps` view for workspace
+    members always, and from the package-name heuristic, unchanged, where
+    neither can see. A `rename` still sets the extern name outright. Both
+    verified deno false positives gone; deno's third `rustls-webpki`
+    finding, in a package that names it nowhere, correctly remains.
+    Closes #62.
+
 ## Next (sequenced, one slice at a time)
 
-Filed from a sweep of ten public workspaces (ripgrep, regex, clap, serde,
-tokio, rust-lang/rust, deno, rustdesk, tauri, zed), each with its population
-measured in the issue:
-
-1. **A dependency whose lib target name differs from its package name is
-   reported unused** (#62) — deno's `md-5`/`rustls-webpki`; the fix in
-   progress reads lib target names from a full `cargo metadata --offline`
-   where a cached resolution exists, falling back to the package-name
-   heuristic where it does not.
+Nothing is queued. The issue list is empty and this index says the same
+thing, which is the invariant this section exists to keep: the next slice
+starts by being *filed*, with its population measured, so that neither the
+roadmap nor the tracker can quietly rot.
 
 The roadmap and the issue list say the same thing, so neither can quietly
 rot. What shipped is in the index above and in [`HISTORY.md`](HISTORY.md).

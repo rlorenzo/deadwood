@@ -785,6 +785,13 @@ toolchain is pinned to `stable` with `clippy` and `rustfmt` via
 - A dependency whose name is a common word (`log`, `time`, `bytes`) is kept
   alive by any mention of that word anywhere in the package, including in
   macro input and doc comments. Findings are lost, never invented.
+- A dependency whose lib target name differs from its package name (`md-5`
+  builds a lib named `md5`, `rustls-webpki` one named `webpki`) is matched by
+  the *lib* name wherever a current lockfile and a cached, offline-resolvable
+  dependency graph exist — any checkout that has built once — and by a workspace member's
+  targets always. On a cold cache the package-name heuristic runs as before,
+  which can report such an entry against code that uses it; building the
+  project once is the fix.
 - A dependency named only by the code a derive expands to is kept alive by
   its companion: a mentioned `X_derive`, `X_macros` or `X_impl` declared
   beside `X` counts as evidence for `X`, because the expansion names the base

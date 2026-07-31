@@ -4349,3 +4349,35 @@ fn a_mod_declared_only_in_a_macro_token_stream_spares_its_file() {
         analysis.findings
     );
 }
+
+/// The md-5 shape ([#62](https://github.com/rlorenzo/deadwood/issues/62))
+/// through a workspace member: `app` declares `spoked` by package name and
+/// spells its *lib* name (`wheel`) in code. A member's lib rename is visible
+/// with or without a resolvable dependency graph, so the entry is never
+/// reported unused.
+#[test]
+fn a_dependency_is_matched_by_its_lib_target_name() {
+    let analysis = analyze_fixture("crosscrate");
+    assert!(
+        !analysis
+            .findings
+            .iter()
+            .any(|f| f.name.as_deref() == Some("spoked")),
+        "the lib name `wheel` is what code spells: {:?}",
+        analysis.findings
+    );
+}
+
+/// The same, where it has to survive a workspace whose full resolution
+/// *fails*: `libname` declares a crate no registry has, so the lib-name map
+/// cannot come from a resolved graph — a member's rename is read from the
+/// `--no-deps` view that is always in front of us.
+#[test]
+fn a_members_lib_rename_survives_an_unresolvable_workspace() {
+    let analysis = analyze_fixture("libname");
+    assert!(
+        reported(&analysis, FindingKind::UnusedDependency).is_empty(),
+        "`rim::radius()` is `rim-parts`' evidence, resolvable graph or none: {:?}",
+        analysis.findings
+    );
+}

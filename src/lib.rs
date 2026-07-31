@@ -541,6 +541,7 @@ pub fn analyze_with(
         findings.extend(
             deps::find_unused(
                 package,
+                &meta.lib_names,
                 package_references,
                 config.dependencies(),
                 gates,
@@ -568,6 +569,7 @@ pub fn analyze_with(
         findings.extend(
             deps::find_misplaced(
                 package,
+                &meta.lib_names,
                 package_references,
                 config.dependencies(),
                 gates,
