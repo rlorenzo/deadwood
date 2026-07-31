@@ -100,16 +100,17 @@ alternatives, corpus measurements and mutation runs written down in full in
     both `[dependencies]` and `[dev-dependencies]` no longer has the library
     mentions that justify the normal copy held against the dev copy; two live
     invented findings in the extended registry gone. Closes #55.
+26. **One place, spelled two ways** — the baseline note prints its path as
+    configured on every platform: when the workspace root and a config-derived
+    path disagree about a symlink (macOS's `/var`), the display strips against
+    the canonical spelling of both. The macOS gate runs clean. Closes #53.
 
 ## Next (sequenced, one slice at a time)
 
-1. **A macOS gate run is not clean**
-   ([#53](https://github.com/rlorenzo/deadwood/issues/53)) — the baseline
-   suppression note prints an absolute path when the workspace resolves
-   through a symlinked temp dir (`/var` → `/private/var`), which fails one
-   test on macOS on an unmodified checkout. Cosmetic in the product, real in
-   the harness; the note should print the path as configured on every
-   platform.
+Nothing is queued. The issue list is empty and this index says the same
+thing, which is the invariant this section exists to keep: the next slice
+starts by being *filed*, with its population measured, so that neither the
+roadmap nor the tracker can quietly rot.
 
 Everything above is filed; the roadmap and the issue list say the same thing,
 so neither can quietly rot. What shipped is in the index above and in

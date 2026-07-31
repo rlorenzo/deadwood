@@ -2395,3 +2395,42 @@ one-runtime-mention rule), consulting the doubling in the Build arm (loses
 entry doubles itself, same loss as the third).
 
 Closes [#55](https://github.com/rlorenzo/deadwood/issues/55).
+
+## Phase 26 — one place, spelled two ways (shipped)
+
+The report prints every path relative to the workspace root, and one line
+broke that on macOS: the baseline note printed
+`/private/var/folders/.../.deadwood/baseline.json` where every other line was
+relative. Found running the quality gate on a macOS machine — the first this
+project was developed on — where `writing_a_baseline_creates_the_directory_its_path_names`
+fails against an unmodified `main` (#53).
+
+### The mechanism, which contradicted a comment
+
+`relative_to` was a plain `strip_prefix`. The baseline path reaches it
+canonicalized — `Config::discover`'s ancestor walk needs canonical paths —
+while `cargo metadata`'s `workspace_root` keeps the spelling it was invoked
+with, and on macOS the standard temp directory reaches its files through a
+symlink (`/var` is `/private/var`): two spellings of one place, a strip that
+misses, an absolute path in the report. The comment in `Config::discover`
+claimed `cargo metadata` reports a symlink-resolved root; that is true where
+the project was developed (Linux, where the walk's canonicalize is a no-op)
+and false on macOS, and the comment now says what actually holds.
+
+The fix is in the display: when the plain strip misses, strip again with both
+sides canonicalized; a path still outside the root after that genuinely lives
+elsewhere and stays absolute, exactly as before.
+
+### What it found
+
+- **Zero movement**: 356 targets, byte-identical output and exit codes — no
+  corpus target reaches its workspace through a symlink.
+- The macOS gate is clean for the first time: 127 of 127 integration tests,
+  including the one that fails on unmodified `main`.
+- The failing case now exists on every platform CI runs, not only where the
+  OS supplies a symlinked temp dir: the new unit test builds its own symlink
+  (`a_path_is_relative_to_a_root_spelled_through_a_symlink`), and it catches
+  both inversions — dropping the canonicalized retry, and canonicalizing only
+  one side. Two mutations, both caught.
+
+Closes [#53](https://github.com/rlorenzo/deadwood/issues/53).

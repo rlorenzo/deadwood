@@ -830,8 +830,28 @@ fn add_dependency_aliases(
     }
 }
 
+/// `path` relative to `root` for display, or `path` unchanged when it does
+/// not sit under `root`.
+///
+/// The two can spell one place differently: a config-derived path is
+/// canonicalized (the ancestor walk in [`config::Config::discover`] needs it),
+/// while `cargo metadata`'s `workspace_root` keeps whatever spelling it was
+/// invoked with — and on macOS the standard temp directory reaches its files
+/// through a symlink (`/var` is `/private/var`), so the plain prefix strip
+/// misses and the report printed an absolute path where every other line was
+/// relative ([#53](https://github.com/rlorenzo/deadwood/issues/53)).
+/// Canonicalizing both sides settles the spelling; a path that is still not
+/// under the root after that genuinely lives elsewhere, and stays absolute.
 fn relative_to(path: &Path, root: &Path) -> PathBuf {
-    path.strip_prefix(root).unwrap_or(path).to_path_buf()
+    if let Ok(relative) = path.strip_prefix(root) {
+        return relative.to_path_buf();
+    }
+    if let (Ok(canonical_path), Ok(canonical_root)) = (path.canonicalize(), root.canonicalize())
+        && let Ok(relative) = canonical_path.strip_prefix(&canonical_root)
+    {
+        return relative.to_path_buf();
+    }
+    path.to_path_buf()
 }
 
 /// The names other crates can use for `target` in paths.
@@ -859,6 +879,38 @@ fn crate_names(package: &metadata::Package, target: &metadata::Target) -> Vec<St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The display strip must survive the root and the path spelling one
+    /// place two ways. macOS hands every test a temp directory behind a
+    /// symlink (`/var` is `/private/var`), which is where
+    /// [#53](https://github.com/rlorenzo/deadwood/issues/53) was found — this
+    /// builds its own symlink so the case exists on every platform CI runs.
+    #[cfg(unix)]
+    #[test]
+    fn a_path_is_relative_to_a_root_spelled_through_a_symlink() {
+        let scratch = std::env::temp_dir().join(format!("dw-relative-{}", std::process::id()));
+        let real = scratch.join("real");
+        let link = scratch.join("link");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("baseline.json"), b"{}").unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        // The canonical path under the symlink spelling of the root, and the
+        // reverse: both must come out relative.
+        let canonical = real.canonicalize().unwrap().join("baseline.json");
+        assert_eq!(relative_to(&canonical, &link), Path::new("baseline.json"));
+        assert_eq!(
+            relative_to(&link.join("baseline.json"), &real.canonicalize().unwrap()),
+            Path::new("baseline.json")
+        );
+        // A path genuinely outside the root stays as it was.
+        assert_eq!(
+            relative_to(&canonical, Path::new("/nonexistent-root")),
+            canonical
+        );
+
+        std::fs::remove_dir_all(&scratch).unwrap();
+    }
 
     /// Three places spell a finding kind — `--json`, `[severity]`, and a
     /// baseline entry — and all three must be the one spelling. The label is a
