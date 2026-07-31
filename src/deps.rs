@@ -217,6 +217,18 @@
 //! cannot link the entry at all: one such mention is a build that fails,
 //! however much test code names it too.
 //!
+//! **A claim is judged on the entry's own evidence**, which one manifest shape
+//! makes visible: Cargo allows the same crate in `[dependencies]` and
+//! `[dev-dependencies]`, usually because the tests want extra features
+//! (`zerocopy-derive` declares `syn` twice this way). The context set is keyed
+//! by crate name, so both entries read one set — and the runtime mentions
+//! that justify the `[dependencies]` copy must not be held against the dev
+//! copy, whose own evidence is the dev mentions
+//! ([#55](https://github.com/rlorenzo/deadwood/issues/55)). A doubled dev
+//! copy dev code names is therefore placed where it is; one nothing dev names
+//! is a stale duplicate, claimed on the absence — the same footing as a
+//! `[build-dependencies]` copy the build script never touches.
+//!
 //! The second claim was refused from phase 5 to phase 20, and the reason was
 //! never the reasoning — it was that a mis-attribution of ours was the likelier
 //! explanation, so the claim would have invented findings against manifests
@@ -831,19 +843,29 @@ pub fn find_misplaced(
         {
             continue;
         }
+        let crate_name = dependency.crate_name();
         // An entry the `[features]` table names is load bearing for a reason
         // that has no code and therefore no target — and `[features]` cannot
         // refer to a dev-dependency at all, so moving it would break the
         // feature that names it.
-        if named_by_features.contains(&dependency.crate_name()) {
+        if named_by_features.contains(&crate_name) {
             continue;
         }
         let found = references
             .names
-            .get(&dependency.crate_name())
+            .get(&crate_name)
             .copied()
             .unwrap_or_default();
-        if let Some(belongs_in) = misplacement(dependency.dependency_kind(), found) {
+        // Whether `[dependencies]` also declares this crate, under any
+        // spelling and any target expression. What the doubled declaration
+        // changes is whose evidence a runtime mention is; `misplacement`
+        // documents the one claim it stops.
+        let doubled = dependency.dependency_kind() != DependencyKind::Normal
+            && package.dependencies.iter().any(|other| {
+                other.dependency_kind() == DependencyKind::Normal
+                    && other.crate_name() == crate_name
+            });
+        if let Some(belongs_in) = misplacement(dependency.dependency_kind(), found, doubled) {
             misplaced.push(MisplacedDependency {
                 name: dependency.manifest_name().to_string(),
                 declared: dependency.dependency_kind(),
@@ -857,9 +879,16 @@ pub fn find_misplaced(
 /// The table `found` says an entry declared as `kind` belongs in, or `None`
 /// when the evidence does not support moving it.
 ///
+/// `doubled` says `[dependencies]` also declares the same crate — Cargo
+/// allows it, and the usual reason is tests wanting extra features
+/// (`zerocopy-derive` declares `syn` twice this way). The context set is
+/// keyed by crate name, so a doubled crate's two entries read one set, and
+/// what `doubled` decides is whose evidence a runtime mention in it is: the
+/// `[dependencies]` copy's, never the dev copy's.
+///
 /// Every `None` here is deliberate; see the module docs for the reasoning
 /// behind each.
-fn misplacement(kind: DependencyKind, found: Contexts) -> Option<DependencyKind> {
+fn misplacement(kind: DependencyKind, found: Contexts, doubled: bool) -> Option<DependencyKind> {
     // Nothing names it: that is the unused-dependency check's question. And a
     // mention we could not attribute to a target proves a use without proving
     // where, which is exactly the evidence a placement claim needs.
@@ -877,12 +906,28 @@ fn misplacement(kind: DependencyKind, found: Contexts) -> Option<DependencyKind>
         // all: a single one is a build that fails, however much test code names
         // it too. `found` is already known to carry no opaque mention, which is
         // what makes a runtime mention evidence rather than a guess.
+        //
+        // Unless the crate is doubled: then the runtime mentions are the
+        // `[dependencies]` copy's evidence and prove nothing about this entry,
+        // and the manifest compiles — the invented finding
+        // [#55](https://github.com/rlorenzo/deadwood/issues/55) filed. The dev
+        // mentions are still this entry's own, so a doubled dev copy that dev
+        // code names is placed right where it is — while one no dev code
+        // names is a stale duplicate, and the claim survives on the absence:
+        // the same answer the build table's stale copy gets below.
         DependencyKind::Development if found.contains(Contexts::RUNTIME) => {
+            if doubled && found.contains(Contexts::DEV) {
+                return None;
+            }
             Some(DependencyKind::Normal)
         }
         // The build script is the only thing that compiles against a
         // `[build-dependencies]` entry, so one it never names is in the wrong
-        // table — and the code that does name it says which.
+        // table — and the code that does name it says which. `doubled` is
+        // deliberately not consulted: this claim rests on the *absence* of
+        // build-script mentions, which is this entry's own evidence whoever
+        // else declares the crate, and `depkinds` pins the doubled spelling
+        // (`stale_build_crate`) as a finding.
         DependencyKind::Build if !found.contains(Contexts::BUILD_SCRIPT) => {
             Some(if found.contains(Contexts::RUNTIME) {
                 DependencyKind::Normal
@@ -2000,6 +2045,44 @@ mod tests {
             misplaced(&manifest, &refs).0,
             vec![("test_helper".to_string(), DependencyKind::Development)],
             "the macro changes nothing about which build compiles the mention"
+        );
+    }
+
+    /// The doubled manifest [#55] filed: the same crate in both tables, the
+    /// tests wanting extra features (`zerocopy-derive`'s `syn`). The library
+    /// mentions are the `[dependencies]` copy's evidence and the dev mention
+    /// is the dev copy's own, so neither copy moves — reporting the dev copy
+    /// as belonging in `[dependencies]` was a finding invented against a
+    /// manifest that compiles.
+    ///
+    /// [#55]: https://github.com/rlorenzo/deadwood/issues/55
+    #[test]
+    fn a_doubled_dev_copy_the_tests_name_is_left_alone() {
+        let refs = references_from(&[
+            ("lib", "pub fn go() { doubled::run(); }\n"),
+            ("test", "#[test]\nfn t() { doubled::check(); }\n"),
+        ]);
+        let manifest = package(vec![dependency("doubled"), dev_dependency("doubled")]);
+        assert!(
+            misplaced(&manifest, &refs).0.is_empty(),
+            "each copy is justified by its own table's mentions: {:?}",
+            misplaced(&manifest, &refs).0
+        );
+    }
+
+    /// The boundary of that answer: a doubled dev copy *nothing dev* names is
+    /// a stale duplicate, and the claim survives on the absence of dev
+    /// mentions — this entry's own evidence, exactly as the stale
+    /// `[build-dependencies]` copy's claim rests on the build script's
+    /// silence.
+    #[test]
+    fn a_doubled_dev_copy_nothing_dev_names_is_a_stale_duplicate() {
+        let refs = references(&["pub fn go() { doubled::run(); }\n"]);
+        let manifest = package(vec![dependency("doubled"), dev_dependency("doubled")]);
+        assert_eq!(
+            misplaced(&manifest, &refs).0,
+            vec![("doubled".to_string(), DependencyKind::Normal)],
+            "the dev copy duplicates an entry the library already justifies"
         );
     }
 

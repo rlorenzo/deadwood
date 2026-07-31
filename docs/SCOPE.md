@@ -96,24 +96,14 @@ alternatives, corpus measurements and mutation runs written down in full in
     working as intended: zero missed findings in the canonical corpus, and
     every blocked claim in a 330-crate sweep a suppression of noise. Found and
     filed #55 while measuring. Closes #50.
+25. **A claim is judged on the entry's own evidence** — a crate declared in
+    both `[dependencies]` and `[dev-dependencies]` no longer has the library
+    mentions that justify the normal copy held against the dev copy; two live
+    invented findings in the extended registry gone. Closes #55.
 
 ## Next (sequenced, one slice at a time)
 
-1. **A placement claim judged on another entry's evidence**
-   ([#55](https://github.com/rlorenzo/deadwood/issues/55)) — a finding
-   *invented*, live on `main` today: the same crate declared in both
-   `[dependencies]` and `[dev-dependencies]` (extra features for tests —
-   `zerocopy-derive`, `schemars_derive` and `bumpalo` all do it) has one
-   mention set keyed by crate name, so the library mentions that justify the
-   normal copy also indict the dev copy. Every registry instance is masked by
-   an incidental opaque mention, exactly as
-   [#48](https://github.com/rlorenzo/deadwood/issues/48) was; a clean two-file
-   package reproduces the invented finding. Found and filed by phase 24's
-   measurement. The narrow rule — never move an entry into a table already
-   declaring the same crate — closes it without per-entry attribution
-   machinery.
-
-2. **A macOS gate run is not clean**
+1. **A macOS gate run is not clean**
    ([#53](https://github.com/rlorenzo/deadwood/issues/53)) — the baseline
    suppression note prints an absolute path when the workspace resolves
    through a symlinked temp dir (`/var` → `/private/var`), which fails one

@@ -2340,3 +2340,58 @@ counted again before anyone builds the relaxation; this entry is the
 write-up for whoever does.
 
 Closes [#50](https://github.com/rlorenzo/deadwood/issues/50).
+
+## Phase 25 — a claim is judged on the entry's own evidence (shipped)
+
+Cargo allows the same crate in `[dependencies]` and `[dev-dependencies]`,
+usually because the tests want extra features — `zerocopy-derive` declares
+`syn` twice this way. Deadwood's context set is keyed by crate *name*, so both
+entries read one mention set, and the library mentions that justify the
+`[dependencies]` copy were also held against the dev copy: reported as
+belonging in `[dependencies]`, against a manifest that compiles. Phase 24
+found it while counting the opaque guard's population (#55); every registry
+instance the count surfaced was masked by an incidental opaque mention,
+exactly as #48 hid behind the same guard.
+
+### The decisions
+
+- **The narrow rule, not per-entry attribution.** The claim the doubling
+  breaks is exactly one: `Development` moved up on a runtime mention. So the
+  fix is one condition in `misplacement` — a dev copy of a crate the
+  `[dependencies]` table also declares, with dev mentions of its own, is
+  placed where it is — rather than re-keying the context map per entry. The
+  wider design stays available if a second claim ever needs it.
+- **The dev mentions are the condition, not a nicety.** A doubled dev copy
+  *nothing dev* names is a stale duplicate of the entry the library already
+  justifies, and that claim rests on the absence of dev mentions — evidence
+  that is the entry's own, whoever else declares the crate. It stays a
+  finding, on the same footing as the stale `[build-dependencies]` copy
+  (`stale_build_crate`) has always been.
+- **The Build arm deliberately does not consult the doubling.** Its claim
+  rests on the build script's silence — again the entry's own evidence — and
+  `depkinds` has pinned the doubled spelling of it as a finding since
+  phase 5.
+
+### What it found
+
+- **Two live invented findings, gone.** Over 356 targets (all 330 unpacked
+  registry crates, the 25 fixtures and Deadwood itself) against `main` at
+  `da37382`, three differ. One is `depkinds` growing its pins. The other two
+  are real crates the fix silences: `phf_generator`'s `criterion` (doubled —
+  `[dependencies]` for its hash-test binary, `[dev-dependencies]` for its
+  benches) and `prettyplease`'s `proc-macro2` (doubled for test features).
+  Both manifests compile; both findings were invented, live since phase 21,
+  and unnoticed because neither crate is in the canonical 35 the phases
+  measure — the first practical return on the extended sweep phase 23 added.
+- **Nothing else moves.** The `zerocopy-derive`-class instances phase 24
+  vetted stay silent for their original reason (the opaque guard); they would
+  now stay silent without it.
+
+**Recall by mutation: five inversions, all five caught by a named test.**
+Dropping the carve-out, skipping on the doubling alone (loses the stale-copy
+finding), skipping on dev mentions alone (loses phase 21's
+one-runtime-mention rule), consulting the doubling in the Build arm (loses
+`stale_build_crate`), and counting any table as the doubling entry (a dev
+entry doubles itself, same loss as the third).
+
+Closes [#55](https://github.com/rlorenzo/deadwood/issues/55).

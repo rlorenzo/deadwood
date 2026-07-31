@@ -22,3 +22,11 @@ fn builds_a_thing() {
 fn drives_a_thing() {
     attr_macro_test_target_crate::assert_ok();
 }
+
+// The dev mention that justifies `doubled_features_crate`'s dev copy: this
+// crate is declared in both tables (the tests want extra features), and this
+// use is the dev copy's own evidence, as `src/lib.rs`'s is the normal copy's.
+#[test]
+fn doubles_a_thing() {
+    doubled_features_crate::assert_ok();
+}
