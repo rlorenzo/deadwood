@@ -6,12 +6,16 @@ files, unused `pub` items, unused re-exports, unused and misplaced
 dependencies, and `cfg` gates that can never hold, in the spirit of
 Fallow/knip-style analyzers for other ecosystems.
 
-**Status:** v0.1 — early, narrow, and honest about it. Tunable through a
-`deadwood.toml`, adoptable on an existing codebase through a baseline file, and
-correct without either. See
-[`docs/SCOPE.md`](docs/SCOPE.md) for what is in and out of scope,
-[`docs/HISTORY.md`](docs/HISTORY.md) for the phase-by-phase record of how it
-got here, and [`docs/ENVIRONMENT.md`](docs/ENVIRONMENT.md) for the environment
+**Status:** v1.0.0-beta.1 — the v1 check set is complete and the roadmap is
+empty; what stands between this and 1.0 is soak time on codebases that are not
+this one. Tunable through a `deadwood.toml`, adoptable on an existing codebase
+through a baseline file, and correct without either. See
+[`docs/SCOPE.md`](https://github.com/rlorenzo/deadwood/blob/main/docs/SCOPE.md)
+for what is in and out of scope,
+[`docs/HISTORY.md`](https://github.com/rlorenzo/deadwood/blob/main/docs/HISTORY.md)
+for the phase-by-phase record of how it got here, and
+[`docs/ENVIRONMENT.md`](https://github.com/rlorenzo/deadwood/blob/main/docs/ENVIRONMENT.md)
+for the environment
 assessment this project was bootstrapped from.
 
 ## What it detects today
@@ -217,10 +221,24 @@ on the bound name's behalf, so such a re-export stops keeping its target
 alive: the definition under it is reported alongside it, because deleting one
 does not delete the other.
 
+## Installation
+
+From crates.io:
+
+```console
+$ cargo install deadwood
+```
+
+Or straight from the repository:
+
+```console
+$ cargo install --locked --git https://github.com/rlorenzo/deadwood
+```
+
 ## Usage
 
 ```console
-$ cargo run -- check path/to/workspace
+$ deadwood check path/to/workspace
 Dead files:
   src/orphan.rs: not reachable from any target of package `simple` via `mod` declarations
 
@@ -331,7 +349,8 @@ deliberate:
   would be guessing. The two dependency kinds and `unsatisfiable_cfg` are out
   for the same reason; a manifest path moves only when a whole package does.
   That boundary was re-examined and kept, with the measurement in
-  [`docs/HISTORY.md`](docs/HISTORY.md) phase 17: the fix needs a signal *recorded*
+  [`docs/HISTORY.md`](https://github.com/rlorenzo/deadwood/blob/main/docs/HISTORY.md)
+  phase 17: the fix needs a signal *recorded*
   in the baseline, and that field would land on the one class of baseline that
   is portable across every Deadwood released — a file recording only dead files,
   dependency entries and gate sites carries no `module` and no `namespace`, so
