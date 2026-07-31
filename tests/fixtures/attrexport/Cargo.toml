@@ -1,0 +1,12 @@
+# Test fixture: an item handed to an attribute macro the analyzer cannot
+# expand (#74). `shim::host_fn` stands in for bun's `bun_jsc::host_fn`: the
+# macro may have written an `extern "C"` export beside `entry`, so `entry`
+# is not reported; the chain its body names stays alive by the opaque rule;
+# the inert-attributed and unattributed orphans still answer for themselves.
+# The empty [workspace] table keeps it out of any enclosing workspace.
+[package]
+name = "attrexport"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]

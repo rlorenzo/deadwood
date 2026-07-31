@@ -340,6 +340,28 @@ fn proc_macro_entry_points_are_never_unused() {
     );
 }
 
+/// An attribute macro the analyzer cannot expand may have written an export
+/// beside the item it holds — bun's `#[bun_jsc::host_fn]` emits an
+/// `extern "C"` shim, giving the item a caller outside Rust entirely — so
+/// the item is never reported, and what its body names stays alive
+/// ([#74]). The neighbours whose attributes rewrite nothing still answer
+/// for themselves.
+///
+/// [#74]: https://github.com/rlorenzo/deadwood/issues/74
+#[test]
+fn an_item_under_an_unexpandable_attribute_macro_is_never_unused() {
+    let analysis = analyze_fixture("attrexport");
+
+    assert_eq!(
+        reported(&analysis, FindingKind::UnusedPubItem),
+        vec![
+            ("src/lib.rs".to_string(), "inert_orphan"),
+            ("src/lib.rs".to_string(), "plain_orphan"),
+        ],
+        "`entry` may be exported by the macro and `helper`/`deeper` hang from its body; the orphans do not"
+    );
+}
+
 /// A dead subsystem comes out in one run, not one layer per run: `orphan` is
 /// named by nothing, so `helper` — which only `orphan` calls — is dead too,
 /// and so is `deeper` below that.
