@@ -889,6 +889,10 @@ mod tests {
     #[test]
     fn a_path_is_relative_to_a_root_spelled_through_a_symlink() {
         let scratch = std::env::temp_dir().join(format!("dw-relative-{}", std::process::id()));
+        // A panicked earlier run leaves the directory behind, and a leftover
+        // would fail the symlink below forever after; starting clean makes
+        // the test self-healing, which a drop guard alone would not.
+        let _ = std::fs::remove_dir_all(&scratch);
         let real = scratch.join("real");
         let link = scratch.join("link");
         std::fs::create_dir_all(&real).unwrap();
@@ -909,7 +913,7 @@ mod tests {
             canonical
         );
 
-        std::fs::remove_dir_all(&scratch).unwrap();
+        let _ = std::fs::remove_dir_all(&scratch);
     }
 
     /// Three places spell a finding kind — `--json`, `[severity]`, and a
