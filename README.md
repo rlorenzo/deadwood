@@ -746,6 +746,23 @@ toolchain is pinned to `stable` with `clippy` and `rustfmt` via
 - A dependency whose name is a common word (`log`, `time`, `bytes`) is kept
   alive by any mention of that word anywhere in the package, including in
   macro input and doc comments. Findings are lost, never invented.
+- A crate renamed by `extern crate real as alias;` or `use real as alias;` is
+  followed: every `alias::` in the crate that declares it counts for `real`, so
+  a package that renames one dependency to the name of another — `serde_json`
+  does exactly this — is not judged against the wrong entry. The rename is
+  scoped to the target that writes it, since a test target is a separate crate
+  that links the dev-dependencies directly.
+
+  The two spellings bind differently and are followed differently. Only an
+  `extern crate real as alias;` written at the **crate root** enters the extern
+  prelude, so only that one holds for every module of the crate. A `use real as
+  alias;`, or an `extern crate` at the top of a module file like `src/foo.rs`,
+  is an ordinary item binding in its own module, so it is followed within the
+  file that writes it and no further. A rename inside a nested `mod` is not
+  followed at all. Getting this wrong invents findings rather than
+  losing them: a crate that renames one dependency to a name another module
+  uses for real would have that second crate's mentions folded away, and the
+  entry reported unused.
 - A dependency declared to turn on a feature of a *transitive* dependency
   (`getrandom = { features = ["js"] }`), to select a vendored native library,
   or to force feature unification is named by no code and no `[features]`
