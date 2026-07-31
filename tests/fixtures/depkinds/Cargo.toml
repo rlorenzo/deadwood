@@ -30,6 +30,17 @@ stale_build_crate = "1"
 # justified by the library mention either way.
 doubled_features_crate = "1"
 stale_dev_copy_crate = "1"
+# Doubled below by a dev copy that asks for a feature this copy does not, and
+# *nothing dev names the crate* — the feature does the work. The copy is load
+# bearing the way a `[features]`-listed entry is: zed re-declares dependencies
+# under `[dev-dependencies]` solely to add their `test-support` feature, in
+# over a hundred manifests, and dev code rarely names the crate directly
+# (#61). Neither copy is a finding.
+loadbearing_dev_copy_crate = "1"
+# The other spelling of "enables more": this copy opts out of default
+# features and the dev copy below does not, so dev builds get the defaults
+# through it. Neither copy is a finding.
+defaults_off_crate = { version = "1", default-features = false }
 # Named only by `src/outline_tests.rs`, which is the body of a `#[cfg(test)]
 # mod` whose gate is written in `src/lib.rs`. Test code that happens to live in
 # its own file is still test code: the same finding as `test_only_crate`, in
@@ -202,12 +213,20 @@ builtin_attr_dev_crate = "1"
 # own and justifies it. Not a finding for either copy — reporting this one was
 # the invented finding #55 filed.
 doubled_features_crate = { version = "1", features = ["full"] }
-# Doubled like the entry above, but no dev code names the crate at all: a
-# stale duplicate of the `[dependencies]` entry that carries the real use. The
-# claim rests on the absence of dev mentions, which is this entry's own
-# evidence — a finding, exactly as the stale `[build-dependencies]` copy below
-# is one.
+# Doubled like the entry above, but no dev code names the crate at all *and*
+# the copy enables nothing the `[dependencies]` entry does not: a stale
+# duplicate of the entry that carries the real use. The claim rests on the
+# absence — of dev mentions and of anything this copy turns on — which is
+# this entry's own evidence, and it is worded as the duplicate it is rather
+# than as a move: a finding, exactly as the stale `[build-dependencies]` copy
+# below is one.
 stale_dev_copy_crate = "1"
+# The dev copies of the two load-bearing doublings above. No dev code names
+# either crate; what justifies each copy is what it enables — the feature
+# here, the default features below — so reporting either would invent a
+# finding against a manifest that compiles.
+loadbearing_dev_copy_crate = { version = "1", features = ["extra"] }
+defaults_off_crate = "1"
 
 [build-dependencies]
 # Named by `build.rs`, the only target that can use a build-dependency.

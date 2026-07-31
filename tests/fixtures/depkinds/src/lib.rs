@@ -239,12 +239,16 @@ fn inlines_a_thing() {
     builtin_attr_dev_crate::assert_ok();
 }
 
-// The two doubled crates, named by the library. Both of these mentions are
+// The four doubled crates, named by the library. All of these mentions are
 // the `[dependencies]` copies' evidence: for `doubled_features_crate` the dev
-// copy has `tests/it.rs`'s mention of its own, and for `stale_dev_copy_crate`
-// the dev copy has nothing — which is what tells the deliberate redeclaration
-// from the stale one.
+// copy has `tests/it.rs`'s mention of its own, for `loadbearing_dev_copy_crate`
+// and `defaults_off_crate` the dev copy is justified by what it enables rather
+// than by any mention, and for `stale_dev_copy_crate` the dev copy has
+// neither — which is what tells the deliberate redeclarations from the stale
+// one.
 fn doubles_a_thing() {
     doubled_features_crate::helper();
     stale_dev_copy_crate::helper();
+    loadbearing_dev_copy_crate::helper();
+    defaults_off_crate::helper();
 }

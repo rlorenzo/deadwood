@@ -579,14 +579,30 @@ pub fn analyze_with(
                 severity: Severity::default(),
                 file: manifest.clone(),
                 line: None,
-                message: format!(
-                    "{} `{}` {}, so it belongs in `{}` rather than `{}`",
-                    dependency_noun(entry.declared),
-                    entry.name,
-                    misplacement_evidence(entry.declared, entry.belongs_in, &package.name),
-                    dependency_table(entry.belongs_in),
-                    dependency_table(entry.declared),
-                ),
+                // A duplicate is not a move: its real use already lives in
+                // the other table, and "belongs in `[dependencies]`" about an
+                // entry already declared there reads as a bug.
+                message: if entry.duplicate {
+                    format!(
+                        "{} `{}` duplicates the `{}` entry of package `{}` while enabling \
+                         nothing more, and no test, example or bench code references the crate, \
+                         so the `{}` copy is stale",
+                        dependency_noun(entry.declared),
+                        entry.name,
+                        dependency_table(entry.belongs_in),
+                        package.name,
+                        dependency_table(entry.declared),
+                    )
+                } else {
+                    format!(
+                        "{} `{}` {}, so it belongs in `{}` rather than `{}`",
+                        dependency_noun(entry.declared),
+                        entry.name,
+                        misplacement_evidence(entry.declared, entry.belongs_in, &package.name),
+                        dependency_table(entry.belongs_in),
+                        dependency_table(entry.declared),
+                    )
+                },
                 name: Some(entry.name),
                 module: None,
                 namespace: None,

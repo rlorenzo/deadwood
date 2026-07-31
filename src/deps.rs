@@ -224,10 +224,22 @@
 //! by crate name, so both entries read one set — and the runtime mentions
 //! that justify the `[dependencies]` copy must not be held against the dev
 //! copy, whose own evidence is the dev mentions
-//! ([#55](https://github.com/rlorenzo/deadwood/issues/55)). A doubled dev
-//! copy dev code names is therefore placed where it is; one nothing dev names
-//! is a stale duplicate, claimed on the absence — the same footing as a
-//! `[build-dependencies]` copy the build script never touches.
+//! ([#55](https://github.com/rlorenzo/deadwood/issues/55)) *and the entry's
+//! own declaration*: a dev copy that turns on a feature the `[dependencies]`
+//! copy does not — or default features it opted out of — is load bearing
+//! whether or not any dev code names the crate, the way a `[features]`-listed
+//! entry is; and one beside an `optional` normal copy is load bearing
+//! outright, since with the feature off it is the only declaration there is. zed re-declares dependencies under `[dev-dependencies]` solely
+//! to add their `test-support` feature, in over a hundred manifests, and its
+//! dev code rarely names the crate directly
+//! ([#61](https://github.com/rlorenzo/deadwood/issues/61)). A doubled dev
+//! copy dev code names is therefore placed where it is; one that enables more
+//! is load bearing however silent the tests are; and only one with neither is
+//! a stale duplicate, claimed on the absence — the same footing as a
+//! `[build-dependencies]` copy the build script never touches, and worded as
+//! a duplicate rather than as a move, since the move wording ("cannot link a
+//! dev-dependency") is false of a manifest whose `[dependencies]` copy links
+//! it.
 //!
 //! The second claim was refused from phase 5 to phase 20, and the reason was
 //! never the reasoning — it was that a mis-attribution of ours was the likelier
@@ -309,7 +321,7 @@ use syn::visit::Visit;
 
 use crate::cfg::{Gates, Site, TargetVerdict};
 use crate::config::DependencyAllowList;
-use crate::metadata::{DependencyKind, Package, Target};
+use crate::metadata::{Dependency, DependencyKind, Package, Target};
 use crate::modtree::ParsedFile;
 
 /// Why a package's reference set is incomplete, phrased for a warning.
@@ -800,8 +812,14 @@ pub struct MisplacedDependency {
     pub name: String,
     /// The table it is declared in.
     pub declared: DependencyKind,
-    /// The table the references say it belongs in.
+    /// The table the references say it belongs in. For a duplicate, the table
+    /// already holding the copy that carries the real use.
     pub belongs_in: DependencyKind,
+    /// Whether the claim is "this duplicates the `[dependencies]` entry"
+    /// rather than "this is in a table its references cannot see" — the
+    /// message says "remove" for one and "move" for the other, and conflating
+    /// them tells a compiling manifest it does not compile.
+    pub duplicate: bool,
 }
 
 /// Report the dependencies of `package` that are declared in a table no code
@@ -857,38 +875,107 @@ pub fn find_misplaced(
             .copied()
             .unwrap_or_default();
         // Whether `[dependencies]` also declares this crate, under any
-        // spelling and any target expression. What the doubled declaration
-        // changes is whose evidence a runtime mention is; `misplacement`
-        // documents the one claim it stops.
-        let doubled = dependency.dependency_kind() != DependencyKind::Normal
-            && package.dependencies.iter().any(|other| {
-                other.dependency_kind() == DependencyKind::Normal
-                    && other.crate_name() == crate_name
-            });
-        if let Some(belongs_in) = misplacement(dependency.dependency_kind(), found, doubled) {
-            misplaced.push(MisplacedDependency {
+        // spelling and any target expression — and what the doubled copy
+        // enables beyond it. What the doubled declaration changes is whose
+        // evidence a runtime mention is; `misplacement` documents the claims
+        // it stops.
+        let normal_copy = (dependency.dependency_kind() != DependencyKind::Normal)
+            .then(|| {
+                package.dependencies.iter().find(|other| {
+                    other.dependency_kind() == DependencyKind::Normal
+                        && other.crate_name() == crate_name
+                })
+            })
+            .flatten();
+        match misplacement(
+            dependency.dependency_kind(),
+            found,
+            doubled(dependency, normal_copy),
+        ) {
+            Some(Placement::MoveTo(belongs_in)) => misplaced.push(MisplacedDependency {
                 name: dependency.manifest_name().to_string(),
                 declared: dependency.dependency_kind(),
                 belongs_in,
-            });
+                duplicate: false,
+            }),
+            Some(Placement::StaleDuplicate) => misplaced.push(MisplacedDependency {
+                name: dependency.manifest_name().to_string(),
+                declared: dependency.dependency_kind(),
+                // A duplicate's real use already lives in `[dependencies]`;
+                // the field names that table so the two claims sort together,
+                // and the message says "remove" rather than "move".
+                belongs_in: DependencyKind::Normal,
+                duplicate: true,
+            }),
+            None => {}
         }
     }
     misplaced
 }
 
-/// The table `found` says an entry declared as `kind` belongs in, or `None`
-/// when the evidence does not support moving it.
+/// How a non-normal entry relates to a `[dependencies]` declaration of the
+/// same crate, when there is one.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Doubled {
+    /// `[dependencies]` does not declare the crate.
+    No,
+    /// The doubled copy turns on something the `[dependencies]` copy does not
+    /// — an extra feature, or default features that copy opted out of — so it
+    /// is load bearing for the builds that link it whether or not any code
+    /// names the crate. Cargo unifies features per build, and the union is
+    /// different with this entry than without it.
+    LoadBearing,
+    /// The doubled copy enables nothing the `[dependencies]` copy does not
+    /// already provide: every build that links it got the same crate, the
+    /// same features, either way.
+    Redundant,
+}
+
+/// Classify `entry` against the `[dependencies]` copy of the same crate.
+fn doubled(entry: &Dependency, normal_copy: Option<&Dependency>) -> Doubled {
+    let Some(normal) = normal_copy else {
+        return Doubled::No;
+    };
+    // An optional copy exists only when its feature is enabled, so it cannot
+    // make the doubled copy redundant: with the feature off, this entry is
+    // what provides the crate to the builds that link it at all.
+    if normal.optional {
+        return Doubled::LoadBearing;
+    }
+    let extra_feature = entry
+        .features
+        .iter()
+        .any(|feature| !normal.features.contains(feature));
+    let turns_defaults_on = entry.uses_default_features && !normal.uses_default_features;
+    if extra_feature || turns_defaults_on {
+        Doubled::LoadBearing
+    } else {
+        Doubled::Redundant
+    }
+}
+
+/// What the evidence supports claiming about an entry: a move to the table
+/// its references can see, or — for a doubled dev copy — that the copy is a
+/// stale duplicate of the `[dependencies]` entry.
+enum Placement {
+    MoveTo(DependencyKind),
+    StaleDuplicate,
+}
+
+/// The claim `found` supports about an entry declared as `kind`, or `None`
+/// when the evidence does not support one.
 ///
-/// `doubled` says `[dependencies]` also declares the same crate — Cargo
-/// allows it, and the usual reason is tests wanting extra features
-/// (`zerocopy-derive` declares `syn` twice this way). The context set is
+/// `doubled` says whether `[dependencies]` also declares the same crate —
+/// Cargo allows it, and the usual reason is tests wanting extra features
+/// (`zerocopy-derive` declares `syn` twice this way) — and whether the
+/// doubled copy enables anything that copy does not. The context set is
 /// keyed by crate name, so a doubled crate's two entries read one set, and
 /// what `doubled` decides is whose evidence a runtime mention in it is: the
 /// `[dependencies]` copy's, never the dev copy's.
 ///
 /// Every `None` here is deliberate; see the module docs for the reasoning
 /// behind each.
-fn misplacement(kind: DependencyKind, found: Contexts, doubled: bool) -> Option<DependencyKind> {
+fn misplacement(kind: DependencyKind, found: Contexts, doubled: Doubled) -> Option<Placement> {
     // Nothing names it: that is the unused-dependency check's question. And a
     // mention we could not attribute to a target proves a use without proving
     // where, which is exactly the evidence a placement claim needs.
@@ -898,7 +985,9 @@ fn misplacement(kind: DependencyKind, found: Contexts, doubled: bool) -> Option<
     match kind {
         // Test, example and bench code links `[dev-dependencies]`, so an entry
         // only they name costs every consumer of the crate a build for nothing.
-        DependencyKind::Normal if found == Contexts::DEV => Some(DependencyKind::Development),
+        DependencyKind::Normal if found == Contexts::DEV => {
+            Some(Placement::MoveTo(DependencyKind::Development))
+        }
         // The mirror, and the two are not mirror images in their evidence. The
         // arm above needs *every* mention to be dev code, because one library
         // mention justifies the entry where it is. This one needs only *one*
@@ -910,17 +999,26 @@ fn misplacement(kind: DependencyKind, found: Contexts, doubled: bool) -> Option<
         // Unless the crate is doubled: then the runtime mentions are the
         // `[dependencies]` copy's evidence and prove nothing about this entry,
         // and the manifest compiles — the invented finding
-        // [#55](https://github.com/rlorenzo/deadwood/issues/55) filed. The dev
-        // mentions are still this entry's own, so a doubled dev copy that dev
-        // code names is placed right where it is — while one no dev code
-        // names is a stale duplicate, and the claim survives on the absence:
-        // the same answer the build table's stale copy gets below.
-        DependencyKind::Development if found.contains(Contexts::RUNTIME) => {
-            if doubled && found.contains(Contexts::DEV) {
-                return None;
-            }
-            Some(DependencyKind::Normal)
-        }
+        // [#55](https://github.com/rlorenzo/deadwood/issues/55) filed. The
+        // dev copy's own evidence is what remains, and it has two kinds: the
+        // dev mentions, and the entry's own declaration. A copy dev code
+        // names is placed right where it is. A copy that turns on a feature
+        // the `[dependencies]` entry does not — zed re-declares a dependency
+        // under `[dev-dependencies]` solely to add its `test-support` feature
+        // for the tests, in over a hundred manifests
+        // ([#61](https://github.com/rlorenzo/deadwood/issues/61)) — is load
+        // bearing without being named, exactly as a `[features]`-listed entry
+        // is, and claiming it would invent a finding against a manifest that
+        // compiles. Only a copy with neither — nothing dev names it, and it
+        // enables nothing more — is a stale duplicate, claimed on the
+        // absence: the same answer the build table's stale copy gets below,
+        // and worded as the duplicate it is rather than as a move.
+        DependencyKind::Development if found.contains(Contexts::RUNTIME) => match doubled {
+            Doubled::No => Some(Placement::MoveTo(DependencyKind::Normal)),
+            Doubled::LoadBearing => None,
+            Doubled::Redundant if found.contains(Contexts::DEV) => None,
+            Doubled::Redundant => Some(Placement::StaleDuplicate),
+        },
         // The build script is the only thing that compiles against a
         // `[build-dependencies]` entry, so one it never names is in the wrong
         // table — and the code that does name it says which. `doubled` is
@@ -929,11 +1027,11 @@ fn misplacement(kind: DependencyKind, found: Contexts, doubled: bool) -> Option<
         // else declares the crate, and `depkinds` pins the doubled spelling
         // (`stale_build_crate`) as a finding.
         DependencyKind::Build if !found.contains(Contexts::BUILD_SCRIPT) => {
-            Some(if found.contains(Contexts::RUNTIME) {
+            Some(Placement::MoveTo(if found.contains(Contexts::RUNTIME) {
                 DependencyKind::Normal
             } else {
                 DependencyKind::Development
-            })
+            }))
         }
         _ => None,
     }
@@ -1369,6 +1467,8 @@ mod tests {
             kind: None,
             optional: false,
             target: None,
+            features: Vec::new(),
+            uses_default_features: true,
         }
     }
 
@@ -2083,6 +2183,97 @@ mod tests {
             misplaced(&manifest, &refs).0,
             vec![("doubled".to_string(), DependencyKind::Normal)],
             "the dev copy duplicates an entry the library already justifies"
+        );
+        // And it is claimed *as* a duplicate: the move wording would tell a
+        // compiling manifest it does not compile.
+        let mut warnings = Vec::new();
+        let found = find_misplaced(
+            &manifest,
+            &refs,
+            &DependencyAllowList::default(),
+            &Gates::new(&crate::cfg::Matrix::default(), &manifest),
+            &mut warnings,
+        );
+        assert!(found[0].duplicate);
+    }
+
+    /// The zed shape [#61] filed, over a hundred manifests strong there: the
+    /// dev copy re-declares the crate solely to turn a feature on for dev
+    /// builds (`clock = { workspace = true, features = ["test-support"] }`),
+    /// and no dev code names the crate — the feature does the work. The copy
+    /// is load bearing without being named, so claiming it would invent a
+    /// finding against a manifest that compiles.
+    ///
+    /// [#61]: https://github.com/rlorenzo/deadwood/issues/61
+    #[test]
+    fn a_doubled_dev_copy_with_an_extra_feature_is_load_bearing() {
+        let refs = references(&["pub fn go() { doubled::run(); }\n"]);
+        let dev = Dependency {
+            features: vec!["test-support".to_string()],
+            ..dev_dependency("doubled")
+        };
+        let manifest = package(vec![dependency("doubled"), dev]);
+        assert!(
+            misplaced(&manifest, &refs).0.is_empty(),
+            "the copy exists to turn `test-support` on for dev builds"
+        );
+    }
+
+    /// The other spelling of "enables more": the `[dependencies]` copy opts
+    /// out of default features and the dev copy does not, so dev builds get
+    /// the defaults through it.
+    #[test]
+    fn a_doubled_dev_copy_turning_default_features_on_is_load_bearing() {
+        let refs = references(&["pub fn go() { doubled::run(); }\n"]);
+        let normal = Dependency {
+            uses_default_features: false,
+            ..dependency("doubled")
+        };
+        let manifest = package(vec![normal, dev_dependency("doubled")]);
+        assert!(
+            misplaced(&manifest, &refs).0.is_empty(),
+            "the copy turns default features on for dev builds"
+        );
+    }
+
+    /// A normal copy that is `optional = true` exists only when its feature
+    /// is enabled, so the dev copy is what guarantees the crate to dev builds
+    /// at all — removing it as a "duplicate" breaks `cargo test` with the
+    /// feature off. Load bearing, not redundant.
+    #[test]
+    fn a_doubled_dev_copy_beside_an_optional_normal_copy_is_load_bearing() {
+        let refs = references(&["pub fn go() { doubled::run(); }\n"]);
+        let normal = Dependency {
+            optional: true,
+            ..dependency("doubled")
+        };
+        let manifest = package(vec![normal, dev_dependency("doubled")]);
+        assert!(
+            misplaced(&manifest, &refs).0.is_empty(),
+            "the dev copy provides the crate whenever the feature is off"
+        );
+    }
+
+    /// The boundary of load bearing: a dev copy asking for a feature the
+    /// `[dependencies]` copy already enables adds nothing — cargo unifies
+    /// features per build, and the union is the same with the copy or
+    /// without it. Still a stale duplicate.
+    #[test]
+    fn a_doubled_dev_copy_asking_for_no_more_is_still_a_stale_duplicate() {
+        let refs = references(&["pub fn go() { doubled::run(); }\n"]);
+        let normal = Dependency {
+            features: vec!["full".to_string(), "extra".to_string()],
+            ..dependency("doubled")
+        };
+        let dev = Dependency {
+            features: vec!["full".to_string()],
+            ..dev_dependency("doubled")
+        };
+        let manifest = package(vec![normal, dev]);
+        assert_eq!(
+            misplaced(&manifest, &refs).0,
+            vec![("doubled".to_string(), DependencyKind::Normal)],
+            "a subset of the normal copy's features enables nothing more"
         );
     }
 

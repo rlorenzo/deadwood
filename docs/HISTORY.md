@@ -2434,3 +2434,85 @@ elsewhere and stays absolute, exactly as before.
   one side. Two mutations, both caught.
 
 Closes [#53](https://github.com/rlorenzo/deadwood/issues/53).
+
+## Phase 27 — a doubled dev copy is judged on what it enables (shipped)
+
+Found running Deadwood across ten public workspaces to verify the beta: zed
+reported 121 misplaced dependencies, and every sampled one was the same
+manifest shape — a crate declared in `[dependencies]` *and* re-declared under
+`[dev-dependencies]` solely to add its `test-support` feature for the tests
+(`clock.workspace = true` beside
+`clock = { workspace = true, features = ["test-support"] }` in
+`crates/action_log/Cargo.toml`), with no dev code naming the crate directly.
+Each was reported as "referenced by the library, …, which cannot link a
+dev-dependency" — false on both counts, since the `[dependencies]` copy links
+it and the manifest compiles ([#61]).
+
+### The mechanism, which phase 25 half closed
+
+Phase 25 ([#55]) stopped runtime mentions from being held against the dev
+copy — when dev code also names the crate. What it left was the copy whose
+justification is not a mention at all: the entry's own declaration. Cargo
+unifies features per build, so a dev copy that turns on a feature the
+`[dependencies]` copy does not — or default features that copy opted out
+of — changes what dev builds get, whether or not any dev code spells the
+crate's name. That is the same footing as a `[features]`-listed entry: load
+bearing without being named.
+
+`misplacement` now takes a three-state answer in place of the doubled bool:
+not doubled (the move claim proceeds), load bearing (no claim — extra
+feature, defaults the normal copy declined, or a normal copy that is
+`optional` and so, with its feature off, is no declaration at all), or
+redundant (enables nothing more). A redundant copy dev code names is phase 25's answer,
+unchanged. A redundant copy nothing dev names keeps its finding, but the
+claim is reworded to the one that is true of it: it *duplicates* the
+`[dependencies]` entry and is stale — not "cannot link", which would tell a
+compiling manifest it does not compile. `MisplacedDependency` carries the
+distinction (`duplicate`), and the subset boundary is pinned: a dev copy
+asking for a feature the normal copy already enables adds nothing and stays
+a duplicate.
+
+The rejected alternative was dropping the stale-duplicate claim entirely
+once features entered the picture. Rejected because phase 25 placed that
+claim deliberately — an identical doubled copy nothing dev names is exactly
+as stale as the `[build-dependencies]` copy the build script never touches,
+and `depkinds` pins both — and because the wording, not the claim, was what
+was false.
+
+### What it found
+
+Measured against the ten-workspace sweep (the public corpus this beta was
+verified on; the local registry of earlier phases was not part of this run):
+
+- **zed: 121 → 79.** 42 findings gone — every load-bearing doubled copy: 37
+  justified by their feature lists, 5 more sitting beside `optional` normal
+  copies. 6 re-worded to the duplicate claim, which is defensible on its own
+  evidence (identical copies nothing dev names). The 73 that remain are a
+  different, un-doubled shape — dev-dependencies referenced from
+  feature-gated library code — and are out of this slice's scope.
+- **Micro-repros** (both spellings: `workspace = true` and plain versions):
+  the wording moves from "cannot link" to "duplicates … and is stale".
+- **Everything else unchanged**: ripgrep, regex, tokio, clap report identical
+  counts before and after.
+- **Mutation runs, 5/5 caught**: counting a feature subset as load bearing
+  (`a_doubled_dev_copy_asking_for_no_more_is_still_a_stale_duplicate`),
+  dropping the default-features prong
+  (`a_doubled_dev_copy_turning_default_features_on_is_load_bearing`),
+  treating load bearing as stale (that test and the extra-feature one),
+  dropping the duplicate marker
+  (`a_doubled_dev_copy_nothing_dev_names_is_a_stale_duplicate`, and the
+  wording pin in `tests/analyze.rs`), and dropping the optional-normal-copy
+  guard the review pass added
+  (`a_doubled_dev_copy_beside_an_optional_normal_copy_is_load_bearing`) —
+  an optional copy exists only when its feature is on, so the dev copy is
+  what provides the crate to dev builds at all.
+
+`Dependency` gained `features` and `uses_default_features` from `cargo
+metadata` to make the comparison at all; `depkinds` gained the two
+load-bearing spellings (`loadbearing_dev_copy_crate`, `defaults_off_crate`)
+as permanent pins beside the stale one.
+
+Closes [#61](https://github.com/rlorenzo/deadwood/issues/61).
+
+[#55]: https://github.com/rlorenzo/deadwood/issues/55
+[#61]: https://github.com/rlorenzo/deadwood/issues/61

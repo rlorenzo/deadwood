@@ -94,6 +94,22 @@ pub struct Dependency {
     /// `[target.'...'.dependencies]` table, if the entry came from one.
     #[serde(default)]
     pub target: Option<String>,
+    /// The features the entry asks for (`features = ["..."]`). What a doubled
+    /// declaration turns on beyond its `[dependencies]` copy is read from
+    /// here, so a dev copy that exists only for its feature list is not
+    /// mistaken for a stale duplicate.
+    #[serde(default)]
+    pub features: Vec<String>,
+    /// Whether the entry keeps the dependency's default features on. `cargo
+    /// metadata` reports the written value; the field defaults to `true`
+    /// exactly as the manifest key does.
+    #[serde(default = "default_features_default")]
+    pub uses_default_features: bool,
+}
+
+/// The default of `default-features`: on unless the manifest says otherwise.
+fn default_features_default() -> bool {
+    true
 }
 
 /// Which dependency table an entry came from.
