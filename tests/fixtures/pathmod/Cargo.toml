@@ -1,6 +1,8 @@
 # Test fixture: a module loaded via `#[path]` that declares its own child
-# module. The child must resolve in the stem-named directory of the `#[path]`
-# target, not the crate root.
+# module. A `#[path]` target owns its parent directory whatever it is named, so
+# the child resolves as a *sibling* of the target — `src/child.rs`, not
+# `src/renamed_file/child.rs`. Written the other way the crate does not
+# compile, which is how this layout was checked.
 [package]
 name = "pathmod"
 version = "0.1.0"

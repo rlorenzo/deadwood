@@ -2,10 +2,17 @@
 //! either side of an ungated one, all naming this file.
 //!
 //! The ungated declaration is what decides. This is library code however the
-//! other two are gated, and so is `shared_view/deeper.rs` below it — a file
-//! reached by one gated declaration and one ungated one must not be attributed
-//! to the tests, or the crates it names look like dev-dependencies while the
-//! library is genuinely using them.
+//! other two are gated, and so is `deeper.rs` below it — a file reached by one
+//! gated declaration and one ungated one must not be attributed to the tests,
+//! or the crates it names look like dev-dependencies while the library is
+//! genuinely using them.
+//!
+//! `deeper` sits at `src/deeper.rs`, a sibling of this file rather than a
+//! child of `src/shared_view/`: this file is loaded through `#[path]`, and a
+//! `#[path]` target owns its parent directory whatever it is named. The
+//! `include!` below keeps `src/shared_view/` because an `include!` path is
+//! relative to the file it is written in, which is the opposite rule and the
+//! reason both spellings appear here.
 
 mod deeper;
 

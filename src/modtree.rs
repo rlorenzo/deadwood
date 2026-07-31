@@ -193,10 +193,24 @@ pub struct ParsedFile {
 /// A file waiting to be loaded, with the context needed to place its items.
 struct Pending {
     path: PathBuf,
-    /// Whether the file owns its parent directory for child modules
-    /// (`lib.rs`/`mod.rs`, and every `include!` target) or nests them in a
-    /// stem-named directory.
+    /// Whether the file's child modules resolve from its parent directory
+    /// (`lib.rs`/`mod.rs`, every `include!` target, and every `#[path]`
+    /// target) or from a stem-named directory below it.
     is_mod_root: bool,
+    /// Whether the directory its children resolve from is the file's *alone*.
+    ///
+    /// True for a crate root, a `mod.rs`, and an ordinary `name.rs` — the
+    /// first two own the directory they sit in and the third owns `name/`, and
+    /// in every case nothing else puts children there. False for a `#[path]`
+    /// target and an `include!` target, which resolve their children from a
+    /// directory the file that declared them is already using.
+    ///
+    /// The distinction is only asked for when the file turns out not to be
+    /// part of the build: everything below a `mod.rs` leaves the build with
+    /// it, whereas sweeping the directory a `#[path]` target merely borrows
+    /// would take its live neighbours too — for `#[path = "body.rs"] mod
+    /// body;` in `src/lib.rs`, the whole crate.
+    owns_dir: bool,
     module: Vec<String>,
     /// Whether the declaration that queued this file — and every declaration
     /// above it — confines it to a test build.
@@ -267,6 +281,7 @@ pub fn resolve(
     let mut queue: Vec<Pending> = vec![Pending {
         path: root.to_path_buf(),
         is_mod_root: true,
+        owns_dir: true,
         module: Vec::new(),
         test_only: false,
         include_depth: 0,
@@ -283,6 +298,7 @@ pub fn resolve(
         while let Some(Pending {
             path,
             is_mod_root,
+            owns_dir,
             module,
             test_only,
             include_depth,
@@ -326,6 +342,7 @@ pub fn resolve(
                         &declaring,
                         Under {
                             base: &child_base(&path, is_mod_root),
+                            path_base: declaring.dir,
                             module: &file.module,
                             test_only: false,
                         },
@@ -373,7 +390,23 @@ pub fn resolve(
                 // and every module below it. Checked before the `mod` walk, or the
                 // children of a file that is not in this build would be queued.
                 if !gates.compiled(&ast.attrs) {
-                    resolved.excluded.extend(rs_files_under(&child_base));
+                    // `child_base` is where this file's children *resolve*
+                    // from, which is only what they leave with when the file
+                    // owns it. A `#[path]` target resolves them from a
+                    // directory it shares with whoever declared it, so
+                    // sweeping `child_base` there would exclude live
+                    // neighbours — and an excluded file is withheld from the
+                    // dependency check too, which turns a lost dead-file
+                    // finding into an invented unused-dependency one. Fall
+                    // back to the bounded stem-named directory, the same half
+                    // answer `exclude_subtree` settles for and for the same
+                    // reason.
+                    let leaves_with_it = if owns_dir {
+                        child_base.clone()
+                    } else {
+                        file_dir.join(path.file_stem().unwrap_or_default())
+                    };
+                    resolved.excluded.extend(rs_files_under(&leaves_with_it));
                     resolved.excluded.push(path);
                     continue;
                 }
@@ -389,6 +422,7 @@ pub fn resolve(
                     &declaring,
                     Under {
                         base: &child_base,
+                        path_base: declaring.dir,
                         module: &module,
                         test_only,
                     },
@@ -508,11 +542,29 @@ struct Declaring<'a> {
 }
 
 /// What the declarations of one file inherit from the ones above them: where
-/// their files are looked for, what module path their items land under, and
-/// whether they are already confined to a test build.
+/// their files are looked for, where their `#[path]` targets are resolved
+/// from, what module path their items land under, and whether they are
+/// already confined to a test build.
 #[derive(Clone, Copy)]
 struct Under<'a> {
     base: &'a Path,
+    /// Where a `#[path = "..."]` written at this level resolves from, which is
+    /// *not* `base` at the top level of a file and *is* `base` inside every
+    /// inline `mod` block.
+    ///
+    /// The reference splits the rule in two. A `#[path]` on a `mod` not inside
+    /// an inline block is relative to the directory the source file is in — so
+    /// `#[path = "b.rs"] mod b;` written in `src/a.rs` names `src/b.rs`, even
+    /// though `mod b;` without the attribute would name `src/a/b.rs`. Inside
+    /// an inline block it is relative to the directory that block's file-backed
+    /// children live in, inline components included: the same attribute inside
+    /// `mod inner { ... }` in `src/a.rs` names `src/a/inner/b.rs`, and in
+    /// `src/lib.rs` names `src/inner/b.rs`.
+    ///
+    /// `base` already tracks the second of those — it starts at
+    /// [`child_base`] and gains a component per inline block — so this field
+    /// only has to start at the declaring file's directory and then follow it.
+    path_base: &'a Path,
     module: &'a [String],
     test_only: bool,
 }
@@ -771,26 +823,39 @@ fn queue_speculative(
     // following a branch that does not hold costs nothing but a lost finding.
     let mut candidates = Vec::new();
     if let Some(explicit) = &declared.path_attr {
-        let target = site.dir.join(explicit);
-        if target.is_file() {
-            let owns_dir = target.file_name().is_some_and(|n| n == "mod.rs");
-            candidates.push((target, owns_dir));
+        // Two starting points, for the same reason the `cfg_attr` case above
+        // has two: under an inline prefix the rules resolve a `#[path]` from
+        // `base` (see `Under::path_base`), but these tokens may be spliced in
+        // somewhere the prefix does not survive, and probing the declaring
+        // file's directory as well only spares a file. When the prefix is
+        // empty the two are the same path and the second probe finds nothing
+        // new.
+        for start in [&base, &site.dir] {
+            let target = start.join(explicit);
+            if target.is_file() && !candidates.iter().any(|(had, _, _)| had == &target) {
+                // Resolves children from its parent directory whatever it is
+                // named, as in `collect_mod_decls`, and owns that directory
+                // only when it is literally a `mod.rs`.
+                let owns_dir = target.file_name().is_some_and(|n| n == "mod.rs");
+                candidates.push((target, true, owns_dir));
+            }
         }
     }
     let as_file = base.join(format!("{name}.rs"));
     let as_dir = base.join(name).join("mod.rs");
     if as_file.is_file() {
-        candidates.push((as_file, false));
+        candidates.push((as_file, false, true));
     } else if as_dir.is_file() {
-        candidates.push((as_dir, true));
+        candidates.push((as_dir, true, true));
     }
-    for (path, is_mod_root) in candidates {
+    for (path, is_mod_root, owns_dir) in candidates {
         let mut module = site.module.clone();
         module.extend(declared.prefix.iter().cloned());
         module.push(name.to_string());
         deferred.push(Pending {
             path,
             is_mod_root,
+            owns_dir,
             module,
             test_only: site.test_only,
             include_depth: site.include_depth,
@@ -924,7 +989,7 @@ fn collect_mod_decls(
         // A `mod` the configured matrix rules out is not part of this build:
         // neither it nor the files under it are read, and neither is dead.
         if !declaring.gates.compiled(&m.attrs) {
-            let named = path_attr(&m.attrs).map(|explicit| declaring.dir.join(explicit));
+            let named = path_attr(&m.attrs).map(|explicit| under.path_base.join(explicit));
             exclude_subtree(named.as_deref(), under.base, &name, walk.excluded);
             continue;
         }
@@ -934,13 +999,26 @@ fn collect_mod_decls(
             // Inline module: its own file-backed children live one directory
             // level deeper (`mod a { mod b; }` in lib.rs -> src/a/b.rs).
             Some((_, inner)) => {
-                let nested_base = under.base.join(&name);
+                // A `#[path]` on an inline `mod` names the directory its
+                // file-backed children live in, replacing the name-derived one
+                // — `#[path = "builtin"] mod builtins { mod ls; }` puts `ls` in
+                // `builtin/ls.rs`, not `builtins/ls.rs`. It is itself a
+                // `#[path]` written at this level, so it resolves from
+                // `path_base` like any other, which for an inline block at the
+                // top of `a.rs` is `a.rs`'s own directory and not `a/`.
+                let nested_base = match path_attr(&m.attrs) {
+                    Some(explicit) => under.path_base.join(explicit),
+                    None => under.base.join(&name),
+                };
                 walk.inline_mods.push((child_module.clone(), test_only));
                 collect_mod_decls(
                     inner,
                     declaring,
                     Under {
                         base: &nested_base,
+                        // Inside the block, `#[path]` and the stem-named
+                        // lookup agree on where to start: see `Under`.
+                        path_base: &nested_base,
                         module: &child_module,
                         test_only,
                     },
@@ -950,15 +1028,24 @@ fn collect_mod_decls(
             // External module: find the file it refers to.
             None => {
                 if let Some(explicit) = path_attr(&m.attrs) {
-                    let target = declaring.dir.join(explicit);
+                    let target = under.path_base.join(explicit);
                     if target.is_file() {
-                        // Only a file literally named `mod.rs` owns its parent
-                        // directory; any other `#[path]` target keeps the
-                        // stem-based rule for its own children.
+                        // A `#[path]` target owns its parent directory whatever
+                        // it is called — rustc treats every one of them as
+                        // though it were a `mod.rs`. So `#[path = "body.rs"]
+                        // mod body;` in `src/lib.rs` puts `mod child;` written
+                        // inside `body.rs` at `src/child.rs`, a *sibling*, and
+                        // not at `src/body/child.rs` the way an ordinary
+                        // `src/body.rs` would. Verified against rustc, which
+                        // rejects the stem-named spelling outright.
+                        // Children resolve from the parent directory either
+                        // way; only a target literally named `mod.rs` owns it,
+                        // rather than sharing it with the declaring file.
                         let owns_dir = target.file_name().is_some_and(|n| n == "mod.rs");
                         walk.queue.push(Pending {
                             path: target,
-                            is_mod_root: owns_dir,
+                            is_mod_root: true,
+                            owns_dir,
                             module: child_module,
                             test_only,
                             include_depth: declaring.include_depth,
@@ -979,6 +1066,7 @@ fn collect_mod_decls(
                     walk.queue.push(Pending {
                         path: as_file,
                         is_mod_root: false,
+                        owns_dir: true,
                         module: child_module,
                         test_only,
                         include_depth: declaring.include_depth,
@@ -987,6 +1075,7 @@ fn collect_mod_decls(
                     walk.queue.push(Pending {
                         path: as_dir,
                         is_mod_root: true,
+                        owns_dir: true,
                         module: child_module,
                         test_only,
                         include_depth: declaring.include_depth,
@@ -1052,6 +1141,7 @@ fn queue_include(
     walk.deferred.push(Pending {
         path: declaring.dir.join(literal),
         is_mod_root: true,
+        owns_dir: false,
         module: under.module.to_vec(),
         // A macro invocation is `Site::Other`: rustc warns about `#[test]`
         // written on one and compiles the spliced code anyway, so a test
@@ -1083,10 +1173,27 @@ fn exclude_subtree(
     let (file, directory) = match named {
         Some(target) => {
             let parent = target.parent().unwrap_or(Path::new(""));
-            // The same rule `collect_mod_decls` follows when it queues one:
-            // only a file literally named `mod.rs` owns its parent directory
-            // for children, so `#[path = "sub/mod.rs"]` nests them in `sub/`
-            // and every other target nests them in a stem-named directory.
+            // Where the children *resolve* from is `parent` for every
+            // `#[path]` target, but what leaves the build with this module is
+            // only the directory it owns — the `Pending::owns_dir` split.
+            //
+            // A target literally named `mod.rs` owns `parent`, so `#[path =
+            // "sub/mod.rs"]` takes all of `sub/` with it. Any other target
+            // shares `parent` with the file that declared it, and sweeping it
+            // would exclude live neighbours: for `#[path = "body.rs"] mod
+            // body;` in `src/lib.rs`, the whole crate. That is not a
+            // conservative direction to err in either, because an excluded
+            // file is withheld from the dependency check as well as the
+            // dead-file one — over-reaching here would not merely lose a
+            // finding, it would invent an unused-dependency claim by hiding
+            // the mention that answers it.
+            //
+            // So the shared case falls back to the bounded stem-named
+            // directory the module would have owned had it been declared
+            // without the attribute. Siblings that only the excluded module
+            // declares are not covered by that and can still be reported dead
+            // — the one direction of this function that is not conservative,
+            // and the reason it is kept to gates that hold in no build at all.
             let directory = if target.file_name().is_some_and(|n| n == "mod.rs") {
                 parent.to_path_buf()
             } else {
@@ -1172,6 +1279,63 @@ mod tests {
         );
     }
 
+    /// Where a `#[path]` resolves from, for the three shapes a name-derived
+    /// guess gets wrong. Every layout the fixture uses is one rustc accepts
+    /// and every alternative spelling is one it rejects, so this is the rule
+    /// rather than a preference — see the fixture's manifest.
+    ///
+    /// Found by running the analyzer over bun's Rust tree, which spells its
+    /// modules this way about eight hundred times: resolution missed a hundred
+    /// and sixty files, and the unreachable-module warnings that produced took
+    /// the unused-pub check for the whole workspace down with them.
+    #[test]
+    fn a_path_attribute_resolves_from_the_inline_block_it_sits_in() {
+        let root =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/inlinepath/src/lib.rs");
+        let config = crate::config::Config::default();
+        let package = crate::cfg::tests_support::bare_package();
+        let gates = crate::cfg::Gates::new(config.cfg(), &package);
+        let mut warnings = Vec::new();
+        let resolved = resolve(&root, config.ignore(), &gates, &mut warnings);
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+
+        let src = root.parent().expect("the fixture root sits in `src/`");
+        let mut reached: Vec<String> = resolved
+            .files
+            .iter()
+            .map(|file| {
+                file.path
+                    .strip_prefix(src)
+                    .expect("every reached file is under `src/`")
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect();
+        reached.sort();
+        assert_eq!(
+            reached,
+            vec![
+                // A `#[path]` target owns the directory it sits in whatever it
+                // is called, so `body.rs` declares siblings.
+                "body.rs",
+                // `#[path = "builtin"]` renames the block's directory, and
+                // resolves from `src/` rather than from `src/builtins/`.
+                "builtin/Ls.rs",
+                // The stem-named lookup follows the renamed directory too.
+                "builtin/cat.rs",
+                "lib.rs",
+                // A renamed block inside a renamed block: each level resolves
+                // from the one above it.
+                "nested/printer/Tree.rs",
+                // No attribute on the block, so `#[path]` inside it resolves
+                // from `src/plain/`, not from `src/`.
+                "plain/Renamed.rs",
+                "sibling.rs",
+            ],
+            "a `#[path]` must resolve from the directory its own block nests in",
+        );
+    }
+
     /// Module paths come from the `mod` declarations that led to a file, not
     /// from its name: `#[path = "renamed_file.rs"] mod alias;` puts the file's
     /// items under `alias`, which is what paths in the crate spell.
@@ -1233,14 +1397,17 @@ mod tests {
                 // Declared by an ungated `mod crossfile;`, and named there so
                 // the crate-root rename in `lib.rs` does not reach it.
                 ("crossfile.rs".to_string(), false),
+                // The child of `shared_view.rs`, carrying no gate of its own.
+                // It sits beside its parent rather than under it because
+                // `shared_view.rs` is reached through `#[path]`, which resolves
+                // children from the directory the target sits in.
+                ("deeper.rs".to_string(), false),
                 ("lib.rs".to_string(), false),
                 // Its only declaration is `#[cfg(test)] mod outline_tests;`.
                 ("outline_tests.rs".to_string(), true),
                 // Reached by a declaration that does not confine it, among
                 // ones that do.
                 ("shared_view.rs".to_string(), false),
-                // And so is its child, which carries no gate of its own.
-                ("shared_view/deeper.rs".to_string(), false),
             ]
         );
 
@@ -1798,7 +1965,7 @@ mod tests {
             "the unconfined declaration lifts the file itself",
         );
         assert!(
-            !confinement(&resolved.files, "shared_view/deeper.rs"),
+            !confinement(&resolved.files, "src/deeper.rs"),
             "and the file it declares with `mod`",
         );
         assert!(
