@@ -843,16 +843,17 @@ pub fn find_misplaced(
         {
             continue;
         }
+        let crate_name = dependency.crate_name();
         // An entry the `[features]` table names is load bearing for a reason
         // that has no code and therefore no target — and `[features]` cannot
         // refer to a dev-dependency at all, so moving it would break the
         // feature that names it.
-        if named_by_features.contains(&dependency.crate_name()) {
+        if named_by_features.contains(&crate_name) {
             continue;
         }
         let found = references
             .names
-            .get(&dependency.crate_name())
+            .get(&crate_name)
             .copied()
             .unwrap_or_default();
         // Whether `[dependencies]` also declares this crate, under any
@@ -862,7 +863,7 @@ pub fn find_misplaced(
         let doubled = dependency.dependency_kind() != DependencyKind::Normal
             && package.dependencies.iter().any(|other| {
                 other.dependency_kind() == DependencyKind::Normal
-                    && other.crate_name() == dependency.crate_name()
+                    && other.crate_name() == crate_name
             });
         if let Some(belongs_in) = misplacement(dependency.dependency_kind(), found, doubled) {
             misplaced.push(MisplacedDependency {

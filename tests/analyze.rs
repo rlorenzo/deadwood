@@ -2091,7 +2091,7 @@ fn an_attribute_macro_in_a_dev_target_changes_nothing() {
 /// rests on the dev code's silence — this entry's own evidence — so it stays
 /// a finding, exactly as `stale_build_crate`'s build copy does.
 #[test]
-fn a_doubled_crate_moves_only_on_its_own_entrys_evidence() {
+fn a_doubled_crate_moves_only_on_the_evidence_of_its_own_entry() {
     let analysis = analyze_fixture("depkinds");
     let reported_names: Vec<&str> = reported(&analysis, FindingKind::MisplacedDependency)
         .into_iter()
