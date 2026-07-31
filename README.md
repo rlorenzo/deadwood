@@ -10,9 +10,12 @@ Fallow/knip-style analyzers for other ecosystems.
 empty; what stands between this and 1.0 is soak time on codebases that are not
 this one. Tunable through a `deadwood.toml`, adoptable on an existing codebase
 through a baseline file, and correct without either. See
-[`docs/SCOPE.md`](docs/SCOPE.md) for what is in and out of scope,
-[`docs/HISTORY.md`](docs/HISTORY.md) for the phase-by-phase record of how it
-got here, and [`docs/ENVIRONMENT.md`](docs/ENVIRONMENT.md) for the environment
+[`docs/SCOPE.md`](https://github.com/rlorenzo/deadwood/blob/main/docs/SCOPE.md)
+for what is in and out of scope,
+[`docs/HISTORY.md`](https://github.com/rlorenzo/deadwood/blob/main/docs/HISTORY.md)
+for the phase-by-phase record of how it got here, and
+[`docs/ENVIRONMENT.md`](https://github.com/rlorenzo/deadwood/blob/main/docs/ENVIRONMENT.md)
+for the environment
 assessment this project was bootstrapped from.
 
 ## What it detects today
@@ -346,7 +349,8 @@ deliberate:
   would be guessing. The two dependency kinds and `unsatisfiable_cfg` are out
   for the same reason; a manifest path moves only when a whole package does.
   That boundary was re-examined and kept, with the measurement in
-  [`docs/HISTORY.md`](docs/HISTORY.md) phase 17: the fix needs a signal *recorded*
+  [`docs/HISTORY.md`](https://github.com/rlorenzo/deadwood/blob/main/docs/HISTORY.md)
+  phase 17: the fix needs a signal *recorded*
   in the baseline, and that field would land on the one class of baseline that
   is portable across every Deadwood released — a file recording only dead files,
   dependency entries and gate sites carries no `module` and no `namespace`, so

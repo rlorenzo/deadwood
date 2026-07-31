@@ -2,8 +2,9 @@
 
 Notable changes per release. The full phase-by-phase record — every decision,
 its rejected alternatives, the corpus measurements and mutation runs behind it
-— lives in [`docs/HISTORY.md`](docs/HISTORY.md); this file is the short
-version, newest first.
+— lives in
+[`docs/HISTORY.md`](https://github.com/rlorenzo/deadwood/blob/main/docs/HISTORY.md);
+this file is the short version, newest first.
 
 ## 1.0.0-beta.1 — 2026-07-30
 
