@@ -1,11 +1,19 @@
 [package]
 name = "deadwood"
-version = "0.1.0"
+version = "1.0.0-beta.1"
 edition = "2024"
 rust-version = "1.94"
 description = "Codebase health analyzer for Rust workspaces: dead module files and unused public items"
 license = "MIT"
 repository = "https://github.com/rlorenzo/deadwood"
+readme = "README.md"
+keywords = ["dead-code", "unused", "lint", "cargo", "static-analysis"]
+categories = ["development-tools", "command-line-utilities"]
+# The packaged crate ships the tool, not the project. The fixture packages the
+# integration tests analyze are cut by `cargo package` regardless (each holds
+# its own Cargo.toml), which would ship `tests/analyze.rs` with nothing to
+# read — so the tests stay out, along with CI and the phase-history docs.
+include = ["/src", "/README.md", "/CHANGELOG.md", "/LICENSE"]
 
 [dependencies]
 anyhow = "1"
