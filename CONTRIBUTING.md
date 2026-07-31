@@ -1,7 +1,10 @@
 # Contributing to Deadwood
 
 Thanks for your interest. Deadwood is small and deliberate, and the process
-below is what keeps it that way.
+below is what keeps it that way. Participation is covered by the
+[code of conduct](CODE_OF_CONDUCT.md); questions and ideas are welcome in
+[GitHub issues](https://github.com/rlorenzo/deadwood/issues) — this is a
+spare-time project, so expect responses within days rather than hours.
 
 ## The quality gate
 
