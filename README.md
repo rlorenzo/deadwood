@@ -226,10 +226,11 @@ does not delete the other.
 
 ## Installation
 
-From crates.io:
+From crates.io — the package is `deadwood-rs` (the plain name belongs to an
+unrelated project), and the binary it installs is `deadwood`:
 
 ```console
-$ cargo install deadwood
+$ cargo install deadwood-rs
 ```
 
 Or straight from the repository:
@@ -909,6 +910,14 @@ toolchain is pinned to `stable` with `clippy` and `rustfmt` via
   *target*, because no finding carries one and one file can belong to several.
   Within a package every target's crate root is spelled `crate`, so two binaries
   or examples each defining `pub const X` at the root are one identity to it.
+
+## Getting help
+
+Questions, bug reports, and feature requests all go through
+[GitHub issues](https://github.com/rlorenzo/deadwood/issues) — for a bug, a
+small fixture package that reproduces it is the ideal shape (see
+[CONTRIBUTING.md](CONTRIBUTING.md)). Conduct in the project's spaces is
+covered by the [code of conduct](CODE_OF_CONDUCT.md).
 
 ## License
 

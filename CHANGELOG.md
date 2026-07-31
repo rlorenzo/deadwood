@@ -9,7 +9,9 @@ this file is the short version, newest first.
 ## 1.0.0-beta.1 — 2026-07-30
 
 First public pre-release. The v1 check set is complete; what stands between
-this and 1.0 is soak time on codebases that are not this one.
+this and 1.0 is soak time on codebases that are not this one. Published as
+the `deadwood-rs` package — the plain crates.io name belongs to an unrelated
+project — installing a binary named `deadwood`.
 
 ### Checks
 

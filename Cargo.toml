@@ -1,5 +1,8 @@
 [package]
-name = "deadwood"
+# `deadwood` on crates.io is an unrelated project, so the package publishes
+# as `deadwood-rs` — while the lib and the installed binary keep the name
+# everything here is written against.
+name = "deadwood-rs"
 version = "1.0.0-beta.1"
 edition = "2024"
 rust-version = "1.94"
@@ -14,6 +17,14 @@ categories = ["development-tools", "command-line-utilities"]
 # its own Cargo.toml), which would ship `tests/analyze.rs` with nothing to
 # read — so the tests stay out, along with CI and the phase-history docs.
 include = ["/src", "/README.md", "/CHANGELOG.md", "/LICENSE"]
+
+[lib]
+name = "deadwood"
+path = "src/lib.rs"
+
+[[bin]]
+name = "deadwood"
+path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
