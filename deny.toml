@@ -1,0 +1,21 @@
+# cargo-deny configuration — the supply-chain half of the quality gate,
+# run locally by scripts/check.sh and in CI by the `cargo deny` job.
+# Sections left unwritten keep cargo-deny's defaults on purpose:
+# advisories deny by default, unknown registries and git sources are
+# errors, and duplicate crate versions warn.
+
+[licenses]
+# The four licenses the current tree actually carries; a new one arriving
+# is a decision to make, not a default to inherit.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+]
+
+[bans]
+# Duplicate versions of one crate warn rather than fail: the dependency
+# ceiling is a tenet, but a transitive pair disagreeing about a patch
+# release is cargo's business, not a defect in this manifest.
+multiple-versions = "warn"

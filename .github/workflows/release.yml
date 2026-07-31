@@ -14,6 +14,37 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # The library API, checked against the previous release before anything
+  # ships: a change that needs a bigger version bump than the tag declares
+  # is reported here. Informational while the crate is pre-1.0 — a beta is
+  # allowed to break — and skipped loudly on the first release, which has
+  # nothing to compare against. Promote to a blocking `needs` of `build`
+  # at 1.0.
+  semver:
+    name: semver against previous release
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable branch, 2026-07-24
+        with:
+          toolchain: stable
+      - uses: taiki-e/install-action@6a1bd70eaac3c8bdf093356838d7ee09fda951cf # v2.85.5
+        with:
+          tool: cargo-semver-checks
+      - name: Check against the previous tag
+        run: |
+          prev=$(git tag -l 'v*' --sort=-v:refname | grep -vxF "$GITHUB_REF_NAME" | head -1)
+          if [ -z "$prev" ]; then
+            echo "no previous release tag; nothing to compare against"
+            exit 0
+          fi
+          cargo semver-checks check-release --baseline-rev "$prev"
+
   # Drafted first so a half-uploaded release is never public: the assets
   # land on the draft, and the last job flips it live only after every
   # target built.

@@ -20,8 +20,10 @@ reworking the core.
   the conservative bias and escape hatches carried over.)
 - Text + JSON reporting, CI-friendly exit codes (0 clean / 1 findings /
   2 error).
-- Quality gate: fmt + clippy `-D warnings` + tests, locally
-  (`scripts/check.sh`) and in CI.
+- Quality gate: fmt + clippy `-D warnings` + tests + cargo-deny, locally
+  (`scripts/check.sh`) and in CI; mutation testing on changed code
+  (`scripts/mutants.sh`, informational in CI) and a semver check against
+  the previous tag at release time.
 
 ## Shipped phases
 

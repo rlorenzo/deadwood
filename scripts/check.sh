@@ -24,4 +24,14 @@ RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links" cargo doc --no-deps --document
 
 echo "==> cargo test"
 cargo test --all-targets
+
+# Supply-chain gate, matching CI's cargo-deny job. Skipped loudly rather
+# than silently when the binary is absent: the CI job is the enforcement,
+# this is the faster local answer.
+if command -v cargo-deny > /dev/null; then
+  echo "==> cargo deny"
+  cargo deny check
+else
+  echo "==> cargo deny SKIPPED (cargo install cargo-deny to run it locally)"
+fi
 echo "==> OK"

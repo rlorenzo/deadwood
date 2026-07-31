@@ -52,3 +52,45 @@ jobs:
           RUSTDOCFLAGS: -D rustdoc::broken_intra_doc_links
       - name: Test
         run: cargo test --all-targets
+
+  # Supply-chain gate: RUSTSEC advisories, the license allowlist, duplicate
+  # versions and registry sources, per deny.toml. Socket reviews what a PR
+  # changes; this checks what the lockfile already holds, on every run, so
+  # an advisory published between PRs is caught by the next one.
+  deny:
+    name: cargo deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+
+  # Mutation testing on the changed code only: cargo-mutants rewrites each
+  # changed function in turn and expects some test to notice. A surviving
+  # mutant is a recall gap the review's hand-picked inversions missed — the
+  # automated form of the "recall by mutation" record every slice writes.
+  # Informational while its noise level is being learned: the job reports,
+  # the merge does not wait on it. The full crate holds ~960 mutants, which
+  # is why this runs on the diff, not the tree.
+  mutants:
+    name: mutants (changed code, informational)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    continue-on-error: true
+    steps:
+      # Full history: the three-dot diff below needs the merge base with the
+      # PR's target, which a depth-1 clone does not hold.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable branch, 2026-07-24
+        with:
+          toolchain: stable
+      - uses: taiki-e/install-action@6a1bd70eaac3c8bdf093356838d7ee09fda951cf # v2.85.5
+        with:
+          tool: cargo-mutants
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: Mutants in diff
+        run: |
+          git fetch --no-tags origin "$GITHUB_BASE_REF"
+          git diff FETCH_HEAD...HEAD > pr.diff
+          cargo mutants --in-diff pr.diff
