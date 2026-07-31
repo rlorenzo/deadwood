@@ -2286,3 +2286,57 @@ silent about a correctly-placed dev entry — and the battery confirmed it is
 the only test that can see the difference.
 
 Closes [#49](https://github.com/rlorenzo/deadwood/issues/49).
+
+## Phase 24 — the opaque guard's population, counted (shipped)
+
+[#50](https://github.com/rlorenzo/deadwood/issues/50) proposed relaxing the
+guard that stops a placement claim when any mention of the entry is opaque: an
+opaque mention would no longer suppress when the non-opaque part of the
+context set is decisive on its own. The issue set its own bar — re-measure
+after #48, and zero population is the argument for closing rather than
+building. This phase is the measurement, and it closed the issue. No code
+shipped.
+
+### What was measured
+
+`find_misplaced` was instrumented (scratch worktree, never committed) to
+report every entry whose context set carries `OPAQUE` and whose stripped set
+(`found & !OPAQUE`) would support a claim — exactly the population the
+relaxation would newly judge. Run over the canonical corpus and, because this
+environment's registry holds far more than the canonical 35, over all 330
+unpacked registry crates.
+
+- **Canonical corpus: zero real instances.** `serde_json`'s `serde` — the
+  entire real population when phase 22 counted — is gone, which is #48 doing
+  what it shipped to do. The one remaining entry is `depkinds`'
+  `doc_and_library_dev_crate`, the fixture pin that exists to hold the
+  guard's behaviour.
+- **Extended sweep: 29 blocked claims, and the vetted ones are all noise the
+  guard is correctly suppressing.** `rust-embed`'s `actix-web`, `axum`,
+  `rocket` and `tokio` are optional `[dependencies]` entries wired to
+  features — "belongs in `[dev-dependencies]`" would indict manifests that
+  are correct. `zerocopy-derive`'s `syn`, `schemars_derive`'s `syn` and
+  `bumpalo`'s `serde` are the same crate deliberately declared in both
+  tables, with extra features for the tests.
+
+### It was found by measuring, again
+
+That second class is not a missed finding but a mis-attribution: the context
+map is keyed by crate *name*, so the library mentions that justify the
+`[dependencies]` copy are also held against the `[dev-dependencies]` copy of
+the same crate. Reproduced against `main` at `9d3e2ab` with a clean two-file
+package — no opaque mention anywhere — and the invented finding appears:
+the dev copy is reported as belonging in `[dependencies]`, against a manifest
+that compiles. Every registry instance is masked by an incidental doc-comment
+or macro mention, which is precisely how #48 hid. Filed as
+[#55](https://github.com/rlorenzo/deadwood/issues/55), now first on the Next
+list; relaxing the guard before it is fixed would invent
+`zerocopy-derive`-shaped findings rather than recover missed ones.
+
+The recall #50 hoped to buy back — phase 21's check demoted four of
+Deadwood's own dependencies and the guard hid two — remains a synthetic
+experiment with no live-tree instance. If #55 ships, the population should be
+counted again before anyone builds the relaxation; this entry is the
+write-up for whoever does.
+
+Closes [#50](https://github.com/rlorenzo/deadwood/issues/50).
