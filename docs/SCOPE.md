@@ -2102,51 +2102,170 @@ checked the table names. Both have tests now.
 
 Closes [#42](https://github.com/rlorenzo/deadwood/issues/42).
 
+## Phase 22 — a crate is not always spelled like its entry (shipped)
+
+The dependency check matches a mention against a manifest entry by *spelling*.
+`extern crate real as alias;` breaks that: the rename binds `alias` for the
+crate that declares it, so every later `alias::` means `real` — and every one
+of them was being charged to whatever entry happened to be spelled `alias`.
+
+Until phase 21 that cost nothing visible. With #42's claim shipped it invents a
+`misplaced_dependency` against a manifest that compiles, which is the direction
+this project ranks above all others.
+
+### It was found by measuring, not by reading
+
+The phase began as a survey of what to do next, and the candidate on the list
+was relaxing the opaque guard
+([#50](https://github.com/rlorenzo/deadwood/issues/50)):
+it costs real findings, two of four in phase 21's own recall check. Measured
+corpus-wide, the guard blocks exactly **two** placement claims — one a
+`depkinds` fixture entry, and one `serde_json`'s `serde`.
+
+That second one turned out not to be a missed finding at all:
+
+```console
+$ grep -n "serde_core as serde" src/lib.rs
+382:extern crate serde_core as serde;
+```
+
+`serde_json` carries `serde_core` in `[dependencies]` and `serde` in
+`[dev-dependencies]`, and every `serde::` in its library is `serde_core`. The
+opaque guard was the only thing stopping phase 21 reporting it — unrelated doc
+comments mentioning `serde_bytes` and `serde_stacker`. Delete one of those doc
+comments and the false positive appears.
+
+So the candidate was disqualified by its own measurement — its entire real
+population was a bug it was accidentally masking — and the bug it was masking
+became this phase.
+
+### The decision that took two attempts
+
+**The fold is per target, not per package**, and getting that wrong is worse
+than not fixing anything. The first cut folded a package's aliases across all
+of its mentions, which is wrong for the same reason the rename is interesting:
+a test target is a *separate crate* that links the dev-dependencies directly,
+so `src/lib.rs` renaming `serde_core` to `serde` says nothing about what
+`tests/it.rs` means by `serde`. That version reported `serde_json`'s `serde` as
+an **unused dev-dependency** — a worse false positive than the one being fixed,
+on the same crate.
+
+It was caught by running the corpus, not by thinking harder; `main` reports
+nothing on `serde_json` and the first cut reported something, which was the
+whole of the signal.
+
+**Both spellings count.** `use real as alias;` binds a crate exactly as
+`extern crate real as alias;` does, and is the edition-2018 way to write it. It
+was very nearly left out — the `README.md` paragraph for this phase originally
+claimed the `use` form "costs a finding rather than inventing one", which a
+two-minute check disproved: it invents the same one. Written down before it was
+run, that sentence would have shipped as documentation of behaviour the code
+did not have.
+
+**Where it stops, which took a review comment to get right.** `use
+crate_name::Item as Alias;` renames an item, not a crate: the head of the path
+is still the crate. The scoping was the harder half. The first version folded a
+rename across the whole target for both spellings, and the write-up claimed
+that over-reach "loses a finding rather than inventing one" — which was
+untested and false. Two cases prove it: a `use` rename inside a nested `mod`,
+and one at a crate root whose alias is named in a submodule file. Both fold
+away mentions of a crate that is genuinely used, and both report that crate's
+entry as **unused**.
+
+So the rule follows what actually binds, and it took a second review comment to
+get the last of it right. `extern crate real as alias;` **at a crate root**
+enters the extern prelude and holds for the whole target — the `serde_json`
+case, where the rename is in `lib.rs` and the mentions are in `value/ser.rs`.
+The first version of this rule tested only that the item sat at the top of *a*
+file, which is also true of `src/foo.rs`, where `extern crate` is an ordinary
+item of module `foo` and binds no wider than a `use` does. That version folded
+a module file's rename across the whole target and reported a crate the root
+genuinely uses as unused: the same invented finding, one layer down.
+
+The crate root is now the test — `ParsedFile::module` is empty for exactly that
+file — and everything else is file-scoped: a `use` rename anywhere, and an
+`extern crate` rename outside the root. Neither counts inside a nested `mod`.
+
+### What it found
+
+- **Zero movement on real code.** 366 artefacts over the 61 targets against a
+  binary built from `main` at `8726ed7`. Two differ, both `depkinds`'s own
+  stdout and JSON, and the difference *is* the fix: `main` reports the invented
+  `aliased_crate` finding on the new fixture content and this does not. Nothing
+  moves in any of the 35 registry crates, nor in Deadwood itself.
+- **`serde_json` is byte-identical to `main`**, which is the case the per-target
+  fold exists for.
+
+**Recall by mutation: twelve inversions, all twelve caught by a named test.**
+Four of those twelve exist because two review comments on the pull request
+asked about alias scope, and building the cases they described showed the
+over-reach invented findings rather than losing them. The fixture grew four
+pairs for it — a `use` rename inside a `mod`, an `extern crate` rename inside
+one, a crate-root rename whose alias is named in a submodule file, and an
+`extern crate` rename at the top of a module file — and each pair is one crate
+that would be reported unused without the scoping.
+
+A ninth mutation was written and then deleted rather than defended: a guard
+skipping `extern crate real as real;` turned out to be an equivalent mutant —
+removing a key and re-inserting the same contexts under the same name leaves
+the map as it was — so the branch went, and the reasoning stayed as a doc
+comment. A branch no test can distinguish is not a branch worth keeping.
+
+Closes [#48](https://github.com/rlorenzo/deadwood/issues/48).
+
 ## Next (sequenced, one slice at a time)
 
-**Empty.** Every filed issue is closed: #37 and #39 shipped, #32 was measured
-and closed as working as intended, #44 shipped in phase 20, and #42 shipped in
-phase 21 — the claim it asked for, made on the measurement it asked for.
+Phase 21 left this list empty and recorded two limitations beside it rather
+than filing them. That was the wrong call in a small way that phase 22 made
+concrete: an unfiled limitation is one nobody is counting, and one of them
+turned out to be masking a live false positive. Both are filed now, with a
+third that phase 22 found while measuring them.
 
-That is a state to name rather than fill. The list has always been sequenced
-from filed issues, and inventing an entry to keep it non-empty would invert the
-rule the last five phases were decided by: a direction earns a slot by being
-measured, not by being available. Phase 17 ended in a close rather than a
-feature, and phase 21 ended by discarding the idea it was drafted around.
+1. **A function an unexpandable attribute macro confines is read as library
+   code** ([#49](https://github.com/rlorenzo/deadwood/issues/49)) — a finding
+   *invented* since phase 21: a `[dev-dependencies]` entry named only from a
+   `#[tokio::test] fn` is reported as belonging in `[dependencies]`, against a
+   manifest that compiles. Half the class is impossible rather than unobserved
+   (a macro crate declared only as a dev-dependency cannot resolve in library
+   code — `error[E0433]`, verified), which is what made phase 21's claim
+   shippable; what is left is a macro from a crate the library links anyway.
+   **No instance in the corpus**, so the decision is between making an
+   unexpandable attribute opaque — Deadwood already has that third state, and
+   the work is telling it from an inert helper attribute like `#[serde(...)]` —
+   and leaving the allowlist to it. First on the list because its direction is
+   the one the project ranks above all others.
 
-What would put something back on it, in the order this project has weighed these
-before:
+2. **One opaque mention stops an entry being placed**
+   ([#50](https://github.com/rlorenzo/deadwood/issues/50)) — a finding *missed*,
+   and the guard is doing more than the job it was written for: a word in a doc
+   comment suppresses a claim an unambiguous runtime mention would decide.
+   Phase 21's recall check lost two of four to it. It is second and it is
+   **blocked on remeasuring**: before phase 22 its entire real corpus population
+   was `serde_json`'s `serde`, which was
+   [#48](https://github.com/rlorenzo/deadwood/issues/48)
+   rather than a missed finding. With #48 closed the population needs counting
+   again, and zero would be the argument for closing this rather than building
+   it — the bar [#42](https://github.com/rlorenzo/deadwood/issues/42) set for
+   itself.
 
-1. **A finding invented.** Phase 15's tenet. This outranks the others whatever
-   its population — and phase 21 added the only shape in which
-   `misplaced_dependency` can now invent one (below), so the first candidate is
-   already known.
-2. **A finding missed, with a population.** Phase 20's `#[test]` gap
-   qualified on the first count and measured at zero on the second, which is
-   why it shipped as a correctness fix rather than opening a sequence.
-3. **A claim the docs make that the code does not.** Phase 18's spliced
-   `test_only`, phase 20's "the known mis-attribution is gone", and phase 21's
-   own over-broad statement of the attribute-macro residual were all found this
-   way, and none was on any list.
+No longer on this list: **a crate alias attributing mentions to the wrong
+entry** ([#48](https://github.com/rlorenzo/deadwood/issues/48)) — shipped in
+phase 22, and found by measuring #50 rather than by anything on this list;
+**a `[dev-dependencies]` entry the library names**
+([#42](https://github.com/rlorenzo/deadwood/issues/42)) — shipped in phase 21,
+sixteen phases after it was refused, once both known mis-attributions were
+closed; **`#[test]` confining an item to a test build**
+([#44](https://github.com/rlorenzo/deadwood/issues/44)) — shipped in phase 20;
+**a `use` alias claiming both namespaces**
+([#37](https://github.com/rlorenzo/deadwood/issues/37)) — shipped in phase 19;
+**following an `include!`-ed module tree**
+([#39](https://github.com/rlorenzo/deadwood/issues/39)) — shipped in phase 18;
+and **matching a moved dead file, or a moved package's entries**
+([#32](https://github.com/rlorenzo/deadwood/issues/32)) — measured in phase 17
+and closed as working as intended.
 
-Two limitations are recorded rather than filed, both from phase 21:
-
-- **The one shape that can invent a finding.** A `[dev-dependencies]` entry
-  named only from a function an attribute macro confines, where that macro's
-  crate is one the library links anyway — `#[tokio::test]` is the common
-  spelling, not the whole class — is now reported as belonging in
-  `[dependencies]` and should not be. The other half, where the macro's crate
-  is declared only as a dev-dependency, is impossible rather than unobserved
-  (the attribute would not resolve), which is what made the claim shippable;
-  this half is real. There is
-  no instance in the 35-crate corpus, `[dependencies]` in `deadwood.toml` is the
-  escape hatch, and it earns a slot when a corpus shows it costing someone a
-  false report.
-- **The opaque guard costs a finding.** One opaque mention anywhere stops an
-  entry being judged in either direction, even when an unambiguous runtime
-  mention would place it — which is why the recall check reports two of four.
-  Loosening it is a change to both directions at once and needs its own
-  measurement.
+Everything above is filed; the roadmap and the issue list say the same thing,
+so neither can quietly rot.
 
 ## Explicitly out of scope for now
 

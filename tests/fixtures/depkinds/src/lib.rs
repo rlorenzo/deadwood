@@ -6,6 +6,52 @@
 
 use shared_crate::Thing;
 
+// The `serde_json` shape, and the reason this fixture has two crates spelled
+// almost alike. The rename binds for this crate only, so every
+// `aliased_crate::` below is a mention of `renamed_core_crate` — not of the
+// `[dev-dependencies] aliased_crate` entry, which `tests/it.rs` names for
+// real. The declaration itself names `renamed_core_crate`, which is why the
+// unused check never calls that entry dead.
+extern crate renamed_core_crate as aliased_crate;
+
+// The edition-2018 spelling of the same thing, which binds a crate name just
+// as the line above does. `use real::item as alias;` would not: that renames
+// an item, and its head is still the crate.
+use use_renamed_crate as use_aliased_crate;
+
+// The boundary. This renames an *item*, not a crate: the head is still
+// `shared_crate`, and `cfg_test_crate` here is a type in this module rather
+// than a crate name. Treating it as a crate rename would fold the
+// dev-dependency of that name onto `shared_crate` and report it unused.
+use shared_crate::Thing as cfg_test_crate;
+
+// An alias inside a nested module binds inside it and nowhere else. The
+// mention below is `nested_renamed_crate`; the one at the crate root, further
+// down, is the `nested_alias_crate` dependency itself.
+mod nested_extern {
+    // The same scoping question through the other spelling.
+    extern crate nested_extern_renamed as nested_extern_alias;
+    fn f() {
+        nested_extern_alias::helper();
+    }
+}
+
+// A crate-root `use` rename binds in this module only. `src/crossfile.rs` is a
+// different module and sees the crate itself, so what it names is the
+// `crossfile_alias_crate` dependency and not this rename.
+use crossfile_renamed_crate as crossfile_alias_crate;
+mod crossfile;
+
+mod nested {
+    use nested_renamed_crate as nested_alias_crate;
+    // Private: what confines a mention is where it is written, not what it is
+    // visible to, and keeping this off the public surface keeps the fixture's
+    // findings to the dependency tables it is about.
+    fn f() {
+        nested_alias_crate::helper();
+    }
+}
+
 /// Builds a thing, on top of doc_and_library_dev_crate.
 ///
 /// That name in this sentence is an opaque mention, and the body below names
@@ -21,6 +67,15 @@ use shared_crate::Thing;
 /// ```
 pub fn build() -> Thing {
     stale_build_crate::helper();
+    // Reads as `aliased_crate` and means `renamed_core_crate`.
+    aliased_crate::helper();
+    use_aliased_crate::helper();
+    // Out here the alias above does not apply: this is the crate itself.
+    nested_alias_crate::helper();
+    nested_extern_alias::helper();
+    crossfile_alias_crate::helper();
+    // The crate root, where `src/crossfile.rs`'s rename does not reach.
+    modfile_alias_crate::helper();
     // Two `[dev-dependencies]` entries named by the library itself, which is a
     // build that cannot link them. The second is named by `tests/it.rs` too,
     // and is reported all the same: one runtime mention decides it.
