@@ -154,10 +154,15 @@ alternatives, corpus measurements and mutation runs written down in full in
 
 ## Next (sequenced, one slice at a time)
 
-Nothing is queued. The issue list is empty and this index says the same
-thing, which is the invariant this section exists to keep: the next slice
-starts by being *filed*, with its population measured, so that neither the
-roadmap nor the tracker can quietly rot.
+1. **Roots the reachability walk cannot see** — a workspace entered from
+   outside Rust (bun: a `staticlib` linked into C++, entered through
+   `#[no_mangle]` sites and ~800 macro-generated `extern "C"` shims) has no
+   Rust-visible chain above whole subsystems, so live items read as dead.
+   The direction wants deciding before the code: recognize an unexpandable
+   attribute macro as a possible export, an entry-point allowlist in
+   `deadwood.toml`, or a crate-type policy for what `pub` means in a
+   `staticlib`/`cdylib` — and five of the audited false positives sit behind
+   ordinary functions, not yet root-caused. #74, population measured there.
 
 The roadmap and the issue list say the same thing, so neither can quietly
 rot. What shipped is in the index above and in [`HISTORY.md`](HISTORY.md).

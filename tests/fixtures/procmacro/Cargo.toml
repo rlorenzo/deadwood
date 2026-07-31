@@ -1,0 +1,14 @@
+# Test fixture: a proc-macro crate whose entry points the compiler calls and
+# no written path ever names (#73). The registered names (`Linked`, `host_fn`,
+# `make_ident`) are deliberately spelled nowhere else in the fixture, so no
+# by-name conservatism rescues the functions; only the attributes can. The
+# empty [workspace] table keeps it out of any enclosing workspace.
+[package]
+name = "procmacro"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[lib]
+proc-macro = true
