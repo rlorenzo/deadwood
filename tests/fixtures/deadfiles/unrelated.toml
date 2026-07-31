@@ -13,5 +13,5 @@
 # the run it silenced would be the one where a developer deleted a dead file and
 # a different one appeared. Today both stand: the entry is stale and the finding
 # is reported, which is noise. That is the trade #32 asks to invert, and the
-# measurement in `docs/SCOPE.md` phase 17 is why it was not taken.
+# measurement in `docs/HISTORY.md` phase 17 is why it was not taken.
 baseline = "unrelated-baseline.json"

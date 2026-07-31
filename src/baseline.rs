@@ -123,7 +123,7 @@
 //!   name are recorded. `dead_file` has neither, so every dead file in the
 //!   corpus is structurally out of reach rather than excluded by a kind list
 //!   someone could extend — 46 of them, counting the corpus the way phase 18
-//!   of `docs/SCOPE.md` does. That number carried a qualifier until phase 18:
+//!   of `docs/HISTORY.md` does. That number carried a qualifier until phase 18:
 //!   `windows-sys` contributed 246 more, every one of them an `include!`-ed
 //!   file reported dead, and they had to be set aside by hand to say anything
 //!   about the population. They are gone rather than set aside now.
@@ -206,7 +206,7 @@
 //!   pruning drops entries and rewrites none ([`Baseline::without`]).
 //! - **And the failure it would trade away is the one this pass keeps.** Today
 //!   a move produces noise — the finding is reported at its new location, the
-//!   entry is named stale, and `docs/SCOPE.md` phase 17 has the two-command
+//!   entry is named stale, and `docs/HISTORY.md` phase 17 has the two-command
 //!   workaround. A rule that paired dead files would produce silence whenever
 //!   it was wrong, and `tests/fixtures/deadfiles/unrelated.toml` is what being
 //!   wrong looks like: a dead file deleted and an unrelated one added leave one
@@ -214,7 +214,7 @@
 //!
 //! The full design for a recorded content signal — what the field would hold,
 //! what it would have to decline on, and what it would still get wrong — is
-//! written down in `docs/SCOPE.md` phase 17 rather than dismissed in a line, so
+//! written down in `docs/HISTORY.md` phase 17 rather than dismissed in a line, so
 //! that a later phase with an argument of its own starts from a design instead
 //! of from this paragraph.
 //!
