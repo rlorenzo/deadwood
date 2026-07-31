@@ -228,7 +228,9 @@ pub fn load(path: &Path) -> Result<Metadata> {
 }
 
 /// The package's lib (or proc-macro) target name when it differs from the
-/// package name, both normalized to the underscore spelling code uses.
+/// package name — the key is the package name verbatim, dashes and all,
+/// because that is how a `Dependency` names its package; only the *value* is
+/// normalized to the underscore spelling code uses.
 fn renamed_lib(package: &str, targets: &[Target]) -> Option<(String, String)> {
     const LIB_KINDS: &[&str] = &["lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro"];
     let lib = targets.iter().find(|target| {
