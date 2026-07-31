@@ -112,23 +112,29 @@ alternatives, corpus measurements and mutation runs written down in full in
     worded as one rather than as a move. 42 invented findings in zed gone, 6
     more re-worded to the claim that is actually true of them. Closes #61.
 
+28. **A `mod` declaration inside a macro token stream is a claim** — read
+    without expanding the macro and used only to spare files: literal `mod`s
+    in invocation arguments (tokio's `cfg_fs!`) and in `macro_rules!` bodies
+    resolved at every invocation site (serde's `crate_root!`), and the
+    invocation idents of a macro whose rules say `mod $x`
+    (`supported_targets!`), probed under the rules' inline-module prefix.
+    Spared files take the `include!` boundary: not dead, not resolved. 794
+    dead-file findings across five workspaces gone — tokio 381 → 0, rust
+    417 → 10, serde 36 → 1, rustdesk 6 → 0 — with every other finding kind
+    byte-identical. Closes #60.
+
 ## Next (sequenced, one slice at a time)
 
 Filed from a sweep of ten public workspaces (ripgrep, regex, clap, serde,
 tokio, rust-lang/rust, deno, rustdesk, tauri, zed), each with its population
 measured in the issue:
 
-1. **A `mod` declaration inside a macro token stream is invisible** (#60) —
-   the largest false-positive source found anywhere: ~800 dead-file findings
-   across tokio (381), serde (36) and rust-lang/rust (~403) are live subtrees
-   declared through `cfg_fs!`-style wrappers, `crate_root!`, or
-   `supported_targets!`.
-2. **A reference that exists only for rustdoc invents dependency findings**
+1. **A reference that exists only for rustdoc invents dependency findings**
    (#63) — `cfg(doctest)` gates and doctest code blocks: nine findings across
    regex, tokio and clap.
-3. **A dependency named only by derive-expanded code is reported unused**
+2. **A dependency named only by derive-expanded code is reported unused**
    (#64) — the serde/serde_derive pair.
-4. **A dependency whose lib target name differs from its package name is
+3. **A dependency whose lib target name differs from its package name is
    reported unused** (#62) — deno's `md-5`/`rustls-webpki`; needs a decision
    on attempting full `cargo metadata` before the heuristic.
 

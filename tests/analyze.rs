@@ -4289,3 +4289,38 @@ fn a_baseline_written_before_aliases_resolved_still_matches() {
         stale_keys(&analysis)
     );
 }
+
+/// The module tree a macro token stream declares
+/// ([#60](https://github.com/rlorenzo/deadwood/issues/60)): tokio's 381
+/// dead-file findings were live subtrees behind `cfg_fs!`-style wrappers,
+/// serde's a tree written inside a `macro_rules!` body, `rustc_target`'s 330
+/// the idents of `supported_targets!`. The `macromods` fixture holds all
+/// three shapes; the files they declare are spared, and the genuinely dead
+/// file beside them is still the finding it always was.
+#[test]
+fn a_mod_declared_only_in_a_macro_token_stream_spares_its_file() {
+    let analysis = analyze_fixture("macromods");
+
+    let dead_files: Vec<&PathBuf> = analysis
+        .findings
+        .iter()
+        .filter(|f| f.kind == FindingKind::DeadFile)
+        .map(|f| &f.file)
+        .collect();
+    assert_eq!(
+        dead_files,
+        vec![&PathBuf::from("src/orphan.rs")],
+        "only the file no macro and no `mod` names is dead: {:?}",
+        analysis.findings
+    );
+
+    // The other half of the treatment: a macro-reached file is spared, but
+    // its items are not admitted to resolution — the module path the macro
+    // gives them is unknowable without expansion — so the `pub fn` in
+    // `wrapped.rs` that nothing references is not a finding either.
+    assert!(
+        reported(&analysis, FindingKind::UnusedPubItem).is_empty(),
+        "nothing in a macro-reached file becomes an item finding: {:?}",
+        analysis.findings
+    );
+}

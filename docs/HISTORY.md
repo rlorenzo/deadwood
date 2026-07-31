@@ -2516,3 +2516,103 @@ Closes [#61](https://github.com/rlorenzo/deadwood/issues/61).
 
 [#55]: https://github.com/rlorenzo/deadwood/issues/55
 [#61]: https://github.com/rlorenzo/deadwood/issues/61
+
+## Phase 28 — a `mod` declaration inside a macro token stream is a claim (shipped)
+
+The largest false-positive source ever measured against this tool: ~820
+dead-file findings across the ten-workspace sweep, ~794 of them live subtrees
+whose `mod` declarations sit where the parser cannot follow them — inside a
+macro. tokio wraps modules in `cfg_fs! { pub mod fs; }`-style wrappers (381
+findings, all false); serde writes its module tree inside a `crate_root!`
+macro body, `#[path]` attributes and all (36); `rustc_target` builds
+`mod $module;` from the 330 idents its `supported_targets!` invocation
+passes, and `rustc_mir_transform` declares its passes through
+`declare_passes!` (~403 between them); rustdesk had 6 more. The README had
+documented "macro-generated `mod` declarations are invisible" as a
+limitation — but the consequence lands in the direction the first tenet
+forbids, at a scale that made the check worthless on exactly the codebases
+most worth running it on ([#60]).
+
+### The mechanism: claims, spending themselves only on sparing
+
+Deadwood still expands nothing. What changed is that a macro token stream is
+now *scanned* ([`scan_token_mods`]): `mod` is a keyword and can be nothing
+else in any stream, so a `mod` in tokens is read as a claim that a module of
+that name may exist. A claim can be wrong in one direction only — the macro
+may discard it, rewrite it, or never run — so claims are spent only on
+sparing files from the dead-file check: a claim that names a real file
+queues it, a claim that names nothing is dropped silently (no
+unresolved-module warning: those skip a package's checks, and a speculative
+miss proves nothing).
+
+Three shapes are read:
+
+- **A literal `mod` in an invocation's arguments** (tokio), resolved at the
+  invocation site — including `mod name : Tokens;` shapes where only the
+  macro understands what follows the name (`declare_passes!`).
+- **A literal `mod` in a `macro_rules!` body** (serde), resolved at the
+  definition site and re-resolved at every invocation site, because
+  expansion happens there: serde defines `crate_root!` in one file and
+  invokes it from `serde/src/lib.rs` and `serde_core/src/lib.rs`, and the
+  `#[cfg_attr(docsrs, path = "core/de/mod.rs")]` attributes on its `mod`s
+  resolve against the invoking file. A `#[path]` read through `#[cfg_attr]`
+  is a claim on *two* files — the attribute's target where the condition
+  holds, the stem-named file everywhere else — and the condition is never
+  evaluated, so both are spared.
+- **The bare idents of an invocation whose macro's rules say `mod $x`**
+  (`supported_targets!`), probed under the inline-module prefix the rules
+  wrap the `mod $x` in — the 330 target idents resolve under `targets/`
+  because the macro body says `mod targets { $(mod $module;)+ }`.
+
+Definitions and invocations need not share a file, and the definition may be
+parsed after the invocation, so invocations are held unsettled and
+re-checked whenever the walk runs out of other work — the same drain point
+`include!` targets wait at. Everything queued this way lands in
+[`Resolved::spliced`] and inherits phase 18's boundary exactly: spared from
+the dead-file check, not admitted to item resolution. The module path a
+macro gives its items is unknowable without expansion, so admitting them
+would trade the dead-file false positive for invented `unused_pub_item`
+findings; keeping them out costs findings instead, which is the direction
+the tenet buys.
+
+The rejected alternative was requiring a macro to be *known* mod-emitting
+before reading literal `mod`s from its invocation arguments. Rejected
+because the claim stands on its own: `mod` cannot be an identifier, an
+argument the macro discards costs a lost finding rather than an invented
+one, and tokio's wrappers would otherwise need their definitions parsed
+first for no change in the answer.
+
+### What it found
+
+Measured against the ten-workspace public corpus:
+
+- **tokio: 381 → 0. rust-lang/rust: 417 → 10. serde: 36 → 1.
+  rustdesk: 6 → 0.** The ten that remain in rust are compiletest's
+  deliberately-undeclared test-auxiliary files and a handful of plausible
+  orphans; serde's one survivor (`serde/src/core/lib.rs`) is referenced by
+  nothing in the repository tree.
+- **Every other finding kind is byte-identical** across all ten workspaces,
+  which is the spliced boundary doing its job: no macro-reached file's items
+  entered resolution.
+- **Wall clock is unchanged** on the largest workspace (rust-lang/rust,
+  ~3.5s before and after).
+- **Mutation runs, 5/5 caught**: never queueing literal token-mods
+  (`a_mod_declared_inside_a_macro_invocation_spares_its_file`, the
+  trailing-tokens and cfg-attr tests), never matching emissions at
+  invocations (`a_macro_definitions_literal_mods_resolve_at_its_invocation_sites`,
+  the emitting-idents test), probing idents without the rules' prefix
+  (`an_emitting_macros_invocation_idents_are_probed_under_its_prefixes`),
+  reading every stream as mod-emitting
+  (`a_quiet_macros_idents_are_not_probed` — the boundary that keeps the scan
+  from gutting the check), and short-circuiting the stem fallback behind a
+  `#[path]` attribute
+  (`a_cfg_attr_path_mod_in_a_macro_body_spares_both_files`).
+
+The `macromods` fixture pins the three shapes end to end — files a macro
+declares are spared, `src/orphan.rs` beside them is still the finding it
+always was, and the unreferenced `pub fn` in a macro-reached file produces
+nothing.
+
+Closes [#60](https://github.com/rlorenzo/deadwood/issues/60).
+
+[#60]: https://github.com/rlorenzo/deadwood/issues/60
