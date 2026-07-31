@@ -4462,7 +4462,7 @@ fn dead_files_are_found_where_the_manifest_puts_the_crate_root() {
             "orphan.rs",
         ],
         "the walk follows the manifest, stops at a nested package, and leaves \
-         `tests/` alone: {:?}",
+         `tests/` and `benches/` alone: {:?}",
         analysis.findings
     );
 }

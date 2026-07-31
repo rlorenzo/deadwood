@@ -4583,6 +4583,92 @@ mod tests {
         );
     }
 
+    /// A qualified `impl crate::a::Wrapper` whose body spells a bare
+    /// `Wrapper` that a `use` binds to a *different* item is using that other
+    /// item: reading it as a self-reference would report a live item as dead,
+    /// which is why anything short of certainty in `bare_name_means` answers
+    /// no.
+    #[test]
+    fn a_bare_name_bound_to_another_item_is_not_a_self_reference() {
+        assert!(
+            unused_in_binary(&[
+                (
+                    "",
+                    "use b::Wrapper;\nmod a;\nmod b;\nimpl crate::a::Wrapper { fn m(&self) { let _ = Wrapper; } }\nfn main() { let _: crate::a::Wrapper; }\n"
+                ),
+                ("a", "pub struct Wrapper;"),
+                ("b", "pub struct Wrapper;"),
+            ])
+            .is_empty(),
+            "the bare `Wrapper` is `b`'s, and it is alive"
+        );
+    }
+
+    /// The other direction: a bare name that provably is the impl's own type
+    /// is the self-reference the rule exists for, and an impl is not a use
+    /// of its type — the type stays reported.
+    #[test]
+    fn a_bare_name_provably_the_impls_own_type_stays_a_self_reference() {
+        assert_eq!(
+            unused_in_binary(&[
+                (
+                    "",
+                    "use a::Gone;\nmod a;\nimpl crate::a::Gone { fn m(&self) { let _ = Gone; } }\nfn main() {}\n"
+                ),
+                ("a", "pub struct Gone;"),
+            ]),
+            vec!["Gone"],
+            "its own impl is `Gone`'s only mention"
+        );
+    }
+
+    /// The suppressed self-reference is not a reference at all: the type is
+    /// reported as *never named*, not as named-only-from-unreachable-code.
+    /// The two are different claims with different wordings, and the bare
+    /// `Gone` in its own impl must produce the first — counting it as a use
+    /// (a self-edge that keeps nothing alive) would produce the second.
+    #[test]
+    fn a_suppressed_self_reference_leaves_the_type_never_named() {
+        let crates = [CrateUnit {
+            names: Vec::new(),
+            test_code: false,
+            spliced: Vec::new(),
+            files: unit(&[
+                ("", "mod a;\nfn main() {}\n"),
+                (
+                    "a",
+                    "pub struct Gone;\nimpl crate::a::Gone { fn m(&self) { let _ = Gone; } }\n",
+                ),
+            ])
+            .files,
+        }];
+        let mut table = SymbolTable::build(&crates);
+        table.record_references(&crates);
+        let unused = table.unused_definitions(&PublicApi::default());
+        let gone = unused
+            .iter()
+            .find(|def| def.name == "Gone")
+            .expect("`Gone` is dead");
+        assert!(
+            !gone.only_from_unreached,
+            "its impl's bare `Gone` is itself, not a reference"
+        );
+    }
+
+    /// A qualified self type is not a bare head name: `impl <Keep as
+    /// Convert>::Out` names `Keep` and `Convert` in its qualifier, and both
+    /// are uses the ordinary type walk keeps.
+    #[test]
+    fn a_qualified_impl_self_type_keeps_its_qualifier_alive() {
+        assert_eq!(
+            unused_in_binary_root(
+                "pub struct Keep;\npub trait Convert { type Out; }\nimpl <Keep as Convert>::Out { fn f(&self) {} }\npub fn orphan() {}\n"
+            ),
+            vec!["orphan"],
+            "the qualifier's types are used; only `orphan` is not"
+        );
+    }
+
     /// The compiler is a proc-macro entry point's only caller: code spells
     /// the derive or attribute the function registers, never the function,
     /// so no resolved path in any workspace will ever name it — and deleting
