@@ -1,7 +1,7 @@
 [package]
-# `deadwood` on crates.io is an unrelated project, so the package publishes
-# as `deadwood-rs` — while the lib and the installed binary keep the name
-# everything here is written against.
+# `deadwood` on crates.io is an unrelated project, so the *package* is named
+# `deadwood-rs`; the library crate and the installed binary stay `deadwood`,
+# which is the name every doc and usage example is written against.
 name = "deadwood-rs"
 version = "1.0.0-beta.1"
 edition = "2024"

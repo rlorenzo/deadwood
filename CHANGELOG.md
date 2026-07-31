@@ -10,8 +10,8 @@ this file is the short version, newest first.
 
 First public pre-release. The v1 check set is complete; what stands between
 this and 1.0 is soak time on codebases that are not this one. Published as
-the `deadwood-rs` package — the plain crates.io name belongs to an unrelated
-project — installing a binary named `deadwood`.
+the `deadwood-rs` package, since the plain crates.io name belongs to an
+unrelated project; it installs a binary named `deadwood`.
 
 ### Checks
 

@@ -33,6 +33,65 @@ assessment this project was bootstrapped from.
 What each check reports can be tuned by a `deadwood.toml` — see
 [Configuration](#configuration).
 
+## Why Deadwood
+
+Every column of the table above has a story ending in deleted code, and no
+other Rust tool covers more than one of them. The dependency checkers check
+dependencies; `rustc`'s `dead_code` lint stops at `pub`, on the assumption
+that somebody outside the crate is calling it — an assumption that is simply
+false for the binary crates, internal workspace members, and
+`pub`-out-of-habit items where dead code actually accumulates. Deadwood asks
+one question of the whole workspace — *what would nobody miss?* — and
+answers it in one pass, without a build, without nightly, in seconds: the
+entire `rustc` workspace analyzes in about 3.5s.
+
+Three design choices are worth knowing before you run it:
+
+- **Reachability, not reference counting.** An item survives only when
+  something names it *and* that something is itself alive, so a dead
+  subsystem comes out in one run instead of one layer per run — and a pair of
+  mutually recursive functions nothing calls, invisible to any counter, comes
+  out at all.
+- **False negatives over false positives, enforced.** Anything Deadwood
+  cannot resolve — macro input, attribute strings, ambiguous paths — counts
+  as a use. Every claim class was measured against ten major workspaces
+  (rust-lang/rust, tokio, serde, zed, deno, ripgrep among them), and a claim
+  that misfired there became a filed issue, a fix, and a regression fixture
+  ([`docs/HISTORY.md`](https://github.com/rlorenzo/deadwood/blob/main/docs/HISTORY.md)
+  records each). A dead-code tool that cries wolf gets uninstalled; this one
+  is built, tested, and measured around not doing that.
+- **Adoptable on day one.** `--write-baseline` records the findings you
+  already have so CI fails only on new ones; per-kind severity and
+  allowlists tune the rest. You do not have to clean a backlog to start
+  keeping new dead code out.
+
+How it sits against the neighbours, honestly:
+
+| | Deadwood | cargo-machete | cargo-udeps | rustc `dead_code` | knip <sub>(JS/TS)</sub> | jscpd <sub>(many langs)</sub> |
+| --- | --- | --- | --- | --- | --- | --- |
+| Dead source files | ✓ | — | — | — | ✓ | — |
+| Unused `pub` items / re-exports | ✓ | — | — | private items only | ✓ (exports) | — |
+| Unused dependencies | ✓ | ✓ | ✓ | — | ✓ | — |
+| Misplaced dependencies (dev ↔ normal ↔ build) | ✓ | — | — | — | — | — |
+| Unsatisfiable `cfg` gates | ✓ | — | — | — | — | — |
+| Test-only `pub` items | ✓ *(opt-in)* | — | — | — | — | — |
+| Copy-paste duplication | — | — | — | — | — | ✓ |
+| Needs nightly / a full build | no / no | no / no | yes / yes | comes with the build | no | no |
+| Baseline for existing codebases | ✓ | — | — | — | — | — |
+
+The dashes in Deadwood's column are deliberate, not gaps. Duplication
+detection is [jscpd](https://jscpd.dev)'s craft and explicitly out of scope
+here until the dead-code core has earned its precision
+([`docs/SCOPE.md`](https://github.com/rlorenzo/deadwood/blob/main/docs/SCOPE.md));
+security advisories are [`cargo-audit`](https://crates.io/crates/cargo-audit)'s,
+license and ban policy [`cargo-deny`](https://crates.io/crates/cargo-deny)'s.
+And if unused dependencies are the only question you have,
+[`cargo-machete`](https://github.com/bnjbvr/cargo-machete) answers it in
+milliseconds — Deadwood earns its seconds when you want the other six columns
+answered in the same pass, by path resolution rather than pattern match, with
+a baseline to adopt it gradually. Deadwood also never rewrites your code:
+reporting only, until precision has been proven in the field.
+
 Usage is decided by *resolving paths*, not by counting identifiers: `use`
 declarations (renames, nested trees, `pub use`), qualified paths (`crate::`,
 `self::`, `super::`), and cross-crate paths between workspace members are
