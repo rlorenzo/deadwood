@@ -150,14 +150,91 @@ fn benches_a_thing() {
     bench_fn_crate::assert_ok();
 }
 
-// The boundary, in both shapes. Neither attribute confines a function, so both
-// of these mentions are library code and both entries are where they belong.
+// The boundary between a built-in attribute that confines (`#[test]`, above)
+// and one that does not: `#[should_panic]` on its own confines nothing, rustc
+// compiles the function into the library, and the mention is library code.
 #[should_panic]
 fn panics_on_a_thing() {
     should_panic_crate::assert_ok();
 }
 
+// An attribute macro Deadwood cannot expand, on a `[dependencies]` entry's
+// only mention. The item is the macro's input, so the mention is opaque: known
+// used, unknown where. The entry stays put either way — this pins that the
+// opacity does not invent a downgrade claim.
 #[harness::test]
 fn drives_a_thing() {
     proc_macro_test_crate::assert_ok();
+}
+
+// The `#[tokio::test]` shape issue #49 filed, split across two entries: the
+// macro's own crate is a `[dependencies]` entry plain library code names, and
+// the function it owns holds the only mention of a `[dev-dependencies]`
+// entry. Before the item was macro input, that mention read as library code
+// and the entry was reported as belonging in `[dependencies]` — against a
+// manifest that compiles. Private, like everything here that exists only to
+// place a mention: what confines a mention is where it is written, and this
+// keeps the fixture's findings to the dependency tables it is about.
+fn hosts_a_macro() {
+    attr_macro_host_crate::runtime();
+}
+
+#[attr_macro_host_crate::test]
+fn drives_an_async_thing() {
+    attr_macro_dev_crate::assert_ok();
+}
+
+// The single-segment spelling of the same thing. `imported_attr` is no
+// built-in attribute and there is no `#[derive]` here for it to be a helper
+// of, so on stable rustc it can only be an attribute macro in scope.
+use attr_macro_host_crate::imported_attr;
+
+#[imported_attr]
+fn drives_through_an_import() {
+    single_segment_attr_dev_crate::assert_ok();
+}
+
+// The spelling the built-in attribute expands to. rustc honours it — and a
+// proc macro can imitate it, which is why phase 20 refused to match it as
+// `#[test]`. Opaque closes the same gap from the other side.
+#[core::prelude::v1::test]
+fn drives_the_expanded_spelling() {
+    core_prelude_test_dev_crate::assert_ok();
+}
+
+// An attribute macro on an associated fn. `#[test]` could never confine one
+// (`Site::Other`), but macro ownership has no site: the `impl` member is the
+// macro's input all the same.
+struct Instrumented;
+
+impl Instrumented {
+    #[attr_macro_host_crate::instrument]
+    fn measures_a_thing(&self) {
+        attr_macro_impl_dev_crate::assert_ok();
+    }
+}
+
+// A derive helper attribute is not an attribute macro, however unknown its
+// name: it belongs to the `#[derive]` beside it and rewrites nothing. The
+// field type is a library mention of a `[dev-dependencies]` entry, and it must
+// stay one — sweeping helpers into opacity would silence the finding.
+#[derive(FakeSerialize)]
+#[fake_helper(compact)]
+struct Configured {
+    #[fake_helper(rename = "w")]
+    widget: helper_attr_dev_crate::Widget,
+}
+
+// A tool attribute is metadata for the tool whose namespace it names, never a
+// macro. The corpus spells `#[rustfmt::skip]` freely in library code, so this
+// staying attributable is what keeps the check's recall there.
+#[rustfmt::skip]
+fn formats_a_thing() {
+    tool_attr_dev_crate::assert_ok();
+}
+
+// A built-in attribute rewrites nothing, whatever it does to codegen.
+#[inline]
+fn inlines_a_thing() {
+    builtin_attr_dev_crate::assert_ok();
 }

@@ -79,9 +79,20 @@ bench_fn_crate = "1"
 should_panic_crate = "1"
 # Named only from a function carrying `#[harness::test]`, an attribute macro
 # Deadwood cannot expand. Guessing from the name of one is a guess in both
-# directions, so the mention stays library code and the entry stays put: not a
-# finding.
+# directions, so the item is macro input and the mention is opaque — which
+# keeps the entry alive and unjudged, so it stays put: not a finding.
 proc_macro_test_crate = "1"
+# The crate an attribute macro is spelled through, in the role `tokio` plays:
+# plain library code names it, and so do the `#[attr_macro_host_crate::..]`
+# attribute paths below (path segments of an attribute are opaque mentions
+# besides). Named by the library, declared as a dependency: not a finding.
+attr_macro_host_crate = "1"
+# Named only from a `#[attr_macro_host_crate::test] fn` in `tests/it.rs`. A
+# test target is dev code however the macro rewrites its items — expansion
+# stays inside the crate being built — so opacity does not apply there, and
+# this entry costs every consumer a build for nothing exactly as
+# `test_only_crate` does: a finding.
+attr_macro_test_target_crate = "1"
 # Named only from a bare `#[test] fn` *inside* the `#[cfg(test)] mod tests`
 # below. The module already moves its whole subtree into the tests, so this
 # entry is reported exactly as it was before `#[test]` counted for anything —
@@ -139,6 +150,44 @@ aliased_crate = "1"
 # `tests/it.rs` — a separate crate the rename does not reach — names it for
 # real. Not a finding in either direction.
 use_aliased_crate = "1"
+# The manifest issue #49 filed. Named only from a
+# `#[attr_macro_host_crate::test] fn` in `src/lib.rs` — the `#[tokio::test]`
+# shape: the macro expands to the built-in `#[test]`, no build a consumer gets
+# compiles the function, and the manifest is correct. Deadwood cannot know
+# that, but it can know that it does not know: the item is macro input, the
+# mention is opaque, and no claim is made. Not a finding — before the shift it
+# was reported as belonging in `[dependencies]`, against a manifest that
+# compiles.
+attr_macro_dev_crate = "1"
+# The same through a single-segment attribute brought into scope with `use`:
+# `#[imported_attr]` is no built-in attribute and its item carries no
+# `#[derive]` for it to be a helper of, so on stable rustc it can only be an
+# attribute macro. Opaque: not a finding.
+single_segment_attr_dev_crate = "1"
+# The same through `#[core::prelude::v1::test]` — the spelling the built-in
+# attribute expands to, which rustc honours and a proc macro can imitate.
+# Nothing before expansion tells the two apart, so it is opaque like the
+# rest: not a finding.
+core_prelude_test_dev_crate = "1"
+# Named only from an associated fn carrying
+# `#[attr_macro_host_crate::instrument]` inside an `impl` block. A `#[test]`
+# cannot confine an associated fn (`Site::Other`), but macro ownership has no
+# site: the macro rewrites whatever item it sits on. Opaque: not a finding.
+attr_macro_impl_dev_crate = "1"
+# Named by a field type of a struct carrying `#[derive(FakeSerialize)]` and
+# `#[fake_helper(..)]`. A helper attribute belongs to its derive and rewrites
+# nothing, so it must not make the struct opaque — this entry is named by
+# library code the consumer compiles, and the manifest does not build: a
+# finding, belonging one table up.
+helper_attr_dev_crate = "1"
+# Named only from a `#[rustfmt::skip] fn`. A tool attribute is metadata for the
+# tool whose namespace it sits under, never a macro, and the corpus is full of
+# them — sweeping them into opacity would silence real findings. The library
+# names this entry: a finding.
+tool_attr_dev_crate = "1"
+# Named only from an `#[inline] fn`. A built-in attribute rewrites nothing, so
+# the mention is library code and this manifest does not compile: a finding.
+builtin_attr_dev_crate = "1"
 
 [build-dependencies]
 # Named by `build.rs`, the only target that can use a build-dependency.

@@ -13,3 +13,12 @@ fn builds_a_thing() {
     aliased_crate::assert_ok();
     use_aliased_crate::assert_ok();
 }
+
+// An attribute macro in a dev target changes nothing: whatever it leaves of
+// this function compiles into this test crate, so the mention below is dev
+// code however the macro rewrites it — and the `[dependencies]` entry it is
+// the only mention of is a finding, exactly as `test_only_crate` is.
+#[attr_macro_host_crate::test]
+fn drives_a_thing() {
+    attr_macro_test_target_crate::assert_ok();
+}

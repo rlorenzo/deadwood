@@ -159,11 +159,15 @@ Everything else stays quiet, by design:
   `#[cfg(test)]` is one way to write it and `#[test]`/`#[bench]` is the other:
   rustc leaves the function those sit on out of every build that is not a test
   build, so a bare `#[test] fn` at module scope is test code with no
-  `#[cfg(test)]` in sight. Only the built-in, single-segment attribute counts —
-  an attribute macro Deadwood cannot expand (`#[tokio::test]`, and the
-  `#[core::prelude::v1::test]` the built-in one is also spelled as) leaves a
-  mention attributed to the code it is written in, which costs a finding
-  rather than inventing one.
+  `#[cfg(test)]` in sight. Only the built-in, single-segment attribute counts
+  as confinement — an attribute macro Deadwood cannot expand
+  (`#[tokio::test]`, and the `#[core::prelude::v1::test]` the built-in one is
+  also spelled as) *owns* the item instead: the item is that macro's input,
+  what survives expansion and in which build is unknowable, so a runtime
+  item's mentions land in the opaque context — known used, unknown where —
+  and place nothing in either direction. Built-in attributes, tool attributes
+  (`#[rustfmt::skip]`) and derive helpers (`#[serde(..)]` beside its
+  `#[derive]`) rewrite nothing and leave their item attributed as written.
 - **A mention in a doc comment places nothing.** Doc examples are compiled as
   doctests, which link the normal *and* the dev dependencies, so a crate named
   in one is correctly declared under either table.
@@ -779,30 +783,33 @@ toolchain is pinned to `stable` with `clippy` and `rustfmt` via
   nothing at all — including after `#[test]` and `#[bench]` started counting as
   confinements, which moved mentions in two of those crates without moving a
   finding in any of them.
-- A function an attribute macro confines to a test build is read as library
-  code, because only the built-in `#[test]`/`#[bench]` is matched and a proc
-  macro cannot be expanded. `#[tokio::test]` really does confine its function;
-  an attribute macro merely *named* `test` need not; nothing before expansion
-  tells them apart, so neither counts. A `[dependencies]` entry named only from
-  such a function is not reported.
+- A runtime item an attribute macro owns is opaque, as of phase 23: the item
+  is the macro's input, and what survives expansion — the item verbatim, the
+  item confined to a test build the way `#[tokio::test]` confines it, or
+  nothing — is unknowable before expansion. That closed the one shape in which
+  the check invented a finding (a `[dev-dependencies]` entry named only from a
+  `#[tokio::test] fn` was reported as belonging in `[dependencies]`, against a
+  manifest that compiles), and it costs what opacity always costs: a
+  `[dependencies]` entry named only from such a function is not reported as
+  belonging in `[dev-dependencies]`, even when it does.
 
-  The gap is **half the size it looks**, and the half that is missing is
+  The cost is **half the size it looks**, and the half that is missing is
   impossible rather than merely unobserved. An attribute macro has to resolve
   in the build the item is compiled into, so `#[rstest]` in library code with
   `rstest` under `[dev-dependencies]` is not a case Deadwood mishandles — it is
   a case that does not compile (`error[E0433]`, verified). That rules out any
   test-macro crate declared *only* as a dev-dependency, which is where
-  `rstest`, `test-case`, `serial_test` and `proptest` are conventionally put —
-  though nothing in Cargo requires it, since the kind comes from the table and
-  the same crate listed under `[dependencies]` puts the case back in the
-  reachable half. What remains is a test-confining attribute macro from a crate
-  the library links anyway, `#[tokio::test]` being the common spelling rather
-  than the whole of it. Where such a function names a `[dev-dependencies]`
-  entry, that
-  entry is reported as belonging in `[dependencies]` and should not be — the
-  one shape in which the check invents a finding, with no instance in the
-  35-crate corpus, and `[dependencies]` in `deadwood.toml` is the escape
-  hatch.
+  `rstest`, `test-case`, `serial_test` and `proptest` are conventionally put.
+  What remains opaque is an attribute macro from a crate the manifest resolves
+  anyway, `#[tokio::test]` being the common spelling rather than the whole of
+  it. The boundary has one corner read the other way: an unknown
+  *single-segment* attribute sharing an item with a `#[derive(..)]` is
+  indistinguishable from that derive's helper (`#[serde(..)]` beside
+  `#[derive(Serialize)]`), is read as the inert helper it almost always is,
+  and leaves the item attributed as written — the multi-segment spelling stays
+  a macro, derive or no derive. A test-confining macro in the helper position
+  would still be read as library code; no such spelling has been seen (the
+  known test-confining macros sit on bare `fn`s).
 - A file that both a `#[cfg(test)]` `mod` declaration and one no gate confines
   to a test build reach is attributed to the second, so what it names is judged
   as library code. One file gets one answer, and this is the direction that

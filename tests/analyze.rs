@@ -1491,12 +1491,19 @@ fn dependencies_declared_in_the_wrong_table_are_reported() {
         // A normal entry only `tests/it.rs` names, one only `examples/demo.rs`
         // names — both link `[dev-dependencies]` — one only the out-of-line
         // body of a `#[cfg(test)] mod` names, three named only from a function
-        // a test attribute confines, and a build-dependency the build script
-        // never touches. Then the direction phase 21 added: two
-        // `[dev-dependencies]` entries the library itself names.
+        // a test attribute confines, one named only from a function an
+        // attribute macro owns *in a test target* (where the macro changes
+        // nothing), and a build-dependency the build script never touches.
+        // Then the direction phase 21 added: five `[dev-dependencies]` entries
+        // the library itself names — three of them from under attributes
+        // (built-in, tool, derive helper) that are not macros and so leave
+        // their item attributed as written.
         vec![
+            "attr_macro_test_target_crate",
             "bench_fn_crate",
+            "builtin_attr_dev_crate",
             "example_only_crate",
+            "helper_attr_dev_crate",
             "library_and_test_dev_crate",
             "library_named_dev_crate",
             "nested_test_fn_crate",
@@ -1504,6 +1511,7 @@ fn dependencies_declared_in_the_wrong_table_are_reported() {
             "stale_build_crate",
             "test_fn_crate",
             "test_only_crate",
+            "tool_attr_dev_crate",
         ],
         "{:?}",
         analysis.findings
@@ -1533,9 +1541,25 @@ fn dependencies_declared_in_the_wrong_table_are_reported() {
         "test_fn_dev_crate",
         // `#[should_panic]` on its own leaves the function in the library
         // build, and an attribute macro Deadwood cannot expand says nothing
-        // about where its function is compiled.
+        // about where its function is compiled: its item is macro input, so
+        // the mention is opaque and the entry is not judged.
         "should_panic_crate",
         "proc_macro_test_crate",
+        // The macro's own crate: named by plain library code, correctly
+        // declared as a dependency.
+        "attr_macro_host_crate",
+        // The invented finding #49 filed: a dev-dependency named only from a
+        // `#[attr_macro_host_crate::test] fn` in the library, a manifest that
+        // compiles because the macro expands to the built-in `#[test]`.
+        "attr_macro_dev_crate",
+        // The same through a single-segment attribute macro brought in by
+        // `use`, through the `#[core::prelude::v1::test]` spelling the
+        // built-in attribute expands to, and on an associated fn inside an
+        // `impl` block, where a `#[test]` could never confine but a macro
+        // still owns its item.
+        "single_segment_attr_dev_crate",
+        "core_prelude_test_dev_crate",
+        "attr_macro_impl_dev_crate",
         // A `[build-dependencies]` entry named only from a `#[test] fn` inside
         // `build.rs`. A build script has no test harness, so its test
         // functions are build-script code like the rest of the file.
@@ -1941,8 +1965,10 @@ fn a_dev_dependency_named_only_from_a_test_function_is_left_alone() {
 /// `--crate-type=lib` — and an attribute macro Deadwood cannot expand is a
 /// guess in both directions: `#[tokio::test]` really does confine, an attribute
 /// merely *named* `test` need not, and nothing before expansion tells them
-/// apart. So only the built-in, single-segment `test` and `bench` count, and
-/// everything else leaves a mention attributed exactly as it was.
+/// apart. So only the built-in, single-segment `test` and `bench` count as
+/// confinement — and the macro case is no longer read as library code either:
+/// its item is macro input, so the mention is opaque and the entry is not
+/// judged. Both entries stay unreported, one placed and one unjudged.
 ///
 /// [`crate::resolve`] matches the same two names the opposite way — on the last
 /// path segment, so `#[tokio::test]` is the test entry point it is — because
@@ -1962,6 +1988,89 @@ fn an_attribute_deadwood_cannot_expand_does_not_confine_a_dependency_to_the_test
             analysis.findings
         );
     }
+}
+
+/// The finding [#49](https://github.com/rlorenzo/deadwood/issues/49) filed as
+/// invented, in every spelling the fixture pins. A `#[tokio::test]`-shaped
+/// macro expands to the built-in `#[test]`, so a `[dev-dependencies]` entry
+/// named only from the function it owns is correctly declared — and phase 21's
+/// claim, reading that mention as library code, reported it as belonging in
+/// `[dependencies]` against a manifest that compiles. The item is macro input
+/// now: known used, unknown where, no claim in either direction.
+///
+/// The spellings: a multi-segment attribute path (`#[attr_macro_host_crate::
+/// test]`), a single-segment attribute brought into scope by `use` (no
+/// built-in of that name, no `#[derive]` to be a helper of), the
+/// `#[core::prelude::v1::test]` path the built-in attribute expands to, and a
+/// macro on an associated fn — where `#[test]` could never confine
+/// ([`Site::Other`]) but a macro still owns its item. The macro's own crate is
+/// also here: named by plain library code, placed by it, and not judged
+/// through its opaque attribute-path mentions.
+#[test]
+fn an_entry_named_only_under_an_attribute_macro_is_not_judged() {
+    let analysis = analyze_fixture("depkinds");
+    for entry in [
+        "attr_macro_dev_crate",
+        "single_segment_attr_dev_crate",
+        "core_prelude_test_dev_crate",
+        "attr_macro_impl_dev_crate",
+        "attr_macro_host_crate",
+    ] {
+        assert!(
+            !analysis
+                .findings
+                .iter()
+                .any(|f| f.name.as_deref() == Some(entry)),
+            "`{entry}` is under (or is) an attribute macro, which owns its item: {:?}",
+            analysis.findings
+        );
+    }
+}
+
+/// What must *not* be swept into that opacity: the attribute kinds that
+/// rewrite nothing. A built-in attribute (`#[inline]`), a tool attribute
+/// (`#[rustfmt::skip]` — the corpus's most common spelling), and a derive
+/// helper (`#[fake_helper(..)]` beside `#[derive(FakeSerialize)]`) all leave
+/// their item attributed as written, so a `[dev-dependencies]` entry each one
+/// names from library code is still the finding phase 21 made it.
+#[test]
+fn an_inert_attribute_leaves_its_item_attributed_as_written() {
+    let analysis = analyze_fixture("depkinds");
+    let reported_names: Vec<&str> = reported(&analysis, FindingKind::MisplacedDependency)
+        .into_iter()
+        .map(|(_, name)| name)
+        .collect();
+    for entry in [
+        "builtin_attr_dev_crate",
+        "tool_attr_dev_crate",
+        "helper_attr_dev_crate",
+    ] {
+        assert!(
+            reported_names.contains(&entry),
+            "`{entry}` is named by library code under an attribute that is not a macro: {:?}",
+            analysis.findings
+        );
+    }
+}
+
+/// The scope of the shift: runtime code only. Expansion happens inside one
+/// crate, so whatever a macro leaves of an item in a test target compiles into
+/// that same dev build — the attribution written there holds whatever the
+/// macro does, and a `[dependencies]` entry named only from a
+/// `#[attr_macro_host_crate::test] fn` in `tests/it.rs` is reported exactly as
+/// `test_only_crate` is.
+#[test]
+fn an_attribute_macro_in_a_dev_target_changes_nothing() {
+    let analysis = analyze_fixture("depkinds");
+    let reported_names: Vec<&str> = reported(&analysis, FindingKind::MisplacedDependency)
+        .into_iter()
+        .map(|(_, name)| name)
+        .collect();
+    assert!(
+        reported_names.contains(&"attr_macro_test_target_crate"),
+        "{:?}",
+        analysis.findings
+    );
 }
 
 /// The nested case, which the module already answered: a `#[cfg(test)] mod

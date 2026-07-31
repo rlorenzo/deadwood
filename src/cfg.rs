@@ -219,13 +219,139 @@ const TEST_BUILD_ATTRS: &[&str] = &["test", "bench"];
 /// `test` need not. `#[core::prelude::v1::test]` — which is what
 /// `#[tokio::test]` expands to, and which rustc does honour — is not matched
 /// either, because nothing distinguishes it from the proc-macro case before
-/// expansion. That costs a finding and cannot invent one.
+/// expansion. Neither refusal leaves the function's mentions attributed as
+/// library code any more: both spellings are an attribute macro to
+/// [`unexpandable_macro`], which hands the item to the opaque context instead
+/// of guessing ([#49](https://github.com/rlorenzo/deadwood/issues/49)).
 fn test_attribute(attrs: &[syn::Attribute]) -> bool {
     attrs.iter().any(|attr| {
         matches!(attr.meta, syn::Meta::Path(_))
             && TEST_BUILD_ATTRS
                 .iter()
                 .any(|name| attr.path().is_ident(name))
+    })
+}
+
+/// The attributes rustc itself defines, which are inert here: none of them is
+/// a macro, so none can rewrite the item it sits on or move it into another
+/// build. Taken from the Reference's built-in attributes index.
+///
+/// `unsafe` is on the list for the `#[unsafe(no_mangle)]` wrapper syntax,
+/// whose contents can only be built-in attributes.
+///
+/// A built-in attribute this list is missing is read as an attribute macro,
+/// which makes its item opaque — that costs a placement claim and cannot
+/// invent one, so a stabilization this list has not caught up with degrades in
+/// the direction the project prefers.
+const BUILT_IN_ATTRIBUTES: &[&str] = &[
+    "allow",
+    "automatically_derived",
+    "bench",
+    "cfg",
+    "cfg_attr",
+    "cold",
+    "collapse_debuginfo",
+    "coverage",
+    "crate_name",
+    "crate_type",
+    "debugger_visualizer",
+    "deny",
+    "deprecated",
+    "derive",
+    "doc",
+    "expect",
+    "export_name",
+    "feature",
+    "forbid",
+    "global_allocator",
+    "ignore",
+    "inline",
+    "instruction_set",
+    "link",
+    "link_name",
+    "link_ordinal",
+    "link_section",
+    "macro_export",
+    "macro_use",
+    "must_use",
+    "naked",
+    "no_builtins",
+    "no_implicit_prelude",
+    "no_link",
+    "no_main",
+    "no_mangle",
+    "no_std",
+    "non_exhaustive",
+    "panic_handler",
+    "path",
+    "proc_macro",
+    "proc_macro_attribute",
+    "proc_macro_derive",
+    "recursion_limit",
+    "repr",
+    "should_panic",
+    "target_feature",
+    "test",
+    "track_caller",
+    "type_length_limit",
+    "unsafe",
+    "used",
+    "warn",
+    "windows_subsystem",
+];
+
+/// The namespaces rustc reserves for external tools. An attribute under one —
+/// `#[rustfmt::skip]`, `#[clippy::cognitive_complexity]`,
+/// `#[diagnostic::on_unimplemented]` — is metadata for that tool, not a macro:
+/// the item is compiled exactly as written.
+const TOOL_NAMESPACES: &[&str] = &["clippy", "diagnostic", "rustfmt"];
+
+/// Whether `attrs` put their item in the hands of an attribute macro Deadwood
+/// cannot expand.
+///
+/// Such a macro receives the whole item as tokens and may emit anything in its
+/// place — the item verbatim, the item confined to a test build
+/// (`#[tokio::test]`), or nothing at all. What survives, and in which build,
+/// is unknowable before expansion, which is precisely what
+/// `crate::deps::Contexts::OPAQUE` exists to say; [`crate::deps`] moves the
+/// item's mentions there rather than reading them as the code they
+/// syntactically sit in.
+///
+/// What is *not* a macro is decided here, and each exclusion is an attribute
+/// kind that rewrites nothing:
+///
+/// - A single-segment attribute on the built-in list
+///   ([`BUILT_IN_ATTRIBUTES`]).
+/// - A path under a reserved tool namespace ([`TOOL_NAMESPACES`]).
+/// - A single-segment attribute on an item that also carries `#[derive(..)]`.
+///   A derive helper (`#[serde(rename_all = "..")]`) is only legal beside its
+///   derive, is inert, and its name is registered by a macro Deadwood cannot
+///   expand — so it cannot be told from an attribute macro by spelling. Reading
+///   it as a helper keeps a `#[derive]`-carrying struct's mentions placeable;
+///   the cost is an attribute macro sharing an item with a derive, which is
+///   read as a helper and leaves the item attributed as written.
+///
+/// Everything else is a macro: a multi-segment path that is not a tool's
+/// (`#[tokio::test]`, `#[core::prelude::v1::test]`), and a single-segment name
+/// that is not built in and has no derive to belong to (`#[rstest]` brought in
+/// by `use`) — on stable rustc that spelling cannot be anything but an
+/// attribute macro in scope.
+///
+/// An attribute reached through `cfg_attr` is not examined, for the reason
+/// [`test_attribute`] and [`eval_attrs`] do not follow that indirection — and
+/// here the refusal is also simply correct: in every build whose predicate
+/// does not hold, the item is compiled exactly as written, so its mentions are
+/// attributable to the code they sit in.
+pub(crate) fn unexpandable_macro(attrs: &[syn::Attribute]) -> bool {
+    let derived = attrs.iter().any(|attr| attr.path().is_ident("derive"));
+    attrs.iter().any(|attr| {
+        let path = attr.path();
+        if path.get_ident().is_some() {
+            !derived && !BUILT_IN_ATTRIBUTES.iter().any(|known| path.is_ident(known))
+        } else {
+            let head = &path.segments[0].ident;
+            !TOOL_NAMESPACES.iter().any(|tool| head == tool)
+        }
     })
 }
 
@@ -1149,10 +1275,10 @@ mod tests {
         }
     }
 
-    /// The boundary. Everything here confines nothing, and a mention inside it
-    /// stays attributed to the code it is written in — which for
-    /// [`crate::deps`] is the difference between a `[dependencies]` entry
-    /// reported as misplaced and one left alone.
+    /// The boundary. Everything here confines nothing — though the attribute
+    /// macros among them are not read as leaving their item attributed either:
+    /// [`unexpandable_macro`] answers that separately, and [`crate::deps`]
+    /// moves such an item's mentions to the opaque context.
     #[test]
     fn nothing_but_a_bare_test_or_bench_attribute_confines_an_item() {
         let matrix = Matrix::default();
@@ -1186,6 +1312,78 @@ mod tests {
         ] {
             assert!(!confined(&gates, source), "`{source}` confines nothing");
         }
+    }
+
+    /// Whether the first item of `source` is owned by an attribute macro.
+    fn owned_by_a_macro(source: &str) -> bool {
+        let file: syn::File = syn::parse_str(source).expect("fixture must parse");
+        unexpandable_macro(attrs_of(&file.items[0]))
+    }
+
+    /// What is an attribute macro: on stable rustc, every attribute that is
+    /// not built in, not a tool's, and not a derive helper can be nothing
+    /// else. Each spelling here is one an item could really carry.
+    #[test]
+    fn an_attribute_that_is_not_built_in_a_tools_or_a_helper_is_a_macro() {
+        for source in [
+            // The multi-segment path, in the spelling issue #49 filed.
+            "#[tokio::test]\nasync fn t() {}\n",
+            // The path the built-in attribute expands to, which nothing
+            // distinguishes from a proc macro before expansion.
+            "#[core::prelude::v1::test]\nfn t() {}\n",
+            // A single-segment attribute brought into scope by `use`: no
+            // built-in has this name and there is no derive to belong to.
+            "#[rstest]\nfn t() {}\n",
+            // Arguments change nothing about what the path names.
+            "#[serial_test::serial(alpha)]\nfn t() {}\n",
+            // On items a `#[test]` could never confine: ownership has no site.
+            "#[async_trait::async_trait]\nimpl S {}\n",
+            "#[wasm_bindgen]\nstruct S;\n",
+        ] {
+            assert!(owned_by_a_macro(source), "`{source}` is macro input");
+        }
+    }
+
+    /// What is not: the attribute kinds that rewrite nothing. Sweeping any of
+    /// these into opacity would make placeable mentions unplaceable — the
+    /// corpus's own `src/` trees carry `target_feature`, `deprecated` and
+    /// `rustfmt::skip`, and nothing else that is not a gate.
+    #[test]
+    fn built_in_tool_and_helper_attributes_are_not_macros() {
+        for source in [
+            // Built-in attributes, including the ones the corpus carries.
+            "#[inline]\nfn f() {}\n",
+            "#[deprecated]\nfn f() {}\n",
+            "#[target_feature(enable = \"avx2\")]\nunsafe fn f() {}\n",
+            "#[must_use]\nfn f() {}\n",
+            "#[test]\nfn t() {}\n",
+            "#[unsafe(no_mangle)]\nfn f() {}\n",
+            // Tool namespaces.
+            "#[rustfmt::skip]\nfn f() {}\n",
+            "#[clippy::cognitive_complexity = \"30\"]\nfn f() {}\n",
+            "#[diagnostic::on_unimplemented(message = \"no\")]\ntrait T {}\n",
+            // A derive helper: only legal beside its derive, and inert.
+            "#[derive(Serialize)]\n#[serde(rename_all = \"kebab-case\")]\nstruct S;\n",
+            // `cfg_attr` is an indirection this module does not follow — and
+            // needs not: in every build whose predicate fails, the item is
+            // compiled exactly as written.
+            "#[cfg_attr(test, tokio::test)]\nasync fn t() {}\n",
+            // No attributes at all.
+            "fn f() {}\n",
+        ] {
+            assert!(!owned_by_a_macro(source), "`{source}` rewrites nothing");
+        }
+    }
+
+    /// The helper exemption is scoped to the item carrying the derive: the
+    /// same unknown single-segment attribute with no derive beside it can only
+    /// be an attribute macro.
+    #[test]
+    fn an_unknown_attribute_is_only_a_helper_beside_a_derive() {
+        assert!(owned_by_a_macro("#[serde]\nstruct S;\n"));
+        assert!(!owned_by_a_macro(
+            "#[derive(Deserialize)]\n#[serde]\nstruct S;\n"
+        ));
     }
 
     /// An item compiled by no build at all is dead by construction, not test
