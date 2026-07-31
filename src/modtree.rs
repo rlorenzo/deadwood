@@ -941,12 +941,21 @@ fn queue_speculative(
     let mut candidates = Vec::new();
     if let Some(explicit) = &declared.path_attr {
         // Two starting points, for the same reason the `cfg_attr` case above
-        // has two: under an inline prefix the rules resolve a `#[path]` from
-        // `base` (see `Under::path_base`), but these tokens may be spliced in
-        // somewhere the prefix does not survive, and probing the declaring
-        // file's directory as well only spares a file. When the prefix is
-        // empty the two are the same path and the second probe finds nothing
-        // new.
+        // has two. `base` is where the rules resolve a `#[path]` from given
+        // the nesting the tokens show (see `Under::path_base`); `site.dir` is
+        // the declaring file's own directory, where one written outside every
+        // inline block resolves from. They are *not* alternatives that
+        // collapse when `declared.prefix` is empty — emptying the prefix
+        // leaves `base` at `site.base`, which is `child_base` plus whatever
+        // inline blocks the invocation itself sits in, and that equals
+        // `site.dir` only for an invocation written at the top level of a
+        // mod-rs file. A macro invoked at the top of `src/foo.rs` already has
+        // them a directory apart: `src/foo/` against `src/`.
+        //
+        // Which of the two the expansion lands under is not knowable without
+        // expanding it, so both are probed and every hit is queued. Neither
+        // may be dropped on the argument that the other covers it; a probe
+        // that names no file costs a `stat`, and one that hits spares a file.
         for start in [&base, &site.dir] {
             let target = start.join(explicit);
             if target.is_file() && !candidates.iter().any(|(had, _, _)| had == &target) {

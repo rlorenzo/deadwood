@@ -4444,6 +4444,14 @@ fn a_mod_declared_only_in_a_macro_token_stream_spares_its_file() {
         .filter(|f| f.kind == FindingKind::DeadFile)
         .map(|f| &f.file)
         .collect();
+    // Two of the fixture's files exist to hold `queue_speculative`'s pair of
+    // `#[path]` probe starting points apart, because the pair reads like a
+    // belt-and-braces duplicate and is not one. `via_base/inner/UnderBase.rs`
+    // is reached only from `base` — the invocation sits inside an inline
+    // `mod`, so the expansion resolves from `src/via_base/inner/` — and
+    // `BesideDeclarer.rs` only from the declaring file's own directory, where
+    // an invocation outside every inline block puts it. Written the other way
+    // round neither compiles. Dropping either probe leaves one of them here.
     assert_eq!(
         dead_files,
         vec![&PathBuf::from("src/orphan.rs")],

@@ -11,6 +11,12 @@ mod machinery;
 // `wrapper!` declares below.
 pub mod reached_from_macro_mod;
 
+// Two files a macro-declared `#[path]` reaches from the two different
+// directories the rules can put it in. Each is spared by one probe and not the
+// other, so dropping either probe turns one of them into a dead file.
+mod via_base;
+mod via_dir;
+
 // The tokio shape: a literal `mod` inside a macro invocation's arguments
 // (`cfg_fs! { pub mod fs; }`).
 wrapper! {
