@@ -165,10 +165,13 @@ impl Config {
         } else {
             analyzed.parent().unwrap_or(Path::new(".")).to_path_buf()
         };
-        // `cargo metadata` reports an absolute, symlink-resolved root, and the
-        // analyzed path is usually relative; without the same treatment the
-        // ancestor walk below would never recognize the root and would climb
-        // out of the workspace.
+        // The analyzed path is usually relative and may reach the workspace
+        // through a symlink; without canonicalizing both, the ancestor walk
+        // below would never recognize the root and would climb out of the
+        // workspace. `cargo metadata`'s own root is *not* reliably
+        // symlink-resolved (macOS keeps `/var` where the filesystem says
+        // `/private/var`), which is why displays that compare a config-derived
+        // path against it re-canonicalize — see `crate::relative_to`.
         let start = start.canonicalize().unwrap_or(start);
         let root = workspace_root
             .canonicalize()
