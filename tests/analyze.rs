@@ -744,6 +744,13 @@ fn unused_dependencies_are_reported_and_every_reference_channel_counts() {
     assert_eq!(
         reported(&analysis, FindingKind::UnusedDependency),
         vec![
+            // Named nowhere, and `lonely_derived` — mentioned, but not a
+            // proc-macro companion (`_derived` is no companion suffix) —
+            // spares it nothing (#64). The pair beside it pins the opposite:
+            // `widget` is absent from this list because `widget_derive` is
+            // declared and mentioned, and a derive's expansion names its
+            // base crate.
+            ("Cargo.toml".to_string(), "lonely"),
             // Optional, and named by nothing: judgeable since the default
             // matrix compiles every `#[cfg(feature = ...)]` branch.
             ("Cargo.toml".to_string(), "optional_crate"),

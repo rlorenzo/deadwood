@@ -1,8 +1,9 @@
 # Test fixture: unused dependency detection. Every entry here is named in
 # `src/lib.rs`, `build.rs` or `tests/it.rs` through a different channel —
 # plain paths, a rename, a re-export, `extern crate`, macro bodies, attribute
-# arguments and attribute strings, a doc example — except the three
-# `unused_*` entries, which are the only findings this fixture may produce.
+# arguments and attribute strings, a doc example — except the findings: the
+# three `unused_*` entries, the unnamed `optional_crate` and
+# `platform_crate`, and `lonely`, whose lookalike mention spares it nothing.
 #
 # The dependencies do not exist on any registry, and do not need to:
 # `cargo metadata --no-deps` never resolves them, and Deadwood never builds.
@@ -34,6 +35,18 @@ doc_example_crate = "1"
 readme_crate = "1"
 # Named only by the `[features]` table below, never by code.
 feature_only_crate = "1"
+# The serde/serde_derive pair (#64): never named by any source line, but the
+# `#[derive(FromWidget)]` in `src/lib.rs` is `widget_derive`'s macro, and by
+# the proc-macro convention its expansion names this crate
+# (`extern crate serde as _serde;` is serde's spelling of it). A mentioned
+# companion declared beside the entry keeps it alive: not a finding.
+widget = "1"
+widget_derive = "1"
+# The boundary: `lonely_derived` is no companion of `lonely` — `_derived` is
+# not a companion suffix — and nothing else names `lonely`, so the entry is
+# still the finding it always was.
+lonely = "1"
+lonely_derived = "1"
 # Named nowhere: the finding.
 unused_crate = "1"
 # Optional, and named by nothing: the default `cfg` matrix compiles every

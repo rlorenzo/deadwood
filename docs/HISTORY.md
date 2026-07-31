@@ -2684,3 +2684,50 @@ grow.
 Closes [#63](https://github.com/rlorenzo/deadwood/issues/63).
 
 [#63]: https://github.com/rlorenzo/deadwood/issues/63
+
+## Phase 30 — a derive's expansion names its base crate (shipped)
+
+tokio's `examples` package declares `serde`, `serde_derive` and `serde_json`;
+`tinyhttp.rs` uses `#[derive(Serialize)]` and `serde_json::to_string` and
+never spells `serde::` — and Deadwood reported `serde` unused. Removing it
+breaks the build: `#[derive(Serialize)]` is serde_derive's macro, but its
+expansion emits `extern crate serde as _serde;`, so the base crate must be
+declared however silent the source is about it ([#64]). cargo-machete
+special-cases the same pair for the same reason.
+
+### The rule, and both of its edges
+
+A mention of a declared proc-macro *companion* — a dependency whose crate
+name is the entry's plus `_derive`, `_macros` or `_impl` — now counts as
+evidence for the entry itself (`companion_mentioned`). Both qualifiers are
+load bearing:
+
+- **Declared beside it**: a stray `serde_derive` in the text of a package
+  that never declared it proves nothing about `serde`
+  (`a_companion_counts_only_when_declared_and_only_by_suffix`).
+- **By suffix, exactly**: `lonely_derived` is no companion of `lonely` —
+  the convention is a naming convention, and stretching it to prefixes would
+  quietly spare every `foo_*` beside a `foo`.
+
+The price runs the one permitted way: a genuinely stale base crate beside a
+live companion is missed, never invented, and the module docs and README
+carry the limitation.
+
+### What it found
+
+- **tokio: the `examples` `serde` finding gone**; `serde_derive` and
+  `serde_json` were already alive by their own mentions.
+- **Everything else byte-identical** across the ten workspaces — tauri's
+  bench crates keep their `serde` findings, correctly: they declare the pair
+  and use neither.
+- **Mutation runs, 3/3 caught**: the companion check dropped (both pair
+  tests), any prefix accepted as a companion (the suffix boundary), and the
+  declared-beside-it requirement dropped (the same test's other half).
+
+The `deps` fixture pins the pair (`widget`/`widget_derive`, spared through a
+`#[derive(FromWidget)]`) and the boundary (`lonely`/`lonely_derived`, still
+a finding).
+
+Closes [#64](https://github.com/rlorenzo/deadwood/issues/64).
+
+[#64]: https://github.com/rlorenzo/deadwood/issues/64

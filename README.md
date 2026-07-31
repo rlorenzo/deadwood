@@ -785,6 +785,12 @@ toolchain is pinned to `stable` with `clippy` and `rustfmt` via
 - A dependency whose name is a common word (`log`, `time`, `bytes`) is kept
   alive by any mention of that word anywhere in the package, including in
   macro input and doc comments. Findings are lost, never invented.
+- A dependency named only by the code a derive expands to is kept alive by
+  its companion: a mentioned `X_derive`, `X_macros` or `X_impl` declared
+  beside `X` counts as evidence for `X`, because the expansion names the base
+  crate (`#[derive(Serialize)]` emits `extern crate serde as _serde;`). The
+  price is the mirror image: a genuinely stale `X` beside a live companion is
+  missed, never invented.
 - A crate renamed by `extern crate real as alias;` or `use real as alias;` is
   followed: every `alias::` in the crate that declares it counts for `real`, so
   a package that renames one dependency to the name of another — `serde_json`
