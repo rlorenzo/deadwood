@@ -123,18 +123,24 @@ alternatives, corpus measurements and mutation runs written down in full in
     417 → 10, serde 36 → 1, rustdesk 6 → 0 — with every other finding kind
     byte-identical. Closes #60.
 
+29. **A reference that exists only for rustdoc claims nothing false** —
+    `doctest` rides the `test` axis, so `#[cfg(doctest)]` confines to a test
+    build the way `#[cfg(test)]` always has; an item gated to rustdoc's
+    doctest build has rustdoc as its consumer and is exempt from item
+    findings (`ReadmeDoctests`); and the text of a `#[doc = "..."]` attribute
+    inside a macro body is documentation, mined for mentions like any doc
+    comment. Ten invented findings gone across regex, clap, tokio and
+    rust-lang/rust. Closes #63.
+
 ## Next (sequenced, one slice at a time)
 
 Filed from a sweep of ten public workspaces (ripgrep, regex, clap, serde,
 tokio, rust-lang/rust, deno, rustdesk, tauri, zed), each with its population
 measured in the issue:
 
-1. **A reference that exists only for rustdoc invents dependency findings**
-   (#63) — `cfg(doctest)` gates and doctest code blocks: nine findings across
-   regex, tokio and clap.
-2. **A dependency named only by derive-expanded code is reported unused**
+1. **A dependency named only by derive-expanded code is reported unused**
    (#64) — the serde/serde_derive pair.
-3. **A dependency whose lib target name differs from its package name is
+2. **A dependency whose lib target name differs from its package name is
    reported unused** (#62) — deno's `md-5`/`rustls-webpki`; needs a decision
    on attempting full `cargo metadata` before the heuristic.
 

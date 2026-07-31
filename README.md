@@ -80,7 +80,10 @@ live item reported dead, so the set is deliberately generous: `fn main` and the
 build script, `#[test]` and `#[bench]` functions, the linker and compiler
 exports (`#[no_mangle]`, `#[export_name]`, `#[proc_macro*]`, `#[panic_handler]`
 and the rest, including the `#[unsafe(...)]` spelling), the `dead_code`
-opt-outs, everything `[public-api]` declares, **a library's public surface** —
+opt-outs, `#[cfg(doctest)]` items — rustdoc's doctest collection is their
+consumer, and the `pub struct ReadmeDoctests;` idiom is deliberately
+referenced by nothing — everything `[public-api]` declares, **a library's
+public surface** —
 every `pub` item under `pub` modules from the crate root, and everything a
 `pub use` re-exports from the crate root or from one of those modules, whether
 it is written as a glob (`pub use inner::*;`) or names a module outright

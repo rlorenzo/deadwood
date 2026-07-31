@@ -722,7 +722,14 @@ fn eval_attrs(attrs: &[syn::Attribute], world: &World<'_>) -> Truth {
 fn eval(meta: &syn::Meta, world: &World<'_>) -> Truth {
     match meta {
         syn::Meta::Path(path) => match single_ident(path).as_deref() {
-            Some("test") => {
+            // `doctest` rides the `test` axis: rustdoc's doctest collection
+            // is a dev-context build exactly as `cargo test` is — it links
+            // the dev-dependencies, and no build a consumer makes sets
+            // either cfg. Telling them apart buys nothing any check needs
+            // ([#63](https://github.com/rlorenzo/deadwood/issues/63));
+            // folding them means `#[cfg(doctest)]` confines to a test build
+            // the way `#[cfg(test)]` always has.
+            Some("test" | "doctest") => {
                 if world.test {
                     Truth::Either
                 } else {
@@ -1431,6 +1438,25 @@ mod tests {
         prune(&gates, &mut file);
         let kept: Vec<String> = file.items.iter().filter_map(item_name).collect();
         assert_eq!(kept, vec!["t".to_string(), "b".to_string()]);
+    }
+
+    /// `doctest` rides the `test` axis ([#63]): rustdoc's doctest collection
+    /// is a dev-context build exactly as `cargo test` is, so `#[cfg(doctest)]`
+    /// confines an item to a test build the way `#[cfg(test)]` always has —
+    /// and `#[cfg(not(doctest))]` is ordinary code, exactly as
+    /// `#[cfg(not(test))]` is.
+    ///
+    /// [#63]: https://github.com/rlorenzo/deadwood/issues/63
+    #[test]
+    fn a_cfg_doctest_gate_confines_like_cfg_test() {
+        let matrix = Matrix::default();
+        let manifest = package(&[("std", &[])], &[]);
+        let gates = Gates::new(&matrix, &manifest);
+        let file: syn::File =
+            syn::parse_str("#[cfg(doctest)]\nfn d() {}\n#[cfg(not(doctest))]\nfn n() {}\n")
+                .unwrap();
+        assert!(gates.test_only(attrs_of(&file.items[0]), Site::Other));
+        assert!(!gates.test_only(attrs_of(&file.items[1]), Site::Other));
     }
 
     /// An optional dependency gets an implicit feature of the same name, so

@@ -117,6 +117,12 @@ attr_macro_test_target_crate = "1"
 # entry is reported exactly as it was before `#[test]` counted for anything —
 # which is what makes it the regression guard for the nested case.
 nested_test_fn_crate = "1"
+# Named only from a `#[cfg(doctest)] fn`. `doctest` rides the `test` axis
+# (#63): rustdoc's doctest collection is the one build that compiles the
+# mention, it links `[dev-dependencies]`, and no consumer's build sets the
+# cfg — so this entry costs every consumer a build for nothing, exactly as
+# `test_only_crate` does: a finding.
+doctest_only_normal_crate = "1"
 
 [dev-dependencies]
 # Named only by a `#[cfg(test)]` module inside the library. That module is part
@@ -158,6 +164,19 @@ build_only_dev_crate = "1"
 # rather than inventing one, and it is the same rule in both directions; it is
 # pinned here because the guard is otherwise invisible from the outside.
 doc_and_library_dev_crate = "1"
+# The regex shape (#63): named only from a `#[cfg(doctest)]` item-position
+# macro invocation (`doc_comment::doctest!("../README.md")`). rustdoc links
+# the dev-dependencies when it collects doctests, so the manifest compiles
+# and the entry is exactly where it belongs. Reporting it as "cannot link"
+# was the invented finding.
+cfg_doctest_dev_crate = "1"
+# The tokio shape (#63): named only from the text of a `#[doc = "..."]`
+# attribute inside a macro invocation's body — tokio documents `select!`
+# inside a `doc! { macro_rules! ... }` wrapper, and the doctests in those
+# comments are the only place `futures-concurrency` is named. Doc text is
+# documentation wherever it sits, so the words count as opaque mentions:
+# alive for the unused check, unjudged for placement. Not a finding.
+doc_literal_dev_crate = "1"
 # The `serde_json` shape. `src/lib.rs` renames `renamed_core_crate` to this
 # name, so every `aliased_crate::` in the library means that crate and not this
 # one — while `tests/it.rs`, a separate crate the rename does not reach, names

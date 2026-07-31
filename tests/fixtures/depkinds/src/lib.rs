@@ -252,3 +252,30 @@ fn doubles_a_thing() {
     loadbearing_dev_copy_crate::helper();
     defaults_off_crate::helper();
 }
+
+// A function compiled only for rustdoc's doctest collection. `doctest` rides
+// the `test` axis (#63): the one build that compiles this mention links
+// `[dev-dependencies]`, so the `[dependencies]` entry it names belongs one
+// table down — while `cfg_doctest_dev_crate`, a dev entry named the same way,
+// is exactly where it belongs and reporting it would tell a compiling
+// manifest it does not compile.
+#[cfg(doctest)]
+fn doctest_probe() {
+    doctest_only_normal_crate::check();
+}
+
+// The regex spelling of the same build: an item-position macro invocation,
+// gated to rustdoc, naming a dev-dependency.
+#[cfg(doctest)]
+cfg_doctest_dev_crate::doctest!("../README.md");
+
+// The tokio spelling: the only mention of `doc_literal_dev_crate` is the text
+// of a doc comment *inside* a macro invocation's body, where it arrives as a
+// `#[doc = "..."]` token tree. Documentation is documentation wherever it
+// sits; the words count as opaque mentions.
+doc_probe_wrapper! {
+    /// Libraries such as [`doc_literal_dev_crate`] provide merging tools.
+    macro_rules! merged_probe {
+        () => {};
+    }
+}
