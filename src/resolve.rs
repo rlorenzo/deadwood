@@ -2232,6 +2232,15 @@ impl RefWalker<'_> {
             syn::Pat::Or(node) => node.cases.iter().for_each(|c| self.bind_pat_inner(c)),
             syn::Pat::Reference(node) => self.bind_pat_inner(&node.pat),
             syn::Pat::Paren(node) => self.bind_pat_inner(&node.pat),
+            // `syn` holds an arm's guard inside its pattern, and what the
+            // pattern binds is in scope for the guard.
+            syn::Pat::Guard(node) => {
+                for attr in &node.attrs {
+                    self.visit_attribute(attr);
+                }
+                self.bind_pat_inner(&node.pat);
+                self.visit_expr(&node.guard);
+            }
             // `_`, `..`, literals, ranges, `const` blocks and macro patterns
             // bind nothing; the ordinary walk resolves what they name.
             other => syn::visit::visit_pat(self, other),
@@ -2341,9 +2350,6 @@ impl<'ast> Visit<'ast> for RefWalker<'_> {
         }
         self.in_scope(|walker| {
             walker.bind_pat(&node.pat);
-            if let Some((_, guard)) = &node.guard {
-                walker.visit_expr(guard);
-            }
             walker.visit_expr(&node.body);
         });
     }
@@ -2578,7 +2584,7 @@ impl RefWalker<'_> {
         else {
             return Referrer::Root;
         };
-        if let Some((_, path, _)) = &node.trait_
+        if let Some((path, _)) = &node.trait_
             && let Some(from_trait) = self.table.owner_defs(self.module, &RefPath::from_syn(path))
         {
             owners.extend(from_trait);
@@ -2595,7 +2601,7 @@ impl RefWalker<'_> {
     fn visit_impl_body(&mut self, node: &syn::ItemImpl) {
         self.visit_generics(&node.generics);
         // Implementing a trait is a use of the trait.
-        if let Some((_, path, _)) = &node.trait_ {
+        if let Some((path, _)) = &node.trait_ {
             self.visit_path(path);
         }
         // But an `impl` block is not a use of the type it belongs to: a type
@@ -3804,6 +3810,26 @@ mod tests {
                 "pub fn source() -> Vec<u32> { Vec::new() }\npub fn entry() -> u32 { let mut n = 0; for source in source() { n += source; } n }\n"
             ),
             vec!["entry"]
+        );
+    }
+
+    #[test]
+    fn a_match_guard_is_a_use_of_what_it_names() {
+        assert_eq!(
+            unused_in_root(
+                "pub fn limit() -> u32 { 1 }\npub fn entry(v: u32) -> u32 { match v { x if x > limit() => x, _ => 0 } }\n"
+            ),
+            vec!["entry"]
+        );
+    }
+
+    #[test]
+    fn an_arm_pattern_shadows_in_its_guard() {
+        assert_eq!(
+            unused_in_root(
+                "pub fn limit() -> u32 { 1 }\npub fn entry(v: u32) -> u32 { match v { limit if limit > 0 => 1, _ => 0 } }\n"
+            ),
+            vec!["limit", "entry"]
         );
     }
 
