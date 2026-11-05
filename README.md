@@ -6,8 +6,7 @@ misplaced dependencies, and `cfg` gates that can never hold. It's in the spirit
 of knip and Fallow, for Rust. It needs no build and no nightly, and it analyzes
 the entire `rustc` workspace in about 3.5s.
 
-**Status:** v1.0.0-beta.1. The v1 check set is complete and the roadmap is
-empty. What stands between this and 1.0 is soak time on other codebases.
+**Status:** v1.0.0. The v1 check set is complete and the roadmap is empty.
 
 ## What it finds
 
@@ -136,15 +135,16 @@ code you've since deleted are reported as stale, never as failures. See
 ## GitHub Action
 
 ```yaml
-- uses: actions/checkout@v4
-- uses: rlorenzo/deadwood@v1.0.0-beta.1
+- uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+- uses: rlorenzo/deadwood@<release-commit-sha> # v1.0.0
   with:
     path: .       # workspace to analyze (default `.`)
     args: ""      # extra arguments for `deadwood check`, e.g. `--json`
 ```
 
-By default the action builds Deadwood from the ref you pin. Set
-`version: 1.0.0-beta.1` to install that release from crates.io instead. The runner
+Pin the full commit SHA of a release tag. By default the action builds Deadwood
+from that commit. Set
+`version: 1.0.0` to install that release from crates.io instead. The runner
 needs stable Rust on `PATH`, which every GitHub-hosted runner has.
 
 ## Configuration

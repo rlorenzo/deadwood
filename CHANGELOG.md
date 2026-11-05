@@ -6,10 +6,9 @@ its rejected alternatives, the corpus measurements and mutation runs behind it
 [`docs/HISTORY.md`](https://github.com/rlorenzo/deadwood/blob/main/docs/HISTORY.md);
 this file is the short version, newest first.
 
-## 1.0.0-beta.1 — 2026-11-04
+## 1.0.0 — 2026-11-04
 
-First public pre-release. The v1 check set is complete; what stands between
-this and 1.0 is soak time on codebases that are not this one. Published as
+First public release. The v1 check set is complete. Published as
 the `deadwood-rs` package, since the plain crates.io name belongs to an
 unrelated project; it installs a binary named `deadwood`.
 
