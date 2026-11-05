@@ -58,6 +58,8 @@ Found by a full-codebase review:
 - `--prune-baseline` deleted entries for checks a run had skipped, and
   `--write-baseline` could overwrite them the same way. Both now exit 2 and leave
   the file alone when the run raised a warning.
+- A use through `cfg`-alternative glob imports reached only the first, so the other
+  was reported dead.
 
 Eleven bugs, all found by running the analyzer over
 [bun](https://github.com/oven-sh/bun)'s Rust tree — a 108-crate, ~1M-line

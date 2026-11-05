@@ -23,6 +23,10 @@ Tracked here rather than hidden. Almost all of them cost findings rather than in
   bare name in pattern position is read as a *use* whenever it could name a
   unit struct, a variant or a `const`, which costs a finding for the braced
   struct and type alias it could equally be binding over.
+- In a module with a `#[cfg]` on a glob import, two globs defining one name are
+  read as alternatives, so a use of the name counts for both. Elsewhere the first
+  glob to answer wins, so an alternative whose gate sits on its `mod` rather than
+  its `use` can still be reported dead.
 - A glob import that leads outside the workspace makes its module opaque:
   names not otherwise in scope there count as uses of every item with that
   name. Globs within the workspace are expanded and hide nothing.
