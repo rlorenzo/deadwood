@@ -6,9 +6,61 @@ its rejected alternatives, the corpus measurements and mutation runs behind it
 [`docs/HISTORY.md`](https://github.com/rlorenzo/deadwood/blob/main/docs/HISTORY.md);
 this file is the short version, newest first.
 
-## Unreleased
+## 1.0.0 — 2026-11-04
+
+First public release. The v1 check set is complete. Published as
+the `deadwood-rs` package, since the plain crates.io name belongs to an
+unrelated project; it installs a binary named `deadwood`.
+
+### Checks
+
+- **Dead files** — `.rs` files under `src/` unreachable from any target root
+  via `mod` declarations or a readable `include!`.
+- **Unused pub items** — fully-`pub` items nothing live in the workspace
+  reaches, decided by path resolution and a reachability walk, not by
+  counting identifiers: dead subsystems and dead cycles come out in one run.
+- **Unused re-exports** — `pub use` re-exports nothing goes through, inside
+  the workspace or out.
+- **Unused dependencies** — manifest entries (normal, dev, build) whose crate
+  the declaring package's code never names.
+- **Misplaced dependencies** — entries declared in a table the code naming
+  them cannot see (e.g. a `[dependencies]` entry only tests use).
+- **Unsatisfiable `cfg` gates** — `#[cfg(...)]` gates that can hold in no
+  build of the package.
+- **Test-only public items** *(off by default)* — `pub` items the workspace
+  reaches only through test code.
+
+### Operation
+
+- `deadwood check [PATH]` with text or `--json` output; exit codes `0`
+  clean / `1` denied findings / `2` error, suitable for CI gates.
+- `deadwood.toml` configuration: `ignore` globs, per-kind severity,
+  `public-api` and dependency allowlists. Every default is the unconfigured
+  behavior.
+- Baseline adoption: `--write-baseline` records today's findings so later
+  runs fail only on what is new; `--prune-baseline` drops entries that no
+  longer occur. Entries survive file moves and renames of the paths around
+  them.
+- Workspace discovery via `cargo metadata --no-deps`; works offline; no
+  `unsafe` anywhere in the crate.
+
+### Changed
+
+- Moved to `syn` 3, so the tree now holds one copy of it. Output is unchanged across
+  427 crates and workspaces compared against the `syn` 2 build, apart from the
+  wording of one parser error.
 
 ### Fixed
+
+Three bugs found by a full-codebase review:
+
+- `--prune-baseline` deleted entries for checks a run had skipped, and
+  `--write-baseline` could overwrite them the same way. Both now exit 2 and leave
+  the file alone when the run raised a warning.
+- A use through `cfg`-alternative glob imports reached only the first, so the other
+  was reported dead.
+- A file `#[path]` mounts as two modules could report live items dead. Its items no
+  longer take part in resolution.
 
 Eleven bugs, all found by running the analyzer over
 [bun](https://github.com/oven-sh/bun)'s Rust tree — a 108-crate, ~1M-line
@@ -154,42 +206,3 @@ that was failing beside a `pub(crate) use self::submodule::{...}` import.
 The masking-then-unmasking shape of #48 and #55 again: the imprecision
 that hid them was never what made the answer right, and each was
 hand-checked to have no caller in its workspace before being accepted.
-
-## 1.0.0-beta.1 — 2026-07-30
-
-First public pre-release. The v1 check set is complete; what stands between
-this and 1.0 is soak time on codebases that are not this one. Published as
-the `deadwood-rs` package, since the plain crates.io name belongs to an
-unrelated project; it installs a binary named `deadwood`.
-
-### Checks
-
-- **Dead files** — `.rs` files under `src/` unreachable from any target root
-  via `mod` declarations or a readable `include!`.
-- **Unused pub items** — fully-`pub` items nothing live in the workspace
-  reaches, decided by path resolution and a reachability walk, not by
-  counting identifiers: dead subsystems and dead cycles come out in one run.
-- **Unused re-exports** — `pub use` re-exports nothing goes through, inside
-  the workspace or out.
-- **Unused dependencies** — manifest entries (normal, dev, build) whose crate
-  the declaring package's code never names.
-- **Misplaced dependencies** — entries declared in a table the code naming
-  them cannot see (e.g. a `[dependencies]` entry only tests use).
-- **Unsatisfiable `cfg` gates** — `#[cfg(...)]` gates that can hold in no
-  build of the package.
-- **Test-only public items** *(off by default)* — `pub` items the workspace
-  reaches only through test code.
-
-### Operation
-
-- `deadwood check [PATH]` with text or `--json` output; exit codes `0`
-  clean / `1` denied findings / `2` error, suitable for CI gates.
-- `deadwood.toml` configuration: `ignore` globs, per-kind severity,
-  `public-api` and dependency allowlists. Every default is the unconfigured
-  behavior.
-- Baseline adoption: `--write-baseline` records today's findings so later
-  runs fail only on what is new; `--prune-baseline` drops entries that no
-  longer occur. Entries survive file moves and renames of the paths around
-  them.
-- Workspace discovery via `cargo metadata --no-deps`; works offline; no
-  `unsafe` anywhere in the crate.

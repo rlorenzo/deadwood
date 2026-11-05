@@ -156,6 +156,8 @@ use crate::modtree::ParsedFile;
 /// How deep a chain of `use` aliases is followed before giving up and falling
 /// back to the conservative rule. Real code never comes close.
 const MAX_ALIAS_DEPTH: usize = 8;
+/// How deep in an alias chain a name with several definitions is still followed.
+const MAX_FANOUT_DEPTH: usize = 1;
 
 /// One compilation unit: a crate root plus every file reachable from it.
 pub(crate) struct CrateUnit {
@@ -411,6 +413,9 @@ struct Module {
     /// each with whether the glob is a `pub use` — which re-exports the names
     /// it pulls in rather than merely importing them.
     globs: Vec<(RefPath, bool)>,
+    /// Whether a `#[cfg]` sits on any glob import written in this module, which
+    /// makes a name two of its globs define a `cfg` alternative.
+    has_gated_glob: bool,
     /// Modules whose names this module pulls in through a resolved glob.
     glob_sources: Vec<usize>,
     /// The subset of those a `pub use` glob pulls in, so their items can be
@@ -1317,6 +1322,7 @@ impl SymbolTable {
             path: path.clone(),
             items: HashMap::new(),
             globs: Vec::new(),
+            has_gated_glob: false,
             glob_sources: Vec::new(),
             pub_glob_sources: Vec::new(),
             opaque: false,
@@ -1534,6 +1540,8 @@ impl SymbolTable {
             if leaf.glob {
                 // A `pub use` inside a function body re-exports nothing, which
                 // is the same reason `top_level` decides the kind below.
+                self.modules[module].has_gated_glob |=
+                    item.attrs.iter().any(|attr| attr.path().is_ident("cfg"));
                 self.modules[module].globs.push((path, is_pub && top_level));
                 continue;
             }
@@ -1622,15 +1630,29 @@ impl SymbolTable {
         if let Some(defs) = self.modules[module].items.get(name) {
             return Step::Defs(defs.clone());
         }
+        // Past a `cfg`-gated glob, every source and not the first to answer: under
+        // the default union of builds, two globs defining one name are
+        // alternatives, and each is live in the build that has it. Only there,
+        // because taking every answer everywhere fans out through alias chains
+        // badly enough to hang on real workspaces.
+        let alternatives = self.modules[module].has_gated_glob;
         let mut unknown = self.modules[module].opaque;
+        let mut found = Vec::new();
         for &source in &self.modules[module].glob_sources {
             match self.lookup_in(source, name, visited) {
-                Step::Defs(defs) => return Step::Defs(defs),
+                Step::Defs(defs) if !alternatives => return Step::Defs(defs),
+                Step::Defs(defs) => found.extend(defs),
                 Step::Unknown => unknown = true,
                 Step::Absent => {}
             }
         }
-        if unknown { Step::Unknown } else { Step::Absent }
+        if !found.is_empty() {
+            Step::Defs(found)
+        } else if unknown {
+            Step::Unknown
+        } else {
+            Step::Absent
+        }
     }
 
     /// Whether a bare name written in pattern position could be naming an
@@ -1669,6 +1691,13 @@ impl SymbolTable {
 
     /// Where a path segment's definitions lead: into a module, or to an item.
     fn step_into(&self, defs: &[usize], depth: usize) -> Target {
+        // Each alias here is a walk of its own, so several at every hop of a
+        // chain is exponential in its length: rustix's `cfg`-gated backend globs
+        // took a run from 0.2s to over a minute. Deep in a chain, stop and say
+        // we can't tell, which loses a finding rather than inventing one.
+        if defs.len() > 1 && depth > MAX_FANOUT_DEPTH {
+            return Target::Unknown;
+        }
         let mut module = None;
         for &id in defs {
             let def = &self.defs[id];
@@ -1817,7 +1846,10 @@ impl SymbolTable {
                         Target::Module(next) => current = next,
                         Target::Item => return Outcome::Item,
                         Target::Unknown => {
-                            return if index < segments.len() {
+                            // Inside an alias, the path it belongs to may go on
+                            // past here, so "an item" would end that path early
+                            // and leave what it names unmarked.
+                            return if index < segments.len() || depth > 0 {
                                 Outcome::Opaque(index)
                             } else {
                                 Outcome::Item
@@ -2232,6 +2264,15 @@ impl RefWalker<'_> {
             syn::Pat::Or(node) => node.cases.iter().for_each(|c| self.bind_pat_inner(c)),
             syn::Pat::Reference(node) => self.bind_pat_inner(&node.pat),
             syn::Pat::Paren(node) => self.bind_pat_inner(&node.pat),
+            // `syn` holds an arm's guard inside its pattern, and what the
+            // pattern binds is in scope for the guard.
+            syn::Pat::Guard(node) => {
+                for attr in &node.attrs {
+                    self.visit_attribute(attr);
+                }
+                self.bind_pat_inner(&node.pat);
+                self.visit_expr(&node.guard);
+            }
             // `_`, `..`, literals, ranges, `const` blocks and macro patterns
             // bind nothing; the ordinary walk resolves what they name.
             other => syn::visit::visit_pat(self, other),
@@ -2341,9 +2382,6 @@ impl<'ast> Visit<'ast> for RefWalker<'_> {
         }
         self.in_scope(|walker| {
             walker.bind_pat(&node.pat);
-            if let Some((_, guard)) = &node.guard {
-                walker.visit_expr(guard);
-            }
             walker.visit_expr(&node.body);
         });
     }
@@ -2578,7 +2616,7 @@ impl RefWalker<'_> {
         else {
             return Referrer::Root;
         };
-        if let Some((_, path, _)) = &node.trait_
+        if let Some((path, _)) = &node.trait_
             && let Some(from_trait) = self.table.owner_defs(self.module, &RefPath::from_syn(path))
         {
             owners.extend(from_trait);
@@ -2595,7 +2633,7 @@ impl RefWalker<'_> {
     fn visit_impl_body(&mut self, node: &syn::ItemImpl) {
         self.visit_generics(&node.generics);
         // Implementing a trait is a use of the trait.
-        if let Some((_, path, _)) = &node.trait_ {
+        if let Some((path, _)) = &node.trait_ {
             self.visit_path(path);
         }
         // But an `impl` block is not a use of the type it belongs to: a type
@@ -3237,6 +3275,24 @@ mod tests {
         );
     }
 
+    /// `alt` is two different modules, one per `cfg` alternative, so no single
+    /// module continues the path. `renamed`'s path ends at that name, though,
+    /// so it still has an answer: both modules are in the type namespace.
+    #[test]
+    fn a_use_alias_of_a_name_behind_two_modules_takes_their_namespace() {
+        let aliases = alias_namespaces_in_root(
+            "mod first {}
+             mod second {}
+             #[cfg(feature = \"a\")] use first as alt;
+             #[cfg(not(feature = \"a\"))] use second as alt;
+             pub use alt as renamed;",
+        );
+        assert_eq!(
+            aliases.last(),
+            Some(&("renamed".to_string(), DefKind::Mod.namespace()))
+        );
+    }
+
     /// The union, and the trap it exists for. A name binding a struct *and* a
     /// function resolves to two definitions, and an alias to it binds both
     /// halves — so the whole group is combined rather than picked from.
@@ -3805,6 +3861,83 @@ mod tests {
             ),
             vec!["entry"]
         );
+    }
+
+    #[test]
+    fn a_match_guard_is_a_use_of_what_it_names() {
+        assert_eq!(
+            unused_in_root(
+                "pub fn limit() -> u32 { 1 }\npub fn entry(v: u32) -> u32 { match v { x if x > limit() => x, _ => 0 } }\n"
+            ),
+            vec!["entry"]
+        );
+    }
+
+    #[test]
+    fn an_arm_pattern_shadows_in_its_guard() {
+        assert_eq!(
+            unused_in_root(
+                "pub fn limit() -> u32 { 1 }\npub fn entry(v: u32) -> u32 { match v { limit if limit > 0 => 1, _ => 0 } }\n"
+            ),
+            vec!["limit", "entry"]
+        );
+    }
+
+    /// Two globs defining one name are `cfg` alternatives under the default
+    /// union of builds, so a use of the name reaches both.
+    #[test]
+    fn a_use_through_cfg_alternative_globs_reaches_every_alternative() {
+        assert_eq!(
+            unused_in_binary(&[(
+                "",
+                "mod alpha { pub fn live() {} }\nmod beta { pub fn live() {} }\n#[cfg(feature = \"a\")]\nuse alpha::*;\n#[cfg(not(feature = \"a\"))]\nuse beta::*;\nfn main() { live(); }\n"
+            )]),
+            Vec::<String>::new()
+        );
+    }
+
+    /// With no `#[cfg]` on either glob, the first to answer still decides.
+    #[test]
+    fn a_use_through_ungated_globs_stops_at_the_first_answer() {
+        assert_eq!(
+            unused_in_binary(&[(
+                "",
+                "mod alpha { pub fn live() {} }\nmod beta { pub fn live() {} }\nuse alpha::*;\nuse beta::*;\nfn main() { live(); }\n"
+            )]),
+            vec!["live"]
+        );
+    }
+
+    /// `m` is a function and a module, so it has two definitions. Near the start
+    /// of a chain they are still followed, leaving `other::target` unnamed.
+    #[test]
+    fn several_definitions_are_followed_near_the_start_of_a_chain() {
+        const ITEMS: &str =
+            "mod m { pub fn target() {} }\nfn m() {}\nmod other { pub fn target() {} }\n";
+        for (uses, head) in [("", "m"), ("use m as n;\n", "n")] {
+            let source = format!("{ITEMS}{uses}fn main() {{ m(); {head}::target(); }}\n");
+            assert_eq!(
+                unused_in_binary(&[("", &source)]),
+                vec!["target"],
+                "{source}"
+            );
+        }
+    }
+
+    /// Deep in a chain, several definitions stop being followed, so the tail
+    /// counts for every item of that name.
+    #[test]
+    fn several_definitions_are_not_followed_deep_in_a_chain() {
+        let source = "mod m { pub fn target() {} }\nfn m() {}\nmod other { pub fn target() {} }\nuse m as n;\nuse n as p;\nfn main() { m(); p::target(); }\n";
+        assert_eq!(unused_in_binary(&[("", source)]), Vec::<String>::new());
+    }
+
+    /// The cap is on several definitions, not on depth: a single one is followed
+    /// to the end of the chain.
+    #[test]
+    fn a_single_definition_is_followed_deep_in_a_chain() {
+        let source = "mod m { pub fn target() {} }\nmod other { pub fn target() {} }\nuse m as n;\nuse n as p;\nuse p as q;\nfn main() { q::target(); }\n";
+        assert_eq!(unused_in_binary(&[("", source)]), vec!["target"]);
     }
 
     /// A local shadows a name, never a path through it.

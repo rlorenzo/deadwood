@@ -29,7 +29,7 @@ inputs:
   version:
     description: >-
       A published deadwood-rs version to install from crates.io instead of
-      building the action's own ref, e.g. `1.0.0-beta.1`.
+      building the action's own ref, e.g. `1.0.0`.
     required: false
     default: ""
 
