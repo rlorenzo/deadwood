@@ -196,6 +196,10 @@ Tracked here rather than hidden. Almost all of them cost findings rather than in
   a macro, derive or no derive. A test-confining macro in the helper position
   would still be read as library code; no such spelling has been seen (the
   known test-confining macros sit on bare `fn`s).
+- A file that `#[path]` mounts as two modules of one crate has its items, and
+  those of the files under it, take no part in resolution, the same as a file
+  reached only through an `include!`. Its paths are read from every mount and
+  count as uses, so nothing in it is reported and it keeps what it names alive.
 - A file that both a `#[cfg(test)]` `mod` declaration and one no gate confines
   to a test build reach is attributed to the second, so what it names is judged
   as library code. One file gets one answer, and this is the direction that

@@ -980,8 +980,8 @@ fn the_default_matrix_follows_every_gate_and_reports_the_ones_that_can_never_hol
                 "src/declared_feature.rs".to_string(),
                 "from_declared_feature"
             ),
-            // Gated by an inner `#![cfg(...)]` rather than one on the `mod`.
-            ("src/inner_gated.rs".to_string(), "from_inner_gate"),
+            // Not `inner_gated.rs`: two declarations mount it as two modules,
+            // so its items take no part in resolution.
             // Behind the impossible gates: reported *and* still followed, so
             // that adding a finding kind never moves the other detectors.
             (
@@ -4567,6 +4567,33 @@ fn a_members_lib_rename_survives_an_unresolvable_workspace() {
     );
 }
 
+/// A file two `#[path]` declarations mount is compiled, and only one mount was
+/// walked, so nothing in it is reported and what it names stays alive (#90).
+#[test]
+fn a_file_mounted_as_two_modules_keeps_what_it_names_alive() {
+    let dir = std::env::temp_dir().join(format!("deadwood-remount-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(
+        dir.join("Cargo.toml"),
+        "[package]\nname = \"remount\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("src/main.rs"),
+        "mod helper { pub fn used() {} }\n#[path = \"shared.rs\"] mod first;\n#[path = \"shared.rs\"] mod second;\nfn main() { first::live(); }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("src/shared.rs"),
+        "pub fn live() { crate::helper::used(); }\n",
+    )
+    .unwrap();
+    let (code, stdout) = run_binary(&dir, &[]);
+    assert_eq!(code, Some(0), "{stdout}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A skipped check's findings are missing, not fixed: neither baseline command
 /// may rewrite an existing file on that evidence (#88).
 #[test]
@@ -4601,6 +4628,39 @@ fn an_incomplete_run_never_rewrites_the_baseline() {
     // A first write has nothing to lose, so adoption stays possible.
     std::fs::remove_file(&baseline).unwrap();
     let (code, stdout) = run_binary(&dir, &["--write-baseline"]);
+    assert_eq!(code, Some(0), "{stdout}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `super::` names a different module from each mount, and both are live (#90).
+#[test]
+fn a_file_mounted_twice_keeps_alive_what_each_mounts_parent_holds() {
+    let dir = std::env::temp_dir().join(format!("deadwood-remount-super-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(
+        dir.join("Cargo.toml"),
+        "[package]\nname = \"remount\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("src/main.rs"),
+        "mod a;\nmod b;\nfn main() { a::shared::live(); b::shared::live(); }\n",
+    )
+    .unwrap();
+    for parent in ["a", "b"] {
+        std::fs::write(
+            dir.join("src").join(format!("{parent}.rs")),
+            "pub mod helper { pub fn used() {} }\n#[path = \"shared.rs\"]\npub mod shared;\n",
+        )
+        .unwrap();
+    }
+    std::fs::write(
+        dir.join("src/shared.rs"),
+        "pub fn live() { super::helper::used(); }\n",
+    )
+    .unwrap();
+    let (code, stdout) = run_binary(&dir, &[]);
     assert_eq!(code, Some(0), "{stdout}");
     let _ = std::fs::remove_dir_all(&dir);
 }

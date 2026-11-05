@@ -165,6 +165,11 @@ pub struct Resolved {
     /// dead either: nothing reaches them because this build does not contain
     /// them, which is not the same as nothing reaching them at all.
     pub excluded: Vec<PathBuf>,
+    /// A file in [`Resolved::files`] that another `mod` declaration mounts too:
+    /// the module it was loaded under, and the other one. Only the first was
+    /// walked, so the symbol table treats these and the files under them like
+    /// [`Resolved::spliced`], with their paths read from every mount.
+    pub remounted: Vec<(Vec<String>, Vec<String>)>,
 }
 
 /// A source file reached during module resolution.
@@ -296,6 +301,7 @@ pub fn resolve(
     let mut resolved = Resolved {
         files: Vec::new(),
         spliced: Vec::new(),
+        remounted: Vec::new(),
         excluded: Vec::new(),
     };
     let mut queue: Vec<Pending> = vec![Pending {
@@ -334,6 +340,16 @@ pub fn resolve(
                 let Some(&Seen { index, is_mod_root }) = seen.get(&path) else {
                     continue;
                 };
+                // A second module path for one file. Each resolves the file's
+                // relative paths differently and only one was walked, so no
+                // claim about its items is safe. See [`Resolved::remounted`].
+                if spliced_from.is_none()
+                    && module != resolved.files[index].module
+                    && !resolved.files[index].module.is_empty()
+                {
+                    let loaded = resolved.files[index].module.clone();
+                    resolved.remounted.push((loaded, module.clone()));
+                }
                 if test_only || !resolved.files[index].test_only {
                     continue;
                 }

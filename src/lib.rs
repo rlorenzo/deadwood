@@ -394,16 +394,44 @@ pub fn analyze_with(
             if !names.is_empty() {
                 lib_of_package.insert(package.name.as_str(), crates.len());
             }
+            // Only the symbol table moves these: the file is an ordinary one to
+            // the dependency and dead-file checks, which never ask where its
+            // items live.
+            let (remounted, files): (Vec<_>, Vec<_>) =
+                resolved.files.into_iter().partition(|file| {
+                    let module = &file.module;
+                    resolved
+                        .remounted
+                        .iter()
+                        .any(|(m, _)| module.starts_with(m))
+                });
+            let mut spliced = resolved.spliced;
+            // Read once per mount: `super::helper` names a different module from
+            // each, and each of those is live.
+            for file in &remounted {
+                for (loaded, other) in &resolved.remounted {
+                    if let Some(rest) = file.module.strip_prefix(loaded.as_slice()) {
+                        spliced.push(modtree::ParsedFile {
+                            path: file.path.clone(),
+                            ast: file.ast.clone(),
+                            module: [other.as_slice(), rest].concat(),
+                            test_only: file.test_only,
+                            test_only_mods: Vec::new(),
+                        });
+                    }
+                }
+            }
+            spliced.extend(remounted);
             crates.push(resolve::CrateUnit {
                 names,
                 // The same rule the dependency check places a mention by: a
                 // test, example or bench target is code `cargo test` builds and
                 // no consumer of the package runs.
                 test_code: deps::is_dev_target(target),
-                files: resolved.files,
+                files,
                 // Their paths count; their items stay out of the table. See
                 // `CrateUnit::spliced` for why those two halves separate.
-                spliced: resolved.spliced,
+                spliced,
             });
         }
 
