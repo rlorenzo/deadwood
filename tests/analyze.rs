@@ -4709,3 +4709,37 @@ fn a_function_local_import_alias_does_not_reach_other_functions() {
     std::fs::remove_dir_all(&root).ok();
     assert!(unused.is_empty(), "both are named: {unused:?}");
 }
+
+/// `cargo metadata` keeps the spelling it was given and the config's base is
+/// canonical, so `ignore` has to match across the two (#87). `src/gone.rs`
+/// doesn't exist, so it can't be matched by resolving the file itself.
+#[test]
+#[cfg(unix)]
+fn ignore_patterns_match_through_a_symlinked_workspace() {
+    let root = std::env::temp_dir().join(format!("deadwood-ignore-link-{}", std::process::id()));
+    write_tree(
+        &root,
+        &[
+            (
+                "real/Cargo.toml",
+                "[package]\nname = \"real\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+            ),
+            (
+                "real/deadwood.toml",
+                "ignore = [\"src/lib.rs\", \"src/gone.rs\"]\n",
+            ),
+            ("real/src/lib.rs", "mod gone;\npub fn unused() {}\n"),
+        ],
+    );
+    let link = root.join("link");
+    std::os::unix::fs::symlink(root.join("real"), &link).unwrap();
+
+    let through_link = analyze(&link, None).expect("analysis should succeed");
+    let direct =
+        analyze(&root.join("real").canonicalize().unwrap(), None).expect("analysis should succeed");
+    std::fs::remove_dir_all(&root).ok();
+    for analysis in [through_link, direct] {
+        assert!(analysis.findings.is_empty(), "{:?}", analysis.findings);
+        assert!(analysis.warnings.is_empty(), "{:?}", analysis.warnings);
+    }
+}

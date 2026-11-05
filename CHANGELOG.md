@@ -61,6 +61,7 @@ Three bugs found by a full-codebase review:
   was reported dead.
 - A `use real as alias;` in a function body was applied to the whole file, hiding
   uses of a dependency named `alias` elsewhere in it.
+- `ignore` patterns stopped matching when the workspace path was a symlink.
 - A file `#[path]` mounts as two modules could report live items dead. Its items no
   longer take part in resolution.
 
