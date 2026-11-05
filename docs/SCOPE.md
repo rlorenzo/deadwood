@@ -182,8 +182,8 @@ rot. What shipped is in the index above and in [`HISTORY.md`](HISTORY.md).
 
 - Prefer false negatives to false positives; a noisy dead-code tool gets
   uninstalled.
-- Every limitation is documented where it lives (module docs) and in the
-  README — and *filed*: an unfiled limitation is one nobody is counting, and
+- Every limitation is documented where it lives (module docs) and in
+  [`LIMITATIONS.md`](LIMITATIONS.md) — and *filed*: an unfiled limitation is one nobody is counting, and
   one (phase 22's #48) turned out to be masking a live false positive.
 - New dependencies only for confirmed problems; std + `syn` + `proc-macro2` +
   `serde` + `serde_json` + `clap` + `anyhow` + `toml` is the current ceiling.

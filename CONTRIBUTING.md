@@ -52,7 +52,7 @@ packages the integration tests analyze — a new behavior usually wants a new
 fixture or a new case in an existing one, exercised from `tests/analyze.rs`.
 
 A change to analysis behavior also updates the documentation that claims to
-describe it: the README's check table and known-limitations section, and —
+describe it: the README's check table, `docs/ANALYSIS.md`, `docs/LIMITATIONS.md`, and —
 for a shipped slice — the phase record in [`docs/SCOPE.md`](docs/SCOPE.md)
 and [`docs/HISTORY.md`](docs/HISTORY.md), which record what each phase
 changed, what it measured, and what it rejected.
