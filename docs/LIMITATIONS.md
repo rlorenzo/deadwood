@@ -23,6 +23,10 @@ Tracked here rather than hidden. Almost all of them cost findings rather than in
   bare name in pattern position is read as a *use* whenever it could name a
   unit struct, a variant or a `const`, which costs a finding for the braced
   struct and type alias it could equally be binding over.
+- In a module with a `#[cfg]` on a glob import, two globs defining one name are
+  read as alternatives, so a use of the name counts for both. Elsewhere the first
+  glob to answer wins, so an alternative whose gate sits on its `mod` rather than
+  its `use` can still be reported dead.
 - A glob import that leads outside the workspace makes its module opaque:
   names not otherwise in scope there count as uses of every item with that
   name. Globs within the workspace are expanded and hide nothing.
@@ -192,6 +196,10 @@ Tracked here rather than hidden. Almost all of them cost findings rather than in
   a macro, derive or no derive. A test-confining macro in the helper position
   would still be read as library code; no such spelling has been seen (the
   known test-confining macros sit on bare `fn`s).
+- A file that `#[path]` mounts as two modules of one crate has its items, and
+  those of the files under it, take no part in resolution, the same as a file
+  reached only through an `include!`. Its paths are read from every mount and
+  count as uses, so nothing in it is reported and it keeps what it names alive.
 - A file that both a `#[cfg(test)]` `mod` declaration and one no gate confines
   to a test build reach is attributed to the second, so what it names is judged
   as library code. One file gets one answer, and this is the direction that

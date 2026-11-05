@@ -146,11 +146,14 @@ A stale line names the module and the namespace the entry recorded, when it
 recorded them, because two entries that differ only in those are two different
 items and the reader has to know which one to go and find.
 
-Two rules keep the file from lying:
+Three rules keep the file from lying:
 
 - **Writing is explicit.** No run without `--write-baseline` or
   `--prune-baseline` creates or modifies the file, so a CI job can never
   quietly accept what it found.
+- **An incomplete run never rewrites it.** A skipped check's findings are missing,
+  not fixed, so `--prune-baseline` exits 2 if the run raised any warning, and so
+  does `--write-baseline` when a file is already there. The file is unchanged.
 - **A missing or unparsable baseline is exit 2**, never "nothing is
   baselined" and never "everything is". A typo'd path would otherwise disarm a
   CI gate silently. The one non-error case is the default location with no file

@@ -57,6 +57,13 @@ for a shipped slice — the phase record in [`docs/SCOPE.md`](docs/SCOPE.md)
 and [`docs/HISTORY.md`](docs/HISTORY.md), which record what each phase
 changed, what it measured, and what it rejected.
 
+## Releasing
+
+Set the version in `Cargo.toml`, date its `CHANGELOG.md` section, and merge. Then
+push a matching tag, such as `v1.2.3`. The release workflow builds the binaries,
+runs the semver check, publishes to crates.io through trusted publishing, and only
+then makes the GitHub release public.
+
 ## License
 
 MIT. By contributing you agree your contributions are licensed under the same
