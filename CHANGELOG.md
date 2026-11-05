@@ -59,6 +59,8 @@ Three bugs found by a full-codebase review:
   the file alone when the run raised a warning.
 - A use through `cfg`-alternative glob imports reached only the first, so the other
   was reported dead.
+- A `use real as alias;` in a function body was applied to the whole file, hiding
+  uses of a dependency named `alias` elsewhere in it.
 - A file `#[path]` mounts as two modules could report live items dead. Its items no
   longer take part in resolution.
 

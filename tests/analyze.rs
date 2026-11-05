@@ -4664,3 +4664,48 @@ fn a_file_mounted_twice_keeps_alive_what_each_mounts_parent_holds() {
     assert_eq!(code, Some(0), "{stdout}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Write `files`, given relative to `root`, into a fresh `root`.
+fn write_tree(root: &Path, files: &[(&str, &str)]) {
+    let _ = std::fs::remove_dir_all(root);
+    for (path, contents) in files {
+        let path = root.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, contents).unwrap();
+    }
+}
+
+/// A `use` inside a function binds in that function, so the same word in
+/// another function is still its own dependency (#84).
+#[test]
+fn a_function_local_import_alias_does_not_reach_other_functions() {
+    let root = std::env::temp_dir().join(format!("deadwood-local-alias-{}", std::process::id()));
+    let plain = |name: &str| {
+        format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n")
+    };
+    write_tree(
+        &root,
+        &[
+            (
+                "app/Cargo.toml",
+                &(plain("app")
+                    + "[dependencies]\nhelper = { path = \"../helper\" }\nother = { path = \"../other\" }\n"),
+            ),
+            (
+                "app/src/lib.rs",
+                "pub fn first() { use helper as other; other::used(); }\npub fn second() { other::used(); }\n",
+            ),
+            ("helper/Cargo.toml", &plain("helper")),
+            ("helper/src/lib.rs", "pub fn used() {}\n"),
+            ("other/Cargo.toml", &plain("other")),
+            ("other/src/lib.rs", "pub fn used() {}\n"),
+        ],
+    );
+    let analysis = analyze(&root.join("app"), None).expect("analysis should succeed");
+    let unused: Vec<String> = reported(&analysis, FindingKind::UnusedDependency)
+        .into_iter()
+        .map(|(_, name)| name.to_string())
+        .collect();
+    std::fs::remove_dir_all(&root).ok();
+    assert!(unused.is_empty(), "both are named: {unused:?}");
+}

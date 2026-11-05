@@ -149,8 +149,8 @@ Tracked here rather than hidden. Almost all of them cost findings rather than in
   prelude, so only that one holds for every module of the crate. A `use real as
   alias;`, or an `extern crate` at the top of a module file like `src/foo.rs`,
   is an ordinary item binding in its own module, so it is followed within the
-  file that writes it and no further. A rename inside a nested `mod` is not
-  followed at all. Getting this wrong invents findings rather than
+  file that writes it and no further. A rename inside a nested `mod` or a function
+  body is not followed at all. Getting this wrong invents findings rather than
   losing them: a crate that renames one dependency to a name another module
   uses for real would have that second crate's mentions folded away, and the
   entry reported unused.
