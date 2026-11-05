@@ -717,6 +717,20 @@ pub fn analyze_with(
             package.name.clone(),
         )
     }));
+    // A skipped check's findings are missing, not fixed. Pruning on them deletes
+    // entries, and rewriting an existing file on them does the same.
+    let rewrites_on_partial_evidence = match baseline_mode {
+        baseline::Mode::Apply => false,
+        baseline::Mode::Prune => true,
+        baseline::Mode::Write => location.path().exists(),
+    };
+    if rewrites_on_partial_evidence && !warnings.is_empty() {
+        anyhow::bail!(
+            "refusing to modify baseline `{}`: analysis was incomplete, so absent findings may not be fixed. Resolve these warnings first:\n  {}",
+            relative_to(location.path(), &meta.workspace_root).display(),
+            warnings.join("\n  ")
+        );
+    }
     let (findings, baseline) = baseline::run(
         baseline_mode,
         &location,

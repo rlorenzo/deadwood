@@ -4566,3 +4566,41 @@ fn a_members_lib_rename_survives_an_unresolvable_workspace() {
         analysis.findings
     );
 }
+
+/// A skipped check's findings are missing, not fixed: neither baseline command
+/// may rewrite an existing file on that evidence (#88).
+#[test]
+fn an_incomplete_run_never_rewrites_the_baseline() {
+    let dir = std::env::temp_dir().join(format!("deadwood-partial-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(
+        dir.join("Cargo.toml"),
+        "[package]\nname = \"partial\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    let main = dir.join("src/main.rs");
+    std::fs::write(&main, "pub fn unused() {}\nfn main() {}\n").unwrap();
+    let (code, stdout) = run_binary(&dir, &["--write-baseline"]);
+    assert_eq!(code, Some(0), "{stdout}");
+    let baseline = dir.join("deadwood-baseline.json");
+    let recorded = std::fs::read_to_string(&baseline).unwrap();
+    assert!(recorded.contains("unused"), "{recorded}");
+
+    std::fs::write(&main, "mod missing;\npub fn unused() {}\nfn main() {}\n").unwrap();
+    for flag in ["--prune-baseline", "--write-baseline"] {
+        let (code, stdout) = run_binary(&dir, &[flag]);
+        assert_eq!(code, Some(2), "{flag}: {stdout}");
+        assert_eq!(
+            std::fs::read_to_string(&baseline).unwrap(),
+            recorded,
+            "{flag}"
+        );
+    }
+
+    // A first write has nothing to lose, so adoption stays possible.
+    std::fs::remove_file(&baseline).unwrap();
+    let (code, stdout) = run_binary(&dir, &["--write-baseline"]);
+    assert_eq!(code, Some(0), "{stdout}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
