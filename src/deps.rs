@@ -780,7 +780,7 @@ pub fn find_unused(
         }
         let name = dependency.crate_name(lib_names);
         if !references.names.contains_key(&name)
-            && !named_by_features.contains(&name)
+            && !named_by_features.contains(&dependency.feature_key())
             && !companion_mentioned(package, lib_names, references, &name)
         {
             unused.push(UnusedDependency {
@@ -878,7 +878,7 @@ pub fn find_misplaced(
         // that has no code and therefore no target — and `[features]` cannot
         // refer to a dev-dependency at all, so moving it would break the
         // feature that names it.
-        if named_by_features.contains(&crate_name) {
+        if named_by_features.contains(&dependency.feature_key()) {
             continue;
         }
         let found = references

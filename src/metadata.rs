@@ -54,8 +54,9 @@ pub struct Package {
 }
 
 impl Package {
-    /// Dependency names the `[features]` table refers to, as code would spell
-    /// them.
+    /// Dependency names the `[features]` table refers to, as
+    /// [`Dependency::feature_key`] spells them. A feature writes the manifest
+    /// key, which is not what code spells when the lib target has its own name.
     ///
     /// A feature can enable an optional dependency (`dep:foo`) or turn on a
     /// feature of one (`foo/bar`, `foo?/bar`). Either way the entry is load
@@ -156,6 +157,12 @@ impl Dependency {
         self.rename.as_deref().unwrap_or(&self.name)
     }
 
+    /// The manifest key in the form
+    /// [`Package::dependencies_named_by_features`] reports it.
+    pub fn feature_key(&self) -> String {
+        self.manifest_name().replace('-', "_")
+    }
+
     /// The identifier code spells this dependency with; cargo normalizes `-`
     /// to `_` in crate names.
     ///
@@ -172,7 +179,7 @@ impl Dependency {
         {
             return lib.clone();
         }
-        self.manifest_name().replace('-', "_")
+        self.feature_key()
     }
 }
 

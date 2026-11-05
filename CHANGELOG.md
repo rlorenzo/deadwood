@@ -61,6 +61,9 @@ Three bugs found by a full-codebase review:
   was reported dead.
 - A `use real as alias;` in a function body was applied to the whole file, hiding
   uses of a dependency named `alias` elsewhere in it.
+- A dependency named by `[features]` was reported unused or misplaced when its lib
+  target had a different name, because the feature's manifest key was compared
+  against the lib name.
 - A non-default optional dependency's custom lib name was not discovered, so the
   entry was reported unused against code that uses it.
 - `ignore` patterns stopped matching when the workspace path was a symlink.

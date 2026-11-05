@@ -4675,6 +4675,14 @@ fn write_tree(root: &Path, files: &[(&str, &str)]) {
     }
 }
 
+/// A path dependency's package, whose lib target is named differently.
+fn lib_package(package: &str, lib: &str) -> String {
+    format!(
+        "[package]\nname = \"{package}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
+         [lib]\nname = \"{lib}\"\npath = \"src/lib.rs\"\n"
+    )
+}
+
 /// A `use` inside a function binds in that function, so the same word in
 /// another function is still its own dependency (#84).
 #[test]
@@ -4708,6 +4716,87 @@ fn a_function_local_import_alias_does_not_reach_other_functions() {
         .collect();
     std::fs::remove_dir_all(&root).ok();
     assert!(unused.is_empty(), "both are named: {unused:?}");
+}
+
+/// Dependencies outside the workspace whose lib names differ from their
+/// manifest keys, so only a full resolution knows them. Each pins one way the
+/// two spellings can be confused: `[features]` writes the key (#85), and a
+/// non-default optional dependency is resolved only under `--all-features`
+/// (#86).
+///
+/// Built here because a fixture's `Cargo.lock` is ignored, and `--frozen`
+/// needs one.
+#[test]
+fn lib_names_and_manifest_keys_are_not_confused() {
+    let root = std::env::temp_dir().join(format!("deadwood-lib-keys-{}", std::process::id()));
+    let libs = [
+        ("gated-lib", "gated_custom"),
+        ("named-lib", "named_custom"),
+        ("test-lib", "test_custom"),
+        ("dead-lib", "dead_custom"),
+        ("keyed", "keyed_custom"),
+        ("decoy", "keyed"),
+    ];
+    let mut files: Vec<(String, String)> = vec![
+        (
+            "app/Cargo.toml".to_string(),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
+             [dependencies]\n\
+             gated-lib = { path = \"../gated-lib\", optional = true }\n\
+             named-lib = { path = \"../named-lib\", optional = true }\n\
+             test-lib = { path = \"../test-lib\", optional = true }\n\
+             dead-lib = { path = \"../dead-lib\", optional = true }\n\
+             keyed = { path = \"../keyed\", optional = true }\n\
+             decoy = { path = \"../decoy\", optional = true }\n\
+             [features]\n\
+             extra = [\"dep:named-lib\"]\n\
+             testing = [\"dep:test-lib\"]\n\
+             more = [\"dep:keyed\"]\n"
+                .to_string(),
+        ),
+        (
+            "app/src/lib.rs".to_string(),
+            "#[cfg(feature = \"gated-lib\")]\npub fn used() { gated_custom::used(); }\n\
+             #[cfg(test)]\nmod tests { #[test] fn t() { test_custom::used(); } }\n"
+                .to_string(),
+        ),
+    ];
+    for (package, lib) in libs {
+        files.push((format!("{package}/Cargo.toml"), lib_package(package, lib)));
+        files.push((
+            format!("{package}/src/lib.rs"),
+            "pub fn used() {}\n".to_string(),
+        ));
+    }
+    let files: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(path, contents)| (path.as_str(), contents.as_str()))
+        .collect();
+    write_tree(&root, &files);
+    let locked = std::process::Command::new("cargo")
+        .args(["generate-lockfile", "--offline"])
+        .current_dir(root.join("app"))
+        .status()
+        .expect("cargo should run");
+    assert!(locked.success());
+
+    let analysis = analyze(&root.join("app"), None).expect("analysis should succeed");
+    let names = |kind| {
+        let mut names: Vec<String> = reported(&analysis, kind)
+            .into_iter()
+            .map(|(_, name)| name.to_string())
+            .collect();
+        names.sort();
+        names
+    };
+    let (unused, misplaced) = (
+        names(FindingKind::UnusedDependency),
+        names(FindingKind::MisplacedDependency),
+    );
+    std::fs::remove_dir_all(&root).ok();
+    // `decoy`'s lib name is what `more` writes, but `more` means the key `keyed`.
+    assert_eq!(unused, ["dead-lib", "decoy"]);
+    assert_eq!(misplaced, Vec::<String>::new());
 }
 
 /// `cargo metadata` keeps the spelling it was given and the config's base is
