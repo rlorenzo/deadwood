@@ -261,7 +261,7 @@ impl Ignore<'_> {
         if self.globs.is_empty() {
             return false;
         }
-        let Ok(relative) = path.strip_prefix(self.base) else {
+        let Some(relative) = self.relative(path) else {
             // Outside the tree the config describes; its patterns say nothing
             // about it.
             return false;
@@ -280,6 +280,22 @@ impl Ignore<'_> {
             }
         }
         false
+    }
+
+    /// `path` relative to the config's directory.
+    ///
+    /// The base is canonical, but `cargo metadata` keeps the spelling it was
+    /// given, so a workspace reached through a symlink needs the ancestor that
+    /// is the base found by what it resolves to. Only that ancestor is
+    /// resolved: the rest of the path may not exist, and a symlink further down
+    /// is still matched under the name it has in the tree.
+    fn relative<'p>(&self, path: &'p Path) -> Option<&'p Path> {
+        path.strip_prefix(self.base).ok().or_else(|| {
+            let root = path
+                .ancestors()
+                .find(|ancestor| ancestor.canonicalize().is_ok_and(|real| real == self.base))?;
+            path.strip_prefix(root).ok()
+        })
     }
 }
 
@@ -328,7 +344,7 @@ impl PublicApi {
 /// The directory a config file's relative patterns are resolved against.
 ///
 /// It has to be absolute: the paths patterns are matched against come from
-/// `cargo metadata` and are absolute and symlink-resolved, and `--config
+/// `cargo metadata` and are absolute, and `--config
 /// deadwood.toml` on its own has no directory part at all — taking that
 /// literally would leave every pattern matching nothing, silently.
 fn base_of(config_file: &Path) -> PathBuf {

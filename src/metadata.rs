@@ -26,8 +26,8 @@ pub struct Metadata {
     /// unused against code that uses it
     /// ([#62](https://github.com/rlorenzo/deadwood/issues/62)).
     ///
-    /// Filled by a full `cargo metadata --frozen` when the workspace has a
-    /// current lockfile and a cached dependency graph — true of any checkout
+    /// Filled by a full `cargo metadata --frozen --all-features` (default
+    /// features alone if that fails) when the workspace has a current lockfile and a cached dependency graph — true of any checkout
     /// that has built once — plus every workspace member's own targets, and
     /// empty otherwise, which leaves the package-name
     /// heuristic exactly as it was. Exact where possible, unchanged where
@@ -54,8 +54,9 @@ pub struct Package {
 }
 
 impl Package {
-    /// Dependency names the `[features]` table refers to, as code would spell
-    /// them.
+    /// Dependency names the `[features]` table refers to, as
+    /// [`Dependency::feature_key`] spells them. A feature writes the manifest
+    /// key, which is not what code spells when the lib target has its own name.
     ///
     /// A feature can enable an optional dependency (`dep:foo`) or turn on a
     /// feature of one (`foo/bar`, `foo?/bar`). Either way the entry is load
@@ -156,6 +157,12 @@ impl Dependency {
         self.rename.as_deref().unwrap_or(&self.name)
     }
 
+    /// The manifest key in the form
+    /// [`Package::dependencies_named_by_features`] reports it.
+    pub fn feature_key(&self) -> String {
+        self.manifest_name().replace('-', "_")
+    }
+
     /// The identifier code spells this dependency with; cargo normalizes `-`
     /// to `_` in crate names.
     ///
@@ -172,7 +179,7 @@ impl Dependency {
         {
             return lib.clone();
         }
-        self.manifest_name().replace('-', "_")
+        self.feature_key()
     }
 }
 
@@ -270,28 +277,56 @@ fn lib_names(manifest: &Path) -> HashMap<String, String> {
     // mark on the tree it reads. Frozen asserts the lockfile is present and
     // current and errs into the fallback otherwise — the missing-lock case
     // is a fresh project the heuristic already serves.
-    let Ok(output) = Command::new("cargo")
-        .args(["metadata", "--format-version", "1", "--frozen"])
-        .arg("--manifest-path")
-        .arg(manifest)
-        .output()
-    else {
-        return HashMap::new();
-    };
-    if !output.status.success() {
-        return HashMap::new();
-    }
-    let Ok(full) = serde_json::from_slice::<Full>(&output.stdout) else {
-        return HashMap::new();
-    };
-    full.packages
-        .into_iter()
-        .filter_map(|package| renamed_lib(&package.name, &package.targets))
-        .collect()
+    let full = first_resolution(|features| {
+        let output = Command::new("cargo")
+            .args(["metadata", "--format-version", "1", "--frozen"])
+            .args(features)
+            .arg("--manifest-path")
+            .arg(manifest)
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        serde_json::from_slice::<Full>(&output.stdout).ok()
+    });
+    full.map_or_else(HashMap::new, |full| {
+        full.packages
+            .into_iter()
+            .filter_map(|package| renamed_lib(&package.name, &package.targets))
+            .collect()
+    })
+}
+
+/// Resolve with every feature on, as the analysis itself does by default, so
+/// a non-default optional dependency's lib name is seen. A checkout built only
+/// with default features may not have those crates cached, and that must not
+/// cost it the lib names it does have, so default features are the fallback.
+fn first_resolution<T>(mut resolve: impl FnMut(&[&str]) -> Option<T>) -> Option<T> {
+    resolve(&["--all-features"]).or_else(|| resolve(&[]))
 }
 
 #[cfg(test)]
 mod tests {
+    /// All features come first, and failing there still leaves default features.
+    #[test]
+    fn resolution_falls_back_from_all_features_to_default_features() {
+        let mut tried = Vec::new();
+        let answer = super::first_resolution(|features| {
+            tried.push(features.join(" "));
+            features.is_empty().then_some("default")
+        });
+        assert_eq!(answer, Some("default"));
+        assert_eq!(tried, ["--all-features", ""]);
+
+        let mut calls = 0;
+        let answer = super::first_resolution(|_| {
+            calls += 1;
+            Some("all")
+        });
+        assert_eq!((answer, calls), (Some("all"), 1));
+    }
+
     /// The manifest key `default-features` is on unless written: an entry
     /// that does not spell it keeps the dependency's default features, which
     /// is what the doubled-copy check reads off this field.

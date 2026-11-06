@@ -538,7 +538,7 @@ impl CrateReferences {
             names: &mut self.names,
             aliases: &mut self.aliases,
             file_aliases: HashMap::new(),
-            module_depth: 0,
+            scope_depth: 0,
             hidden_code: &mut self.hidden_code,
             dir,
             origin,
@@ -780,7 +780,7 @@ pub fn find_unused(
         }
         let name = dependency.crate_name(lib_names);
         if !references.names.contains_key(&name)
-            && !named_by_features.contains(&name)
+            && !named_by_features.contains(&dependency.feature_key())
             && !companion_mentioned(package, lib_names, references, &name)
         {
             unused.push(UnusedDependency {
@@ -877,8 +877,11 @@ pub fn find_misplaced(
         // An entry the `[features]` table names is load bearing for a reason
         // that has no code and therefore no target — and `[features]` cannot
         // refer to a dev-dependency at all, so moving it would break the
-        // feature that names it.
-        if named_by_features.contains(&crate_name) {
+        // feature that names it. For the same reason a dev copy sharing the key
+        // is not what the feature names, and is still judged as a duplicate.
+        if dependency.dependency_kind() != DependencyKind::Development
+            && named_by_features.contains(&dependency.feature_key())
+        {
             continue;
         }
         let found = references
@@ -1202,10 +1205,10 @@ struct Collector<'a, 'g> {
     /// is an ordinary item: it binds in its own module and nowhere else, so
     /// these are folded over this file alone.
     file_aliases: HashMap<String, String>,
-    /// How many `mod { .. }` blocks enclose the item being walked. An alias
-    /// written inside one binds inside it, and folding it over anything wider
-    /// rewrites mentions that never saw it.
-    module_depth: usize,
+    /// How many `mod { .. }` blocks and `{ .. }` code blocks enclose the item
+    /// being walked. An alias written inside one binds inside it, and folding
+    /// it over anything wider rewrites mentions that never saw it.
+    scope_depth: usize,
     /// Whether this file *is* the crate root. Only an `extern crate` written
     /// there enters the extern prelude; the same item at the top of
     /// `src/foo.rs` is an ordinary item of module `foo` and binds no wider
@@ -1364,9 +1367,15 @@ impl<'ast> Visit<'ast> for Collector<'_, '_> {
     }
 
     fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
-        self.module_depth += 1;
+        self.scope_depth += 1;
         syn::visit::visit_item_mod(self, node);
-        self.module_depth -= 1;
+        self.scope_depth -= 1;
+    }
+
+    fn visit_block(&mut self, node: &'ast syn::Block) {
+        self.scope_depth += 1;
+        syn::visit::visit_block(self, node);
+        self.scope_depth -= 1;
     }
 
     fn visit_item_use(&mut self, node: &'ast syn::ItemUse) {
@@ -1378,7 +1387,7 @@ impl<'ast> Visit<'ast> for Collector<'_, '_> {
         // of it. Only the whole-path form counts: `use real::item as alias;`
         // renames an item, and its head is still `real`.
         if let syn::UseTree::Rename(rename) = &node.tree
-            && self.module_depth == 0
+            && self.scope_depth == 0
         {
             self.file_aliases
                 .insert(rename.rename.to_string(), rename.ident.to_string());
@@ -1397,7 +1406,7 @@ impl<'ast> Visit<'ast> for Collector<'_, '_> {
         // what stops every later `alias::` being charged to an entry that
         // merely shares that name.
         if let Some((_, alias)) = &node.rename
-            && self.module_depth == 0
+            && self.scope_depth == 0
         {
             // Crate-wide only from the crate root, where it enters the extern
             // prelude. Anywhere else it is an ordinary item of its own module.
@@ -2429,6 +2438,23 @@ mod tests {
         assert!(found[0].duplicate);
     }
 
+    /// A feature naming the key means the `[dependencies]` copy, since features
+    /// cannot refer to a dev-dependency, so the stale dev copy is still reported
+    /// and the normal copy is still left alone.
+    #[test]
+    fn a_feature_naming_a_doubled_key_does_not_excuse_the_dev_copy() {
+        let refs = references(&["pub fn go() { doubled::run(); }\n"]);
+        let mut manifest = package(vec![dependency("doubled"), dev_dependency("doubled")]);
+        manifest.features.insert(
+            "extra".to_string(),
+            vec!["doubled/some-feature".to_string()],
+        );
+        assert_eq!(
+            misplaced(&manifest, &refs).0,
+            vec![("doubled".to_string(), DependencyKind::Normal)]
+        );
+    }
+
     /// The zed shape [#61] filed, over a hundred manifests strong there: the
     /// dev copy re-declares the crate solely to turn a feature on for dev
     /// builds (`clock = { workspace = true, features = ["test-support"] }`),
@@ -2780,6 +2806,45 @@ mod tests {
         ]);
         let manifest = package(vec![dev_dependency("dev_only")]);
         assert!(misplaced(&manifest, &refs).0.is_empty());
+    }
+
+    /// Leaving a nested scope restores the outer one, so a rename written after
+    /// a `mod` or a function body still applies to the file.
+    #[test]
+    fn a_rename_after_a_nested_scope_still_applies_to_the_file() {
+        for scope in ["mod nested {}", "pub fn first() {}"] {
+            let refs = references(&[&format!(
+                "{scope}\nuse real as alias;\npub fn go() {{ alias::used(); }}\n"
+            )]);
+            assert_eq!(refs.names.get("alias").copied(), None, "{scope}");
+            assert_eq!(
+                refs.names.get("real").copied(),
+                Some(Contexts::RUNTIME),
+                "{scope}"
+            );
+        }
+    }
+
+    /// A rename in a function body binds in that block, so the same word
+    /// elsewhere in the file stays its own mention. Both spellings, because
+    /// both take the same scope check.
+    #[test]
+    fn a_rename_in_a_function_body_does_not_reach_the_rest_of_the_file() {
+        for rename in ["use real as other;", "extern crate real as other;"] {
+            let refs = references(&[&format!(
+                "pub fn first() {{ {rename} other::used(); }}\npub fn second() {{ other::used(); }}\n"
+            )]);
+            assert_eq!(
+                refs.names.get("other").copied(),
+                Some(Contexts::RUNTIME),
+                "{rename}"
+            );
+            assert_eq!(
+                refs.names.get("real").copied(),
+                Some(Contexts::RUNTIME),
+                "{rename}"
+            );
+        }
     }
 
     /// An alias's mentions belong to the crate it renames.

@@ -128,7 +128,8 @@ Tracked here rather than hidden. Almost all of them cost findings rather than in
   builds a lib named `md5`, `rustls-webpki` one named `webpki`) is matched by
   the *lib* name wherever a current lockfile and a cached, offline-resolvable
   dependency graph exist — any checkout that has built once — and by a workspace member's
-  targets always. On a cold cache the package-name heuristic runs as before,
+  targets always. A non-default optional dependency needs to be cached too, which
+  takes a build with that feature on. On a cold cache the package-name heuristic runs as before,
   which can report such an entry against code that uses it; building the
   project once is the fix.
 - A dependency named only by the code a derive expands to is kept alive by
@@ -149,8 +150,8 @@ Tracked here rather than hidden. Almost all of them cost findings rather than in
   prelude, so only that one holds for every module of the crate. A `use real as
   alias;`, or an `extern crate` at the top of a module file like `src/foo.rs`,
   is an ordinary item binding in its own module, so it is followed within the
-  file that writes it and no further. A rename inside a nested `mod` is not
-  followed at all. Getting this wrong invents findings rather than
+  file that writes it and no further. A rename inside a nested `mod` or a function
+  body is not followed at all. Getting this wrong invents findings rather than
   losing them: a crate that renames one dependency to a name another module
   uses for real would have that second crate's mentions folded away, and the
   entry reported unused.
