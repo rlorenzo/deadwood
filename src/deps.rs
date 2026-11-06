@@ -877,8 +877,11 @@ pub fn find_misplaced(
         // An entry the `[features]` table names is load bearing for a reason
         // that has no code and therefore no target — and `[features]` cannot
         // refer to a dev-dependency at all, so moving it would break the
-        // feature that names it.
-        if named_by_features.contains(&dependency.feature_key()) {
+        // feature that names it. For the same reason a dev copy sharing the key
+        // is not what the feature names, and is still judged as a duplicate.
+        if dependency.dependency_kind() != DependencyKind::Development
+            && named_by_features.contains(&dependency.feature_key())
+        {
             continue;
         }
         let found = references
@@ -2435,6 +2438,23 @@ mod tests {
         assert!(found[0].duplicate);
     }
 
+    /// A feature naming the key means the `[dependencies]` copy, since features
+    /// cannot refer to a dev-dependency, so the stale dev copy is still reported
+    /// and the normal copy is still left alone.
+    #[test]
+    fn a_feature_naming_a_doubled_key_does_not_excuse_the_dev_copy() {
+        let refs = references(&["pub fn go() { doubled::run(); }\n"]);
+        let mut manifest = package(vec![dependency("doubled"), dev_dependency("doubled")]);
+        manifest.features.insert(
+            "extra".to_string(),
+            vec!["doubled/some-feature".to_string()],
+        );
+        assert_eq!(
+            misplaced(&manifest, &refs).0,
+            vec![("doubled".to_string(), DependencyKind::Normal)]
+        );
+    }
+
     /// The zed shape [#61] filed, over a hundred manifests strong there: the
     /// dev copy re-declares the crate solely to turn a feature on for dev
     /// builds (`clock = { workspace = true, features = ["test-support"] }`),
@@ -2786,6 +2806,23 @@ mod tests {
         ]);
         let manifest = package(vec![dev_dependency("dev_only")]);
         assert!(misplaced(&manifest, &refs).0.is_empty());
+    }
+
+    /// Leaving a nested scope restores the outer one, so a rename written after
+    /// a `mod` or a function body still applies to the file.
+    #[test]
+    fn a_rename_after_a_nested_scope_still_applies_to_the_file() {
+        for scope in ["mod nested {}", "pub fn first() {}"] {
+            let refs = references(&[&format!(
+                "{scope}\nuse real as alias;\npub fn go() {{ alias::used(); }}\n"
+            )]);
+            assert_eq!(refs.names.get("alias").copied(), None, "{scope}");
+            assert_eq!(
+                refs.names.get("real").copied(),
+                Some(Contexts::RUNTIME),
+                "{scope}"
+            );
+        }
     }
 
     /// A rename in a function body binds in that block, so the same word
