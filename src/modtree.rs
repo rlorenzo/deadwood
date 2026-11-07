@@ -983,8 +983,9 @@ fn queue_speculative(
             }
         }
     }
-    let as_file = base.join(format!("{name}.rs"));
-    let as_dir = base.join(name).join("mod.rs");
+    let stem = file_stem(name);
+    let as_file = base.join(format!("{stem}.rs"));
+    let as_dir = base.join(stem).join("mod.rs");
     if as_file.is_file() {
         candidates.push((as_file, false, true));
     } else if as_dir.is_file() {
@@ -1186,7 +1187,7 @@ fn collect_mod_decls(
                 // top of `a.rs` is `a.rs`'s own directory and not `a/`.
                 let nested_base = match path_attr(&m.attrs) {
                     Some(explicit) => under.path_base.join(explicit),
-                    None => under.base.join(&name),
+                    None => under.base.join(file_stem(&name)),
                 };
                 walk.inline_mods.push((child_module.clone(), test_only));
                 collect_mod_decls(
@@ -1254,8 +1255,9 @@ fn collect_mod_decls(
                     }
                     continue;
                 }
-                let as_file = under.base.join(format!("{name}.rs"));
-                let as_dir = under.base.join(&name).join("mod.rs");
+                let stem = file_stem(&name);
+                let as_file = under.base.join(format!("{stem}.rs"));
+                let as_dir = under.base.join(stem).join("mod.rs");
                 if as_file.is_file() {
                     walk.queue.push(Pending {
                         path: as_file,
@@ -1395,10 +1397,21 @@ fn exclude_subtree(
             };
             (target.to_path_buf(), directory)
         }
-        None => (child_base.join(format!("{name}.rs")), child_base.join(name)),
+        None => {
+            let stem = file_stem(name);
+            (child_base.join(format!("{stem}.rs")), child_base.join(stem))
+        }
     };
     excluded.push(normalize(&file));
     excluded.extend(rs_files_under(&directory));
+}
+
+/// The file name a module name maps to. A raw identifier keeps its `r#` in
+/// the module path, where every spelling of it is stringified the same way,
+/// but rustc looks for `mod r#struct;` at `struct.rs` — bevy declares one, and
+/// probing `r#struct.rs` left the module unresolved and every check skipped.
+fn file_stem(name: &str) -> &str {
+    name.strip_prefix("r#").unwrap_or(name)
 }
 
 /// Every file a `mod`'s attributes name, in the order they are written.
@@ -1812,6 +1825,21 @@ mod tests {
             .collect();
         names.sort();
         names
+    }
+
+    /// bevy's `mod r#struct;`: rustc finds a raw-identifier module at the
+    /// unprefixed file name, inline or not, and so does the walk.
+    #[test]
+    fn a_raw_identifier_module_lives_at_its_unprefixed_file() {
+        let names = reached(
+            "raw-ident",
+            &[
+                ("lib.rs", "mod r#struct;\nmod r#type { mod r#enum; }\n"),
+                ("struct.rs", "pub fn a() {}\n"),
+                ("type/enum.rs", "pub fn b() {}\n"),
+            ],
+        );
+        assert_eq!(names, ["lib.rs", "struct.rs", "type/enum.rs"]);
     }
 
     /// The tokio shape [#60] filed 381 times: `cfg_fs! { pub mod fs; }` — a
