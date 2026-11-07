@@ -4227,11 +4227,16 @@ mod tests {
             pub fn hidden() {}\n\
             pub fn prose() {}\n\
             pub fn shell() {}\n\
+            pub fn tagged() {}\n\
             /// Calls `prose` in a sentence.\n\
             /// ```no_run\n/// use krate::helper;\n/// # krate::hidden();\n/// ```\n\
             /// ```text\n/// shell\n/// ```\n\
+            /// ```sh,ignore\n/// tagged\n/// ```\n\
             pub fn documented() {}\n";
-        assert_eq!(unused_in_root(source), vec!["prose", "shell", "documented"]);
+        assert_eq!(
+            unused_in_root(source),
+            vec!["prose", "shell", "tagged", "documented"]
+        );
 
         // An item only its own doctest names is still dead, and so is one
         // only a dead item's doctest names.
@@ -4265,6 +4270,19 @@ mod tests {
                 ("b", "pub struct Thing;\npub struct Unused;\n"),
             ]),
             vec!["Unused"]
+        );
+        // A `pub(crate) use` is visible crate-wide, so a glob from anywhere in
+        // the crate goes through it.
+        assert_eq!(
+            unused_in_binary(&[
+                (
+                    "",
+                    "mod a;\nmod deep;\npub use a::*;\nfn main() { let _ = Thing; }\n"
+                ),
+                ("a", "pub(crate) use crate::deep::Thing;\n"),
+                ("deep", "pub struct Thing;\n"),
+            ]),
+            Vec::<String>::new()
         );
         // From a child module the parent's private imports are visible, so
         // `use super::*;` keeps resolving through them.

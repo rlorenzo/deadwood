@@ -2270,6 +2270,25 @@ mod tests {
         );
         assert!(misplaced(&manifest, &refs).0.is_empty());
 
+        // Exactly the dependencies: a bare entry naming an ordinary feature is
+        // not one, a one-entry feature is implicit only when that entry is its
+        // own `dep:`, and a feature sharing a dependency's name still names it.
+        manifest.features = HashMap::from([
+            (
+                "bench".to_string(),
+                vec!["criterion".to_string(), "extras".to_string()],
+            ),
+            ("extras".to_string(), vec!["serde/std".to_string()]),
+            ("criterion".to_string(), vec!["dep:criterion".to_string()]),
+            ("x".to_string(), vec!["x/std".to_string()]),
+        ]);
+        let mut named: Vec<String> = manifest
+            .dependencies_named_by_features()
+            .into_iter()
+            .collect();
+        named.sort();
+        assert_eq!(named, ["criterion", "serde", "x"]);
+
         // With no feature naming it at all, it still cannot be optional in
         // `[dev-dependencies]`.
         manifest.features.clear();

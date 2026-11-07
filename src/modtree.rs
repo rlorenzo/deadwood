@@ -2006,6 +2006,30 @@ mod tests {
         );
     }
 
+    /// Forwarding carries every kind of claim one prefix deeper: a literal
+    /// `mod` in the inner macro, and a `#[path = $f] mod $m;` whose file the
+    /// outer invocation names. A macro invoking itself folds to a fixed point
+    /// rather than forever.
+    #[test]
+    fn a_forward_carries_literal_and_path_claims_and_stops_on_recursion() {
+        let names = reached(
+            "forwarded-kinds",
+            &[
+                (
+                    "lib.rs",
+                    "macro_rules! fixed { () => { mod fixed; }; }\n\
+                     macro_rules! pathed { ($f:literal, $m:ident) => { #[path = $f] mod $m; }; }\n\
+                     macro_rules! wrap {\n    ($($f:literal => $m:ident),*) => {\n        pub mod w { fixed!{} $(pathed!{$f, $m})* }\n    };\n}\n\
+                     macro_rules! again { () => { again!{} wrap!{} }; }\n\
+                     wrap! { \"Unusual.rs\" => odd }\nagain!();\n",
+                ),
+                ("w/fixed.rs", "pub fn f() {}\n"),
+                ("w/Unusual.rs", "pub fn o() {}\n"),
+            ],
+        );
+        assert_eq!(names, ["lib.rs", "w/Unusual.rs", "w/fixed.rs"]);
+    }
+
     /// The same macros defined in another crate: resolved alone, the invoking
     /// crate settles nothing; with the defining crate's macros known, it does.
     #[test]
@@ -2043,6 +2067,14 @@ mod tests {
         );
         assert!(alone.spliced.is_empty());
         assert!(alone.wants_foreign(&lint.macros));
+        assert!(
+            !alone.wants_foreign(&MacroDefs::default()),
+            "nothing to gain"
+        );
+        assert!(
+            !lint.wants_foreign(&lint.macros),
+            "a crate defining every macro it invokes gains nothing from its own"
+        );
         let with = resolve_with(
             &root.join("eslint/lib.rs"),
             config.ignore(),

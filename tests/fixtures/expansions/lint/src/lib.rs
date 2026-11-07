@@ -14,12 +14,21 @@ macro_rules! rules {
     };
 }
 
-#[macro_export]
-macro_rules! warn_once {
-    () => {{
-        // A local, not a crate: it names no dependency.
-        let cache = 1;
-        paint::paint();
-        cache
-    }};
+mod logging {
+    #[macro_export]
+    macro_rules! warn_once {
+        () => {{
+            // A local, not a crate: it names no dependency.
+            let cache = 1;
+            $crate::paint_it!();
+            cache
+        }};
+    }
+
+    #[macro_export]
+    macro_rules! paint_it {
+        () => {
+            paint::paint()
+        };
+    }
 }

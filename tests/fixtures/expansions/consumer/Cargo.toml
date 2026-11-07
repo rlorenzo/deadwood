@@ -7,3 +7,4 @@ edition = "2021"
 facade = { path = "../facade" }
 cache = { path = "../cache" }
 paint = { path = "../paint" }
+tag_store = { path = "../tag_store" }

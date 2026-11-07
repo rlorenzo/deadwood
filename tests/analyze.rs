@@ -4845,18 +4845,47 @@ fn another_crates_macros_name_dependencies_and_declare_modules() {
     assert_eq!(
         reported(&analysis, FindingKind::UnusedDependency),
         vec![
+            ("bystander/Cargo.toml".to_string(), "cache"),
+            ("bystander/Cargo.toml".to_string(), "facade"),
             ("consumer/Cargo.toml".to_string(), "paint"),
             ("eslint/Cargo.toml".to_string(), "cache"),
         ],
-        "a local the macro binds and a word in the macro's prose name no crate"
+        "a local the macro binds, a word in the macro's prose, and a derive crate \
+         nobody invokes name no crate"
     );
     assert!(reported(&analysis, FindingKind::MisplacedDependency).is_empty());
     assert_eq!(
         reported(&analysis, FindingKind::UnusedPubItem),
         vec![
+            ("bystander/src/lib.rs".to_string(), "idle"),
             ("consumer/src/lib.rs".to_string(), "keyed"),
             ("eslint/src/lib.rs".to_string(), "go"),
         ],
         "the macro-declared rule module's items stay out of the table"
+    );
+}
+
+/// Code generated at build time and spliced in with an `include!` Deadwood
+/// cannot follow may call anything in its own package and anything the
+/// workspace crates it depends on export, so none of that is reported, and a
+/// warning says why. What it cannot name — a dependency's private module, a
+/// package it does not depend on — still is.
+#[test]
+fn code_that_cannot_be_read_keeps_alive_what_it_could_name() {
+    let analysis = analyze(&fixtures().join("hiddengen"), None).expect("analysis should succeed");
+    assert!(
+        analysis
+            .warnings
+            .iter()
+            .any(|w| w.contains("unused-pub check limited for package `generated`")),
+        "{:?}",
+        analysis.warnings
+    );
+    assert_eq!(
+        reported(&analysis, FindingKind::UnusedPubItem),
+        vec![
+            ("other/src/lib.rs".to_string(), "lonely"),
+            ("support/src/lib.rs".to_string(), "tucked"),
+        ]
     );
 }

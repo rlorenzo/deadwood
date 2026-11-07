@@ -1,1 +1,1 @@
-pub use keymacros::Key;
+pub use keymacros::{marked, Key};

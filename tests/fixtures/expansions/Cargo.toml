@@ -9,8 +9,18 @@
 #   `warn_user_once!`), and declares its rule modules with `lint::rules!`,
 #   which forwards to `lint::rule_module!` (bun's lint crates).
 #
-# And two that must stay findings: `warn_once!` binds a local named `cache`,
-# which names no crate, and `keymacros` says "paint" only in prose.
+# `consumer` also needs `tag_store`, which the derive names only in a string
+# (bevy's manifest lookup), and `attruser` needs `marker`, which an attribute
+# macro from `keymacros` quotes.
+#
+# And three that must stay findings: `warn_once!` binds a local named
+# `cache`, which names no crate; `keymacros` says "paint" only in prose; and
+# `bystander` depends on the derive crate but never uses a macro from it, so
+# its `cache` entry is still unused. `eslint` writes a `Key` of its own, which
+# is not the derive's, since it doesn't depend on the derive crate.
 [workspace]
 resolver = "2"
-members = ["cache", "keymacros", "facade", "consumer", "paint", "lint", "eslint"]
+members = [
+    "cache", "keymacros", "facade", "consumer", "paint", "lint", "eslint",
+    "tag_store", "marker", "attruser", "bystander",
+]
