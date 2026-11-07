@@ -2038,6 +2038,23 @@ impl SymbolTable {
         }
     }
 
+    /// [`SymbolTable::mark_name_used`], attributed to `from` rather than to the
+    /// root set: for a channel whose referrer is known even though the item
+    /// it names is not, which is what a doctest is.
+    /// An item naming itself is skipped: a doctest showing how to call the
+    /// item it documents is no evidence that anything else does.
+    fn mark_name_used_by(&mut self, from: &Referrer, name: &str) {
+        let Some(ids) = self.by_name.get(name) else {
+            return;
+        };
+        for id in ids.clone() {
+            if matches!(from, Referrer::Defs(defs) if defs == &[id]) {
+                continue;
+            }
+            self.mark_def_used(from, id);
+        }
+    }
+
     /// Mark every identifier in an unexpanded token stream, at any nesting
     /// depth. Macro input can name anything, and we do not expand it.
     fn mark_tokens_used(&mut self, tokens: &TokenStream) {
@@ -2197,7 +2214,10 @@ impl RefWalker<'_> {
     /// `take_until` is used only by the doctests of its neighbours. Doctests
     /// are separate crates that link the dev-dependencies, and what they name
     /// is spelled through the crate's public paths, so each identifier is read
-    /// the way macro input is: a use of every item with that name, as a root.
+    /// the way macro input is, as a use of every item with that name — but
+    /// one the documented item makes, not a root. The doctest goes when the
+    /// item does, so an item only its own doctest names is still reported,
+    /// and so is one only a dead item's doctest names.
     fn scan_doc_attr(&mut self, attr: &syn::Attribute) {
         let syn::Meta::NameValue(nv) = &attr.meta else {
             return;
@@ -2232,11 +2252,12 @@ impl RefWalker<'_> {
                 continue;
             }
             if self.doc_fence == Some(true) {
+                let from = self.enclosing.clone();
                 for word in line
                     .split(|c: char| !c.is_alphanumeric() && c != '_')
                     .filter(|word| !word.is_empty())
                 {
-                    self.table.mark_name_used(word);
+                    self.table.mark_name_used_by(&from, word);
                 }
             }
         }
@@ -4163,6 +4184,22 @@ mod tests {
             /// ```text\n/// shell\n/// ```\n\
             pub fn documented() {}\n";
         assert_eq!(unused_in_root(source), vec!["prose", "shell", "documented"]);
+
+        // An item only its own doctest names is still dead, and so is one
+        // only a dead item's doctest names.
+        let source = "pub fn dead_helper() {}\n\
+            /// ```\n/// krate::alone();\n/// krate::dead_helper();\n/// ```\n\
+            pub fn alone() {}\n";
+        let unused = unused_in_binary_root(source);
+        assert!(unused.contains(&"alone".to_string()), "{unused:?}");
+        assert!(unused.contains(&"dead_helper".to_string()), "{unused:?}");
+
+        // In a library too, where the documented item is surface and so
+        // always reached: its own doctest is not a use of it.
+        assert_eq!(
+            unused_in_root("/// ```\n/// krate::shown();\n/// ```\npub fn shown() {}\n"),
+            vec!["shown"]
+        );
     }
 
     /// An opaque mention is a root, not an edge: it is a use of every item of
