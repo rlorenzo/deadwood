@@ -2205,6 +2205,30 @@ mod tests {
         );
     }
 
+    /// ruff's `warn_user_once!` shape: the macro lives in another workspace
+    /// crate and its body names `colored`, which resolves in the invoking
+    /// crate — so the invoker's `colored` entry is in use, placement unknown.
+    /// A macro the package defines itself was read with its own files.
+    #[test]
+    fn a_dependency_another_crates_macro_body_names_is_in_use() {
+        let manifest = package(vec![dependency("colored"), dependency("linter")]);
+        let bodies = HashMap::from([(
+            "warn_once".to_string(),
+            HashSet::from(["colored".to_string(), "Colorize".to_string()]),
+        )]);
+        let mut refs = references(&["pub fn go() { linter::warn_once!(\"hi\"); }\n"]);
+        assert_eq!(unused(&manifest, &refs).0, vec!["colored".to_string()]);
+        refs.add_foreign_macros(&bodies, &HashSet::from(["warn_once".to_string()]));
+        assert_eq!(
+            unused(&manifest, &refs).0,
+            vec!["colored".to_string()],
+            "its own macro"
+        );
+        refs.add_foreign_macros(&bodies, &HashSet::new());
+        assert!(unused(&manifest, &refs).0.is_empty());
+        assert!(misplaced(&manifest, &refs).0.is_empty());
+    }
+
     /// ruff_benchmark's shape: optional entries only benches name, enabled by
     /// bare names in `[features]` that are the implicit features Cargo made
     /// for them. `[features]` names them, and Cargo rejects an optional
