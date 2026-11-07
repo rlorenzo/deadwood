@@ -839,6 +839,31 @@ impl SymbolTable {
         }
     }
 
+    /// Root what code Deadwood could not read may name: every definition of a
+    /// [`crate::unused::Hidden::Whole`] crate, and the public surface of a
+    /// [`crate::unused::Hidden::Surface`] one. See `hidden_code_reach` in the
+    /// crate root for where the two come from.
+    pub(crate) fn root_hidden_code(&mut self, hidden: &[crate::unused::Hidden]) {
+        use crate::unused::Hidden;
+        if hidden.iter().all(|&h| h == Hidden::No) {
+            return;
+        }
+        let surface = self.externally_reachable_modules();
+        let rooted: Vec<usize> = (0..self.defs.len())
+            .filter(|&id| {
+                let def = &self.defs[id];
+                match hidden.get(self.modules[def.module].krate) {
+                    Some(Hidden::Whole) => true,
+                    Some(Hidden::Surface) => def.is_pub && surface.contains(&def.module),
+                    _ => false,
+                }
+            })
+            .collect();
+        for id in rooted {
+            self.mark_def_used(&Referrer::Root, id);
+        }
+    }
+
     /// Resolve every path in `crates`, marking the definitions they name.
     ///
     /// Spliced files are walked here and nowhere else: they write paths that
@@ -2130,9 +2155,37 @@ struct RefWalker<'a> {
 /// `edition2021`, an unknown word — is read as code: marking a name used is
 /// the safe direction, so the list only needs to catch the common prose ones.
 const NON_RUST_FENCES: &[&str] = &[
-    "text", "txt", "plain", "console", "sh", "bash", "shell", "zsh", "toml", "json", "yaml",
-    "yml", "html", "xml", "css", "js", "javascript", "ts", "typescript", "c", "cpp", "c++",
-    "python", "py", "diff", "markdown", "md", "sql", "ini", "dot", "mermaid",
+    "text",
+    "txt",
+    "plain",
+    "console",
+    "sh",
+    "bash",
+    "shell",
+    "zsh",
+    "toml",
+    "json",
+    "yaml",
+    "yml",
+    "html",
+    "xml",
+    "css",
+    "js",
+    "javascript",
+    "ts",
+    "typescript",
+    "c",
+    "cpp",
+    "c++",
+    "python",
+    "py",
+    "diff",
+    "markdown",
+    "md",
+    "sql",
+    "ini",
+    "dot",
+    "mermaid",
 ];
 
 impl RefWalker<'_> {
@@ -2146,11 +2199,17 @@ impl RefWalker<'_> {
     /// is spelled through the crate's public paths, so each identifier is read
     /// the way macro input is: a use of every item with that name, as a root.
     fn scan_doc_attr(&mut self, attr: &syn::Attribute) {
-        let syn::Meta::NameValue(nv) = &attr.meta else { return };
+        let syn::Meta::NameValue(nv) = &attr.meta else {
+            return;
+        };
         if !nv.path.is_ident("doc") {
             return;
         }
-        let syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(text), .. }) = &nv.value else {
+        let syn::Expr::Lit(syn::ExprLit {
+            lit: syn::Lit::Str(text),
+            ..
+        }) = &nv.value
+        else {
             return;
         };
         for line in text.value().lines() {

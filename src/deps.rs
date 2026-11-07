@@ -443,6 +443,11 @@ pub struct CrateReferences {
 }
 
 impl CrateReferences {
+    /// Why the package holds code Deadwood never sees, if it does.
+    pub fn hidden_code(&self) -> Option<&'static str> {
+        self.hidden_code
+    }
+
     /// Add every crate name the files of one target refer to, attributed to
     /// the code that target is.
     pub fn add_target(&mut self, files: &[ParsedFile], target: &Target, gates: &Gates<'_>) {
@@ -2176,7 +2181,9 @@ mod tests {
             ("criterion".to_string(), vec!["dep:criterion".to_string()]),
         ]);
         assert!(
-            manifest.dependencies_named_by_features().contains("criterion"),
+            manifest
+                .dependencies_named_by_features()
+                .contains("criterion"),
             "a bare implicit feature names its dependency"
         );
         assert!(misplaced(&manifest, &refs).0.is_empty());

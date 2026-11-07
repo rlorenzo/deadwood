@@ -333,6 +333,8 @@ pub fn analyze_with(
     // Package name to its library crate, so a dependency rename can be
     // attached to the crate the alias actually names.
     let mut lib_of_package: HashMap<&str, usize> = HashMap::new();
+    // The package each entry of `crates` came from, by index.
+    let mut package_of_crate: Vec<&str> = Vec::new();
     // Crate names each package's code refers to, for the dependency check.
     // Packages whose module tree did not resolve are left out entirely.
     let mut references: Vec<(&metadata::Package, deps::CrateReferences, cfg::Gates<'_>)> =
@@ -422,6 +424,7 @@ pub fn analyze_with(
                 }
             }
             spliced.extend(remounted);
+            package_of_crate.push(package.name.as_str());
             crates.push(resolve::CrateUnit {
                 names,
                 // The same rule the dependency check places a mention by: a
@@ -567,7 +570,8 @@ pub fn analyze_with(
     // resolution hit any problem, files (and the paths inside them) may be
     // missing, and unseen paths would turn into false positives.
     if warnings.is_empty() {
-        let items = unused::find_items(&crates, config.public_api(), &mut warnings);
+        let hidden = hidden_code_reach(&meta, &references, &package_of_crate, &mut warnings);
+        let items = unused::find_items(&crates, &hidden, config.public_api(), &mut warnings);
         findings.extend(items.unused.into_iter().map(|item| Finding {
             kind: if item.reexport {
                 FindingKind::UnusedReexport
@@ -909,6 +913,69 @@ fn feature_list(names: &[String]) -> String {
         1 => format!("feature {}", quoted[0]),
         _ => format!("features {}", quoted.join(", ")),
     }
+}
+
+/// Which crates code Deadwood could not read may be naming, for the unused-pub
+/// check.
+///
+/// A package that `include!`s a file Deadwood cannot open — generated at build
+/// time, most often, under `OUT_DIR` or a path an `env!` names — holds code
+/// that can call any of its own items and anything its workspace dependencies
+/// export. bun writes its C-ABI thunks into such a file and calls a
+/// hand-written `pub fn` from each, so every one of those read as dead. The
+/// dependency checks already stand down for the package itself; here the
+/// package's own items are all [`unused::Hidden::Whole`], and the public
+/// surface of every workspace crate it depends on, directly or not,
+/// [`unused::Hidden::Surface`] — a re-export chain the hidden code walks is as
+/// invisible as the code.
+fn hidden_code_reach(
+    meta: &metadata::Metadata,
+    references: &[(&metadata::Package, deps::CrateReferences, cfg::Gates<'_>)],
+    package_of_crate: &[&str],
+    warnings: &mut Vec<String>,
+) -> Vec<unused::Hidden> {
+    let mut whole: HashSet<&str> = HashSet::new();
+    for (package, package_references, _) in references {
+        if let Some(reason) = package_references.hidden_code() {
+            whole.insert(package.name.as_str());
+            warnings.push(format!(
+                "unused-pub check limited for package `{}` and the workspace crates it depends on: \
+                 {reason}, and that code may name any of their public items",
+                package.name
+            ));
+        }
+    }
+    let members: HashMap<&str, &metadata::Package> = meta
+        .packages
+        .iter()
+        .map(|package| (package.name.as_str(), package))
+        .collect();
+    let mut surface: HashSet<&str> = HashSet::new();
+    let mut queue: Vec<&str> = whole.iter().copied().collect();
+    while let Some(name) = queue.pop() {
+        let Some(package) = members.get(name) else {
+            continue;
+        };
+        for dependency in &package.dependencies {
+            if let Some((&member, _)) = members.get_key_value(dependency.name.as_str())
+                && surface.insert(member)
+            {
+                queue.push(member);
+            }
+        }
+    }
+    package_of_crate
+        .iter()
+        .map(|package| {
+            if whole.contains(package) {
+                unused::Hidden::Whole
+            } else if surface.contains(package) {
+                unused::Hidden::Surface
+            } else {
+                unused::Hidden::No
+            }
+        })
+        .collect()
 }
 
 /// Drop the findings the configuration silences and label the rest with their
