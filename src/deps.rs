@@ -446,6 +446,21 @@ pub struct CrateReferences {
 }
 
 impl CrateReferences {
+    /// Whether any of the package's code mentions `word` at all.
+    pub fn mentions(&self, word: &str) -> bool {
+        self.names.contains_key(word)
+    }
+
+    /// Count `words` as mentions whose placement is unknown.
+    pub fn add_opaque_words<'w>(&mut self, words: impl IntoIterator<Item = &'w String>) {
+        for word in words {
+            self.names
+                .entry(word.clone())
+                .or_default()
+                .insert(Contexts::OPAQUE);
+        }
+    }
+
     /// Count the words of the workspace macros this package invokes but does
     /// not define, as mentions whose placement is unknown.
     ///

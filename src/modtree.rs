@@ -814,7 +814,7 @@ fn effective_emission(
         if let Some(emission) = lookup(&inner) {
             let mut folded = MacroEmission::default();
             folded.merge(emission, &prefix);
-            pending.extend(folded.forwards.drain(..));
+            pending.append(&mut folded.forwards);
             out.merge(&folded, &[]);
         }
     }

@@ -1,0 +1,13 @@
+# Test fixture: crates named only by code another workspace crate's macro
+# writes, and modules only another crate's macro declares. Each was a false
+# positive on a large workspace before 1.0:
+#
+# - `consumer` derives `Key` through `facade`'s re-export, and the derive in
+#   `keymacros` expands to a `cache` path (bevy's `ExtractComponent`, ruff's
+#   `CacheKey`).
+# - `eslint` invokes `lint::warn_once!`, whose body names `paint` (ruff's
+#   `warn_user_once!`), and declares its rule modules with `lint::rules!`,
+#   which forwards to `lint::rule_module!` (bun's lint crates).
+[workspace]
+resolver = "2"
+members = ["cache", "keymacros", "facade", "consumer", "paint", "lint", "eslint"]

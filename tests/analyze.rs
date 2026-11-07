@@ -4832,3 +4832,24 @@ fn ignore_patterns_match_through_a_symlinked_workspace() {
         assert!(analysis.warnings.is_empty(), "{:?}", analysis.warnings);
     }
 }
+
+/// What another workspace crate's macros write is code the invoking crate
+/// compiles: the `cache` a derive reached through a re-export expands to, the
+/// `paint` a `macro_rules!` body names, and the rule modules a macro forwards
+/// to another macro to declare. Each was reported against a manifest and a
+/// tree that build.
+#[test]
+fn another_crates_macros_name_dependencies_and_declare_modules() {
+    let analysis = analyze_fixture("expansions");
+    assert!(reported(&analysis, FindingKind::DeadFile).is_empty());
+    assert!(reported(&analysis, FindingKind::UnusedDependency).is_empty());
+    assert!(reported(&analysis, FindingKind::MisplacedDependency).is_empty());
+    assert_eq!(
+        reported(&analysis, FindingKind::UnusedPubItem),
+        vec![
+            ("consumer/src/lib.rs".to_string(), "keyed"),
+            ("eslint/src/lib.rs".to_string(), "go"),
+        ],
+        "the macro-declared rule module's items stay out of the table"
+    );
+}

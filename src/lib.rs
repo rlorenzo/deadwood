@@ -335,6 +335,8 @@ pub fn analyze_with(
     let mut lib_of_package: HashMap<&str, usize> = HashMap::new();
     // The package each entry of `crates` came from, by index.
     let mut package_of_crate: Vec<&str> = Vec::new();
+    // Whether each entry of `crates` is a proc-macro target.
+    let mut proc_macro_crate: Vec<bool> = Vec::new();
     // Crate names each package's code refers to, for the dependency check.
     // Packages whose module tree did not resolve are left out entirely.
     let mut references: Vec<(&metadata::Package, deps::CrateReferences, cfg::Gates<'_>)> =
@@ -474,6 +476,7 @@ pub fn analyze_with(
             }
             spliced.extend(remounted);
             package_of_crate.push(package.name.as_str());
+            proc_macro_crate.push(target.kind.iter().any(|kind| kind == "proc-macro"));
             crates.push(resolve::CrateUnit {
                 names,
                 // The same rule the dependency check places a mention by: a
@@ -625,6 +628,13 @@ pub fn analyze_with(
             .unwrap_or_default();
         package_references.add_foreign_macros(&bodies, &own);
     }
+    proc_macro_expansions(
+        &meta,
+        &crates,
+        &package_of_crate,
+        &proc_macro_crate,
+        &mut references,
+    );
 
     // Usage resolution must see every file in the workspace: if module
     // resolution hit any problem, files (and the paths inside them) may be
@@ -975,16 +985,164 @@ fn feature_list(names: &[String]) -> String {
     }
 }
 
+/// Count what a workspace proc macro's expansion can name as a mention by
+/// every package that uses the macro.
+///
+/// A derive's output names crates the deriving package never writes: ruff's
+/// `#[derive(CacheKey)]` expands to `ruff_cache::CacheKey`, and bevy's
+/// `#[derive(ExtractComponent)]` — reached through a `bevy_render` re-export —
+/// looks `bevy_extract` up in the consumer's own manifest and names it. The
+/// expansion cannot be computed without running the macro, but the macro's
+/// source is in the workspace: every identifier its `quote!`-family
+/// invocations write, and every word of its string literals, is something the
+/// expansion may name. A package counts as using the crate's macros when its
+/// code mentions one of their names (a derive, its helper attributes, an
+/// attribute or function-like macro) and the proc-macro package is among its
+/// workspace dependencies, however indirectly.
+fn proc_macro_expansions(
+    meta: &metadata::Metadata,
+    crates: &[resolve::CrateUnit],
+    package_of_crate: &[&str],
+    proc_macro_crate: &[bool],
+    references: &mut [(&metadata::Package, deps::CrateReferences, cfg::Gates<'_>)],
+) {
+    use proc_macro2::{TokenStream, TokenTree};
+    use syn::visit::Visit;
+
+    #[derive(Default)]
+    struct Expansion {
+        /// The names a consumer writes to invoke one of the crate's macros.
+        entry_points: HashSet<String>,
+        /// What the expansions may name.
+        words: HashSet<String>,
+    }
+
+    fn all_words(tokens: &TokenStream, into: &mut HashSet<String>) {
+        for tree in tokens.clone() {
+            match tree {
+                TokenTree::Ident(ident) => {
+                    into.insert(ident.to_string());
+                }
+                TokenTree::Group(group) => all_words(&group.stream(), into),
+                TokenTree::Literal(literal) => literal_words(&literal.to_string(), into),
+                TokenTree::Punct(_) => {}
+            }
+        }
+    }
+
+    fn literal_words(text: &str, into: &mut HashSet<String>) {
+        for word in text
+            .split(|c: char| !c.is_alphanumeric() && c != '_')
+            .filter(|word| !word.is_empty())
+        {
+            into.insert(word.to_string());
+        }
+    }
+
+    impl<'ast> Visit<'ast> for Expansion {
+        fn visit_macro(&mut self, node: &'ast syn::Macro) {
+            syn::visit::visit_macro(self, node);
+            // `quote!`, `quote_spanned!`, `parse_quote!` and the like.
+            if node
+                .path
+                .segments
+                .last()
+                .is_some_and(|segment| segment.ident.to_string().contains("quote"))
+            {
+                all_words(&node.tokens, &mut self.words);
+            } else {
+                // `format!("{}::Key", krate)` and friends build paths too.
+                for tree in node.tokens.clone() {
+                    if let TokenTree::Literal(literal) = tree {
+                        literal_words(&literal.to_string(), &mut self.words);
+                    }
+                }
+            }
+        }
+
+        fn visit_lit_str(&mut self, node: &'ast syn::LitStr) {
+            literal_words(&node.value(), &mut self.words);
+        }
+
+        fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
+            for attr in &node.attrs {
+                let path = attr.path();
+                if path.is_ident("proc_macro") || path.is_ident("proc_macro_attribute") {
+                    self.entry_points.insert(node.sig.ident.to_string());
+                } else if path.is_ident("proc_macro_derive")
+                    && let syn::Meta::List(list) = &attr.meta
+                {
+                    // The derive's name and its `attributes(..)` helpers.
+                    all_words(&list.tokens, &mut self.entry_points);
+                }
+            }
+            syn::visit::visit_item_fn(self, node);
+        }
+    }
+
+    let mut expansions: HashMap<&str, Expansion> = HashMap::new();
+    for ((unit, package), &is_proc_macro) in
+        crates.iter().zip(package_of_crate).zip(proc_macro_crate)
+    {
+        if !is_proc_macro {
+            continue;
+        }
+        let expansion = expansions.entry(package).or_default();
+        for file in unit.files.iter().chain(&unit.spliced) {
+            if let Some(ast) = &file.ast {
+                expansion.visit_file(ast);
+            }
+        }
+        expansion.entry_points.remove("attributes");
+    }
+    if expansions.is_empty() {
+        return;
+    }
+
+    let members: HashMap<&str, &metadata::Package> = meta
+        .packages
+        .iter()
+        .map(|package| (package.name.as_str(), package))
+        .collect();
+    for (package, package_references, _) in references.iter_mut() {
+        // Every workspace package this one depends on, however indirectly.
+        let mut reached: HashSet<&str> = HashSet::new();
+        let mut queue = vec![package.name.as_str()];
+        while let Some(name) = queue.pop() {
+            let Some(member) = members.get(name) else {
+                continue;
+            };
+            for dependency in &member.dependencies {
+                if let Some((&dep, _)) = members.get_key_value(dependency.name.as_str())
+                    && reached.insert(dep)
+                {
+                    queue.push(dep);
+                }
+            }
+        }
+        for (proc_macro, expansion) in &expansions {
+            if reached.contains(proc_macro)
+                && expansion
+                    .entry_points
+                    .iter()
+                    .any(|name| package_references.mentions(name))
+            {
+                package_references.add_opaque_words(&expansion.words);
+            }
+        }
+    }
+}
+
+/// Words by name: a macro's body words, or a package's defined macro names.
+type WordSets<K> = HashMap<K, HashSet<String>>;
+
 /// The words of every `macro_rules!` body in the workspace, by macro name,
 /// with the bodies of the macros each invokes folded in — and the names each
 /// package defines.
 fn macro_bodies<'p>(
     crates: &[resolve::CrateUnit],
     package_of_crate: &[&'p str],
-) -> (
-    HashMap<String, HashSet<String>>,
-    HashMap<&'p str, HashSet<String>>,
-) {
+) -> (WordSets<String>, WordSets<&'p str>) {
     use proc_macro2::{TokenStream, TokenTree};
 
     fn words(tokens: &TokenStream, into: &mut HashSet<String>, invokes: &mut HashSet<String>) {

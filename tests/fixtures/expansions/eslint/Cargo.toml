@@ -1,0 +1,8 @@
+[package]
+name = "eslint"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+lint = { path = "../lint" }
+paint = { path = "../paint" }
