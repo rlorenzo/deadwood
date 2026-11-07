@@ -156,8 +156,9 @@ Tracked here rather than hidden. Almost all of them cost findings rather than in
   missed, never invented.
 - A dependency named only by what a proc macro *from the workspace* expands
   to is kept alive by reading the macro crate: every identifier its
-  `quote!`-family invocations write and every word of its string literals
-  counts as a mention, for every package that mentions one of its macros'
+  `quote!`-family invocations write as the head of a path (`::x::Y`, `extern
+  crate x`) and every word of its whitespace-free string literals
+  (`"bevy_extract"`, `"{}::Key"`) counts as a mention, for every package that mentions one of its macros'
   names and has the proc-macro package among its workspace dependencies,
   however indirectly. That covers a derive reached through a re-export (bevy's
   `ExtractComponent` from `bevy_render` naming `bevy_extract`), and it costs
@@ -167,11 +168,12 @@ Tracked here rather than hidden. Almost all of them cost findings rather than in
   or misplaced when only tests name it. List it under `[dependencies]` or
   `[dependencies.allow-in]` in `deadwood.toml`.
 - A path in a `macro_rules!` body resolves in the crate that invokes the macro,
-  so a workspace macro's body words count as mentions by every package that
-  invokes it (ruff's `warn_user_once!` in `ruff_linter` says `use
+  so the path heads in a workspace macro's body count as mentions by every
+  package that invokes it (ruff's `warn_user_once!` in `ruff_linter` says `use
   colored::Colorize;`). They count by name, with the bodies of the macros a
   body invokes folded in, and with nowhere to place them, so such a dependency
-  is never reported misplaced either.
+  is never reported misplaced either. A bare identifier in a body is not read
+  this way: it is far more often a local (`tokio::join!` binds `futures`).
 - A crate renamed by `extern crate real as alias;` or `use real as alias;` is
   followed: every `alias::` in the crate that declares it counts for `real`, so
   a package that renames one dependency to the name of another — `serde_json`

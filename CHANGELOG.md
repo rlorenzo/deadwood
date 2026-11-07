@@ -70,7 +70,7 @@ Three bugs found by a full-codebase review:
 - A file `#[path]` mounts as two modules could report live items dead. Its items no
   longer take part in resolution.
 
-Seven false-positive classes found by running the release candidate over
+Eight false-positive classes found by running the release candidate over
 bevy, ruff, helix and bun, each checked finding by finding:
 
 - `mod r#struct;` was looked for at `r#struct.rs`, and the warning that raised
@@ -94,6 +94,10 @@ bevy, ruff, helix and bun, each checked finding by finding:
 - A dependency named only by a workspace proc macro's expansion — a derive
   reached through a re-export, say — was reported unused. What the macro
   crate quotes now counts for every package that uses its macros.
+- A glob import that found a sibling module's private `use` first stopped
+  there, so a `pub use a::*; pub use b::*;` pair reported the item `b` defines
+  as unused when `a` imported it. A private `use` is now visible to a glob only
+  from its own module and the modules inside it.
 
 Eleven bugs, all found by running the analyzer over
 [bun](https://github.com/oven-sh/bun)'s Rust tree — a 108-crate, ~1M-line
