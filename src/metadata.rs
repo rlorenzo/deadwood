@@ -69,19 +69,32 @@ impl Package {
     /// optional dependency alive by its own existence, which is precisely the
     /// verdict the `cfg` matrix now makes it possible to reach.
     pub fn dependencies_named_by_features(&self) -> HashSet<String> {
+        // The features Cargo synthesizes for an optional dependency no
+        // `dep:` entry mentions: `foo = ["dep:foo"]`, under the entry's name.
+        let implicit = |feature: &str| {
+            self.features
+                .get(feature)
+                .is_some_and(|enabled| enabled.len() == 1 && enabled[0] == format!("dep:{feature}"))
+        };
         let mut names = HashSet::new();
         for (feature, enabled) in &self.features {
             for entry in enabled {
-                // A bare entry names another feature of this package, not a
-                // dependency, and must not be mistaken for one.
                 let name = match entry.split_once('/') {
                     Some((dependency, _)) => dependency.trim_end_matches('?'),
                     None => match entry.strip_prefix("dep:") {
                         Some(dependency) => dependency,
+                        // A bare entry names another feature of this package,
+                        // and only an implicit one is a dependency: ruff's
+                        // `ruff_instrumented = ["criterion", ..]` enables the
+                        // optional `criterion` through the feature Cargo made
+                        // for it.
+                        None if implicit(entry) => entry,
                         None => continue,
                     },
                 };
-                if enabled.len() == 1 && name == feature && entry.starts_with("dep:") {
+                // The implicit feature itself is not a mention — every
+                // optional entry has one — only another feature naming it is.
+                if implicit(feature) && name == feature {
                     continue;
                 }
                 names.insert(name.replace('-', "_"));

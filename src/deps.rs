@@ -907,6 +907,10 @@ pub fn find_misplaced(
             found,
             doubled(dependency, normal_copy),
         ) {
+            // Cargo rejects `optional = true` in `[dev-dependencies]`, so an
+            // optional entry only dev code names has nowhere to move to:
+            // whatever keeps it optional is a reason this check cannot see.
+            Some(Placement::MoveTo(DependencyKind::Development)) if dependency.optional => {}
             Some(Placement::MoveTo(belongs_in)) => misplaced.push(MisplacedDependency {
                 name: dependency.manifest_name().to_string(),
                 declared: dependency.dependency_kind(),
@@ -2151,6 +2155,36 @@ mod tests {
             misplaced(&manifest, &refs).0,
             vec![("test_helper".to_string(), DependencyKind::Development)]
         );
+    }
+
+    /// ruff_benchmark's shape: optional entries only benches name, enabled by
+    /// bare names in `[features]` that are the implicit features Cargo made
+    /// for them. `[features]` names them, and Cargo rejects an optional
+    /// dev-dependency, so neither can move.
+    #[test]
+    fn an_optional_entry_a_feature_enables_by_its_implicit_name_stays_put() {
+        let refs = references_from(&[
+            ("lib", "pub fn go() {}\n"),
+            ("bench", "fn b() { criterion::run(); }\n"),
+        ]);
+        let mut manifest = package(vec![Dependency {
+            optional: true,
+            ..dependency("criterion")
+        }]);
+        manifest.features = HashMap::from([
+            ("bench".to_string(), vec!["criterion".to_string()]),
+            ("criterion".to_string(), vec!["dep:criterion".to_string()]),
+        ]);
+        assert!(
+            manifest.dependencies_named_by_features().contains("criterion"),
+            "a bare implicit feature names its dependency"
+        );
+        assert!(misplaced(&manifest, &refs).0.is_empty());
+
+        // With no feature naming it at all, it still cannot be optional in
+        // `[dev-dependencies]`.
+        manifest.features.clear();
+        assert!(misplaced(&manifest, &refs).0.is_empty());
     }
 
     /// The out-of-line half of the `#[cfg(test)] mod` case. The file holds no
