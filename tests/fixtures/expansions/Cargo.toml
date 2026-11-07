@@ -8,6 +8,9 @@
 # - `eslint` invokes `lint::warn_once!`, whose body names `paint` (ruff's
 #   `warn_user_once!`), and declares its rule modules with `lint::rules!`,
 #   which forwards to `lint::rule_module!` (bun's lint crates).
+#
+# And two that must stay findings: `warn_once!` binds a local named `cache`,
+# which names no crate, and `keymacros` says "paint" only in prose.
 [workspace]
 resolver = "2"
 members = ["cache", "keymacros", "facade", "consumer", "paint", "lint", "eslint"]

@@ -6,3 +6,4 @@ edition = "2021"
 [dependencies]
 lint = { path = "../lint" }
 paint = { path = "../paint" }
+cache = { path = "../cache" }

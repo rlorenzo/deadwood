@@ -4842,7 +4842,14 @@ fn ignore_patterns_match_through_a_symlinked_workspace() {
 fn another_crates_macros_name_dependencies_and_declare_modules() {
     let analysis = analyze_fixture("expansions");
     assert!(reported(&analysis, FindingKind::DeadFile).is_empty());
-    assert!(reported(&analysis, FindingKind::UnusedDependency).is_empty());
+    assert_eq!(
+        reported(&analysis, FindingKind::UnusedDependency),
+        vec![
+            ("consumer/Cargo.toml".to_string(), "paint"),
+            ("eslint/Cargo.toml".to_string(), "cache"),
+        ],
+        "a local the macro binds and a word in the macro's prose name no crate"
+    );
     assert!(reported(&analysis, FindingKind::MisplacedDependency).is_empty());
     assert_eq!(
         reported(&analysis, FindingKind::UnusedPubItem),

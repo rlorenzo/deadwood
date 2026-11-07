@@ -985,6 +985,35 @@ fn feature_list(names: &[String]) -> String {
     }
 }
 
+/// The identifiers `tokens` uses as the head of a path — `x` in `x::y` or
+/// `::x::y`, and in `extern crate x` — at any depth, which is how macro output
+/// names a crate. A bare identifier is far more often a local: `tokio::join!`
+/// binds one called `futures`, and counting it would hide every `futures`
+/// entry of every package that joins.
+fn path_heads(tokens: &proc_macro2::TokenStream, into: &mut HashSet<String>) {
+    use proc_macro2::{Spacing, TokenTree};
+    let trees: Vec<TokenTree> = tokens.clone().into_iter().collect();
+    for (index, tree) in trees.iter().enumerate() {
+        match tree {
+            TokenTree::Ident(ident) => {
+                let colons = matches!(
+                    (trees.get(index + 1), trees.get(index + 2)),
+                    (Some(TokenTree::Punct(a)), Some(TokenTree::Punct(b)))
+                        if a.as_char() == ':' && a.spacing() == Spacing::Joint && b.as_char() == ':'
+                );
+                let after_extern_crate = index >= 2
+                    && matches!(&trees[index - 1], TokenTree::Ident(c) if c == "crate")
+                    && matches!(&trees[index - 2], TokenTree::Ident(e) if e == "extern");
+                if colons || after_extern_crate {
+                    into.insert(ident.to_string());
+                }
+            }
+            TokenTree::Group(group) => path_heads(&group.stream(), into),
+            _ => {}
+        }
+    }
+}
+
 /// Count what a workspace proc macro's expansion can name as a mention by
 /// every package that uses the macro.
 ///
@@ -1030,7 +1059,15 @@ fn proc_macro_expansions(
         }
     }
 
+    /// The words of a string that could be a crate or path name —
+    /// `"bevy_extract"` for a manifest lookup, `"{}::Key"` for a `format!` —
+    /// and not of one with whitespace in it, which is prose: tokio-macros'
+    /// error messages say "futures" and would hide a `futures` entry.
     fn literal_words(text: &str, into: &mut HashSet<String>) {
+        let text = text.trim_matches('"');
+        if text.chars().any(char::is_whitespace) {
+            return;
+        }
         for word in text
             .split(|c: char| !c.is_alphanumeric() && c != '_')
             .filter(|word| !word.is_empty())
@@ -1049,7 +1086,12 @@ fn proc_macro_expansions(
                 .last()
                 .is_some_and(|segment| segment.ident.to_string().contains("quote"))
             {
-                all_words(&node.tokens, &mut self.words);
+                path_heads(&node.tokens, &mut self.words);
+                for tree in node.tokens.clone() {
+                    if let TokenTree::Literal(literal) = tree {
+                        literal_words(&literal.to_string(), &mut self.words);
+                    }
+                }
             } else {
                 // `format!("{}::Key", krate)` and friends build paths too.
                 for tree in node.tokens.clone() {
@@ -1146,17 +1188,20 @@ fn macro_bodies<'p>(
     use proc_macro2::{TokenStream, TokenTree};
 
     fn words(tokens: &TokenStream, into: &mut HashSet<String>, invokes: &mut HashSet<String>) {
+        path_heads(tokens, into);
+        invoked(tokens, invokes);
+    }
+
+    fn invoked(tokens: &TokenStream, invokes: &mut HashSet<String>) {
         let mut iter = tokens.clone().into_iter().peekable();
         while let Some(tree) = iter.next() {
             match tree {
                 TokenTree::Ident(ident) => {
-                    let word = ident.to_string();
                     if matches!(iter.peek(), Some(TokenTree::Punct(p)) if p.as_char() == '!') {
-                        invokes.insert(word.clone());
+                        invokes.insert(ident.to_string());
                     }
-                    into.insert(word);
                 }
-                TokenTree::Group(group) => words(&group.stream(), into, invokes),
+                TokenTree::Group(group) => invoked(&group.stream(), invokes),
                 _ => {}
             }
         }

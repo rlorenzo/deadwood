@@ -7,5 +7,7 @@ pub fn derive_key(input: TokenStream) -> TokenStream {
 }
 
 fn name_of(input: TokenStream) -> proc_macro2::Ident {
-    syn::parse::<syn::DeriveInput>(input).unwrap().ident
+    syn::parse::<syn::DeriveInput>(input)
+        .expect("Key can only paint a struct")
+        .ident
 }

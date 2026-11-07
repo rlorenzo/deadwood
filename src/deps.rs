@@ -468,7 +468,7 @@ impl CrateReferences {
     /// ruff's `warn_user_once!` lives in `ruff_linter` and says `use
     /// colored::Colorize;`, so every crate that invokes it needs `colored`,
     /// and none of them writes the name. `bodies` maps a macro name to the
-    /// words of every workspace definition of it, with the bodies of the
+    /// path heads of every workspace definition of it, with the bodies of the
     /// macros it invokes already folded in, and `own` names the macros this
     /// package defines itself, whose bodies its own files already counted.
     pub fn add_foreign_macros(

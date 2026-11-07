@@ -16,7 +16,10 @@ macro_rules! rules {
 
 #[macro_export]
 macro_rules! warn_once {
-    () => {
-        paint::paint()
-    };
+    () => {{
+        // A local, not a crate: it names no dependency.
+        let cache = 1;
+        paint::paint();
+        cache
+    }};
 }
