@@ -480,6 +480,10 @@ pub(crate) struct SymbolTable {
     /// would be a guess, so paths that start with one fall back to the
     /// conservative rule instead.
     ambiguous_externs: HashSet<String>,
+    /// Private module-level `use` aliases. A glob import does not bring them
+    /// in — it imports only what the module makes visible — so a glob lookup
+    /// passes over them to the glob sources after.
+    private_imports: HashSet<usize>,
     /// Every definition sharing a name, for the conservative fallback.
     by_name: HashMap<String, Vec<usize>>,
     /// Module lookup by crate and module path.
@@ -575,6 +579,7 @@ impl SymbolTable {
             roots: Vec::new(),
             externs: HashMap::new(),
             ambiguous_externs: HashSet::new(),
+            private_imports: HashSet::new(),
             by_name: HashMap::new(),
             by_path: HashMap::new(),
             is_library: crates.iter().map(|unit| !unit.names.is_empty()).collect(),
@@ -1562,6 +1567,7 @@ impl SymbolTable {
         test_context: bool,
     ) {
         let is_pub = matches!(item.vis, syn::Visibility::Public(_));
+        let is_private = top_level && matches!(item.vis, syn::Visibility::Inherited);
         let absolute = item.leading_colon.is_some();
         let mut leaves = Vec::new();
         flatten_use(&item.tree, &mut Vec::new(), &mut leaves);
@@ -1587,6 +1593,10 @@ impl SymbolTable {
             } else {
                 DefKind::Import
             };
+            let id = self.defs.len();
+            if is_private {
+                self.private_imports.insert(id);
+            }
             self.add_def(Def {
                 name,
                 kind,
@@ -1653,16 +1663,41 @@ impl SymbolTable {
 
     /// Look `name` up in `module`, following resolved glob imports.
     fn lookup(&self, module: usize, name: &str) -> Step {
-        self.lookup_in(module, name, &mut HashSet::new())
+        self.lookup_in(module, name, &mut HashSet::new(), module)
     }
 
-    fn lookup_in(&self, module: usize, name: &str, visited: &mut HashSet<usize>) -> Step {
+    ///
+    /// `importer` is the module the lookup started in. A glob brings in only
+    /// what is visible there, and a private `use` is visible only inside the
+    /// module that writes it and that module's descendants: bevy's `pub use
+    /// camera::*; pub use clear_color::*;` at a crate root found `camera.rs`'s
+    /// private `use crate::MsaaWriteback;` first, followed it back into the
+    /// same lookup, and never reached the definition in `clear_color`. helix's
+    /// `use super::*;` in a child module does see the parent's private
+    /// imports, and keeps them.
+    fn lookup_in(
+        &self,
+        module: usize,
+        name: &str,
+        visited: &mut HashSet<usize>,
+        importer: usize,
+    ) -> Step {
         if !visited.insert(module) {
             // Already accounted for on another branch of a glob cycle.
             return Step::Absent;
         }
         if let Some(defs) = self.modules[module].items.get(name) {
-            return Step::Defs(defs.clone());
+            let defs: Vec<usize> = if !self.is_within(importer, module) {
+                defs.iter()
+                    .copied()
+                    .filter(|id| !self.private_imports.contains(id))
+                    .collect()
+            } else {
+                defs.clone()
+            };
+            if !defs.is_empty() {
+                return Step::Defs(defs);
+            }
         }
         // Past a `cfg`-gated glob, every source and not the first to answer: under
         // the default union of builds, two globs defining one name are
@@ -1673,7 +1708,7 @@ impl SymbolTable {
         let mut unknown = self.modules[module].opaque;
         let mut found = Vec::new();
         for &source in &self.modules[module].glob_sources {
-            match self.lookup_in(source, name, visited) {
+            match self.lookup_in(source, name, visited, importer) {
                 Step::Defs(defs) if !alternatives => return Step::Defs(defs),
                 Step::Defs(defs) => found.extend(defs),
                 Step::Unknown => unknown = true,
@@ -1686,6 +1721,19 @@ impl SymbolTable {
             Step::Unknown
         } else {
             Step::Absent
+        }
+    }
+
+    /// Whether `module` is `ancestor` or nested somewhere inside it.
+    fn is_within(&self, mut module: usize, ancestor: usize) -> bool {
+        loop {
+            if module == ancestor {
+                return true;
+            }
+            match self.modules[module].parent {
+                Some(parent) => module = parent,
+                None => return false,
+            }
         }
     }
 
@@ -4199,6 +4247,44 @@ mod tests {
         assert_eq!(
             unused_in_root("/// ```\n/// krate::shown();\n/// ```\npub fn shown() {}\n"),
             vec!["shown"]
+        );
+    }
+
+    /// bevy's `pub use camera::*; pub use clear_color::*;`, where `camera`
+    /// privately imports the type `clear_color` defines. A glob does not
+    /// export a private `use`, so the name resolves through the second glob.
+    #[test]
+    fn a_glob_passes_over_a_private_import_to_the_definition_behind_it() {
+        assert_eq!(
+            unused_in_binary(&[
+                (
+                    "",
+                    "mod a;\nmod b;\npub use a::*;\npub use b::*;\nfn main() { f(Thing); }\n"
+                ),
+                ("a", "use crate::Thing;\npub fn f(_: Thing) {}\n"),
+                ("b", "pub struct Thing;\npub struct Unused;\n"),
+            ]),
+            vec!["Unused"]
+        );
+        // From a child module the parent's private imports are visible, so
+        // `use super::*;` keeps resolving through them.
+        assert_eq!(
+            unused_in_binary(&[
+                (
+                    "",
+                    "mod defs;\nmod commands;\nfn main() { commands::run(); }\n"
+                ),
+                ("defs", "pub fn scopes() {}\n"),
+                (
+                    "commands",
+                    "use crate::defs;\nmod typed;\npub fn run() { typed::go(); }\n"
+                ),
+                (
+                    "commands/typed",
+                    "use super::*;\npub fn go() { defs::scopes(); }\n"
+                ),
+            ]),
+            Vec::<String>::new()
         );
     }
 
