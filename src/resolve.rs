@@ -43,8 +43,10 @@
 //!   import, since the glob may well be where they come from;
 //! - paths that run through an alias or module we cannot pin down.
 //!
-//! Doc comments are the one string we do not scan: they are prose, and
-//! mentioning an item in one should not keep it alive.
+//! Doc comment prose is the one string we do not scan: mentioning an item in
+//! a sentence should not keep it alive. The fenced code blocks in it are
+//! another matter — rustdoc compiles them as doctests — so their identifiers
+//! count as uses the way macro input does.
 //!
 //! A path that resolves cleanly to nothing in the workspace (`std`, an
 //! external crate, or a local name matching no item) marks nothing.
@@ -863,7 +865,14 @@ impl SymbolTable {
                     value_scopes: Vec::new(),
                     type_scopes: Vec::new(),
                     enclosing: Referrer::Root,
+                    doc_fence: None,
                 };
+                // A crate's or module's `//!` docs hold doctests as much as
+                // an item's do.
+                for attr in &ast.attrs {
+                    walker.scan_doc_attr(attr);
+                }
+                walker.doc_fence = None;
                 for item in &ast.items {
                     walker.visit_item(item);
                 }
@@ -2109,9 +2118,71 @@ struct RefWalker<'a> {
     /// The definition the paths being walked are written inside, which is what
     /// turns a flat set of uses into a graph.
     enclosing: Referrer,
+    /// Inside a fenced block of the doc comment being read: `Some(true)` for
+    /// one rustdoc compiles as a doctest, `Some(false)` for another language.
+    /// A doc comment arrives one `#[doc]` line at a time, so the fence state
+    /// has to outlive the attribute that opened it.
+    doc_fence: Option<bool>,
 }
 
+/// Info-string words that mark a fenced block as something other than Rust.
+/// Anything else — no tag, `rust`, `no_run`, `should_panic`, `ignore`,
+/// `edition2021`, an unknown word — is read as code: marking a name used is
+/// the safe direction, so the list only needs to catch the common prose ones.
+const NON_RUST_FENCES: &[&str] = &[
+    "text", "txt", "plain", "console", "sh", "bash", "shell", "zsh", "toml", "json", "yaml",
+    "yml", "html", "xml", "css", "js", "javascript", "ts", "typescript", "c", "cpp", "c++",
+    "python", "py", "diff", "markdown", "md", "sql", "ini", "dot", "mermaid",
+];
+
 impl RefWalker<'_> {
+    /// Read one `#[doc = "..."]` line for doctest code.
+    ///
+    /// Doc *prose* is not scanned — naming an item in a sentence should not
+    /// keep it alive — but a doctest is code: rustdoc compiles it against the
+    /// crate, so deleting an item one names breaks `cargo test`. helix-parsec's
+    /// `take_until` is used only by the doctests of its neighbours. Doctests
+    /// are separate crates that link the dev-dependencies, and what they name
+    /// is spelled through the crate's public paths, so each identifier is read
+    /// the way macro input is: a use of every item with that name, as a root.
+    fn scan_doc_attr(&mut self, attr: &syn::Attribute) {
+        let syn::Meta::NameValue(nv) = &attr.meta else { return };
+        if !nv.path.is_ident("doc") {
+            return;
+        }
+        let syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(text), .. }) = &nv.value else {
+            return;
+        };
+        for line in text.value().lines() {
+            let trimmed = line.trim_start();
+            let fence = ["```", "~~~"]
+                .into_iter()
+                .find_map(|marker| trimmed.strip_prefix(marker));
+            if let Some(info) = fence {
+                self.doc_fence = match self.doc_fence {
+                    Some(_) => None,
+                    None => {
+                        let first = info
+                            .split(|c: char| c == ',' || c.is_whitespace())
+                            .find(|word| !word.is_empty())
+                            .unwrap_or("")
+                            .to_ascii_lowercase();
+                        Some(!NON_RUST_FENCES.contains(&first.as_str()))
+                    }
+                };
+                continue;
+            }
+            if self.doc_fence == Some(true) {
+                for word in line
+                    .split(|c: char| !c.is_alphanumeric() && c != '_')
+                    .filter(|word| !word.is_empty())
+                {
+                    self.table.mark_name_used(word);
+                }
+            }
+        }
+    }
+
     /// Run `body` with one more binding frame in each namespace.
     fn in_scope(&mut self, body: impl FnOnce(&mut Self)) {
         self.value_scopes.push(HashSet::new());
@@ -2548,6 +2619,7 @@ impl<'ast> Visit<'ast> for RefWalker<'_> {
     }
 
     fn visit_attribute(&mut self, node: &'ast syn::Attribute) {
+        self.scan_doc_attr(node);
         // Attribute arguments are resolved by macro expansion, which we do
         // not perform, so every identifier counts as a use.
         match &node.meta {
@@ -4014,6 +4086,24 @@ mod tests {
             )
             .is_empty()
         );
+    }
+
+    /// helix-parsec's shape: an item only a neighbour's doctest names. The
+    /// doctest is code rustdoc compiles, so the name is a use — hidden `# `
+    /// lines and `//!` docs included — while prose and a `text` block are not.
+    #[test]
+    fn a_doctest_names_items_and_prose_does_not() {
+        let source = "//! ```\n//! # use krate::from_crate_docs;\n//! ```\n\
+            pub fn from_crate_docs() {}\n\
+            pub fn helper() {}\n\
+            pub fn hidden() {}\n\
+            pub fn prose() {}\n\
+            pub fn shell() {}\n\
+            /// Calls `prose` in a sentence.\n\
+            /// ```no_run\n/// use krate::helper;\n/// # krate::hidden();\n/// ```\n\
+            /// ```text\n/// shell\n/// ```\n\
+            pub fn documented() {}\n";
+        assert_eq!(unused_in_root(source), vec!["prose", "shell", "documented"]);
     }
 
     /// An opaque mention is a root, not an edge: it is a use of every item of
