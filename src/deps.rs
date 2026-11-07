@@ -440,9 +440,40 @@ pub struct CrateReferences {
     /// Set when the package pulls in code Deadwood never sees, which would
     /// make any "never referenced" verdict a guess.
     hidden_code: Option<&'static str>,
+    /// The last segment of every macro path the package invokes, for
+    /// [`CrateReferences::add_foreign_macros`].
+    invoked_macros: HashSet<String>,
 }
 
 impl CrateReferences {
+    /// Count the words of the workspace macros this package invokes but does
+    /// not define, as mentions whose placement is unknown.
+    ///
+    /// A path in a `macro_rules!` body resolves where the macro is *invoked*:
+    /// ruff's `warn_user_once!` lives in `ruff_linter` and says `use
+    /// colored::Colorize;`, so every crate that invokes it needs `colored`,
+    /// and none of them writes the name. `bodies` maps a macro name to the
+    /// words of every workspace definition of it, with the bodies of the
+    /// macros it invokes already folded in, and `own` names the macros this
+    /// package defines itself, whose bodies its own files already counted.
+    pub fn add_foreign_macros(
+        &mut self,
+        bodies: &HashMap<String, HashSet<String>>,
+        own: &HashSet<String>,
+    ) {
+        for name in &self.invoked_macros {
+            if own.contains(name) {
+                continue;
+            }
+            for word in bodies.get(name).into_iter().flatten() {
+                self.names
+                    .entry(word.clone())
+                    .or_default()
+                    .insert(Contexts::OPAQUE);
+            }
+        }
+    }
+
     /// Why the package holds code Deadwood never sees, if it does.
     pub fn hidden_code(&self) -> Option<&'static str> {
         self.hidden_code
@@ -545,6 +576,7 @@ impl CrateReferences {
             file_aliases: HashMap::new(),
             scope_depth: 0,
             hidden_code: &mut self.hidden_code,
+            invoked_macros: &mut self.invoked_macros,
             dir,
             origin,
             at_crate_root,
@@ -1224,6 +1256,7 @@ struct Collector<'a, 'g> {
     /// than a `use` would.
     at_crate_root: bool,
     hidden_code: &'a mut Option<&'static str>,
+    invoked_macros: &'a mut HashSet<String>,
     /// Directory of the file being walked, which `include!` paths are
     /// relative to.
     dir: PathBuf,
@@ -1297,7 +1330,14 @@ impl Collector<'_, '_> {
         let mut iter = tokens.clone().into_iter().peekable();
         while let Some(tree) = iter.next() {
             match tree {
-                TokenTree::Ident(ident) => self.insert_opaque(ident.to_string()),
+                TokenTree::Ident(ident) => {
+                    // `name!` inside another macro's input is an invocation
+                    // all the same.
+                    if matches!(iter.peek(), Some(TokenTree::Punct(p)) if p.as_char() == '!') {
+                        self.invoked_macros.insert(ident.to_string());
+                    }
+                    self.insert_opaque(ident.to_string());
+                }
                 TokenTree::Punct(punct) if punct.as_char() == '#' => {
                     // The group is deliberately *not* consumed: the next
                     // iteration recurses into it as before, so the attribute's
@@ -1443,6 +1483,9 @@ impl<'ast> Visit<'ast> for Collector<'_, '_> {
         // `json!` may be a macro imported from a dependency, so a
         // single-segment macro path counts where a plain path would not.
         self.path_head(&node.path);
+        if let Some(last) = node.path.segments.last() {
+            self.invoked_macros.insert(last.ident.to_string());
+        }
         // `include!` splices another file into this one. Its path is relative
         // to this file's directory; anything more elaborate than a literal
         // (`concat!(env!("OUT_DIR"), ..)`) names a file we cannot find, and a

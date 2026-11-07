@@ -615,6 +615,17 @@ pub fn analyze_with(
 
     add_dependency_aliases(&meta, &lib_of_package, &mut crates);
 
+    // A path in a `macro_rules!` body resolves in the crate that invokes it, so
+    // a dependency can be named only by another workspace crate's macro.
+    let (bodies, defined_by) = macro_bodies(&crates, &package_of_crate);
+    for (package, package_references, _) in &mut references {
+        let own = defined_by
+            .get(package.name.as_str())
+            .cloned()
+            .unwrap_or_default();
+        package_references.add_foreign_macros(&bodies, &own);
+    }
+
     // Usage resolution must see every file in the workspace: if module
     // resolution hit any problem, files (and the paths inside them) may be
     // missing, and unseen paths would turn into false positives.
@@ -962,6 +973,86 @@ fn feature_list(names: &[String]) -> String {
         1 => format!("feature {}", quoted[0]),
         _ => format!("features {}", quoted.join(", ")),
     }
+}
+
+/// The words of every `macro_rules!` body in the workspace, by macro name,
+/// with the bodies of the macros each invokes folded in — and the names each
+/// package defines.
+fn macro_bodies<'p>(
+    crates: &[resolve::CrateUnit],
+    package_of_crate: &[&'p str],
+) -> (
+    HashMap<String, HashSet<String>>,
+    HashMap<&'p str, HashSet<String>>,
+) {
+    use proc_macro2::{TokenStream, TokenTree};
+
+    fn words(tokens: &TokenStream, into: &mut HashSet<String>, invokes: &mut HashSet<String>) {
+        let mut iter = tokens.clone().into_iter().peekable();
+        while let Some(tree) = iter.next() {
+            match tree {
+                TokenTree::Ident(ident) => {
+                    let word = ident.to_string();
+                    if matches!(iter.peek(), Some(TokenTree::Punct(p)) if p.as_char() == '!') {
+                        invokes.insert(word.clone());
+                    }
+                    into.insert(word);
+                }
+                TokenTree::Group(group) => words(&group.stream(), into, invokes),
+                _ => {}
+            }
+        }
+    }
+
+    fn items<'a>(found: &mut Vec<&'a syn::ItemMacro>, list: &'a [syn::Item]) {
+        for item in list {
+            match item {
+                syn::Item::Macro(mac) if mac.mac.path.is_ident("macro_rules") => found.push(mac),
+                syn::Item::Mod(module) => {
+                    if let Some((_, inner)) = &module.content {
+                        items(found, inner);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut direct: HashMap<String, (HashSet<String>, HashSet<String>)> = HashMap::new();
+    let mut defined_by: HashMap<&str, HashSet<String>> = HashMap::new();
+    for (unit, package) in crates.iter().zip(package_of_crate) {
+        for file in unit.files.iter().chain(&unit.spliced) {
+            let Some(ast) = &file.ast else { continue };
+            let mut found = Vec::new();
+            items(&mut found, &ast.items);
+            for mac in found {
+                let Some(name) = &mac.ident else { continue };
+                let name = name.to_string();
+                let entry = direct.entry(name.clone()).or_default();
+                words(&mac.mac.tokens, &mut entry.0, &mut entry.1);
+                defined_by.entry(package).or_default().insert(name);
+            }
+        }
+    }
+    let bodies = direct
+        .keys()
+        .map(|name| {
+            let mut all = HashSet::new();
+            let mut seen = HashSet::new();
+            let mut pending = vec![name.clone()];
+            while let Some(next) = pending.pop() {
+                if !seen.insert(next.clone()) {
+                    continue;
+                }
+                if let Some((body, invokes)) = direct.get(&next) {
+                    all.extend(body.iter().cloned());
+                    pending.extend(invokes.iter().cloned());
+                }
+            }
+            (name.clone(), all)
+        })
+        .collect();
+    (bodies, defined_by)
 }
 
 /// Which crates code Deadwood could not read may be naming, for the unused-pub
