@@ -135,7 +135,7 @@ code you've since deleted are reported as stale, never as failures. See
 ## GitHub Action
 
 ```yaml
-- uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+- uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 - uses: rlorenzo/deadwood@<release-commit-sha> # v1.0.0
   with:
     path: .       # workspace to analyze (default `.`)
