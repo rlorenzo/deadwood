@@ -352,7 +352,53 @@ pub fn analyze_with(
     // each. Held until the union above is complete.
     let mut dead_file_scans: Vec<(&metadata::Package, Vec<PathBuf>, PathBuf)> = Vec::new();
 
+    // Every target's module tree, resolved up front so that a macro one crate
+    // defines can settle the invocations of another: bun's eslint rules are
+    // declared by `bun_lint::rules!`. Each target is resolved alone first, and
+    // again with the workspace's macros known only where it invokes one it
+    // does not define. The warnings each resolution raised travel with it, to
+    // be replayed where the package's own checks look for them.
+    let mut resolutions: Vec<Vec<(modtree::Resolved, Vec<String>)>> = meta
+        .packages
+        .iter()
+        .map(|package| {
+            let gates = cfg::Gates::new(config.cfg(), package);
+            package
+                .targets
+                .iter()
+                .map(|target| {
+                    let mut target_warnings = Vec::new();
+                    let resolved =
+                        modtree::resolve(&target.src_path, ignore, &gates, &mut target_warnings);
+                    (resolved, target_warnings)
+                })
+                .collect()
+        })
+        .collect();
+    let mut workspace_macros = modtree::MacroDefs::default();
+    for (resolved, _) in resolutions.iter().flatten() {
+        workspace_macros.absorb(&resolved.macros);
+    }
+    for (package, targets) in meta.packages.iter().zip(&mut resolutions) {
+        let gates = cfg::Gates::new(config.cfg(), package);
+        for (target, slot) in package.targets.iter().zip(targets.iter_mut()) {
+            if slot.0.wants_foreign(&workspace_macros) {
+                let mut target_warnings = Vec::new();
+                let resolved = modtree::resolve_with(
+                    &target.src_path,
+                    ignore,
+                    &gates,
+                    &workspace_macros,
+                    &mut target_warnings,
+                );
+                *slot = (resolved, target_warnings);
+            }
+        }
+    }
+    let mut resolutions = resolutions.into_iter();
+
     for package in &meta.packages {
+        let mut package_resolutions = resolutions.next().unwrap_or_default().into_iter();
         let manifest_dir = package
             .manifest_path
             .parent()
@@ -373,7 +419,10 @@ pub fn analyze_with(
         let mut package_spliced: HashSet<PathBuf> = HashSet::new();
         let mut package_references = deps::CrateReferences::default();
         for target in &package.targets {
-            let resolved = modtree::resolve(&target.src_path, ignore, &gates, &mut warnings);
+            let Some((resolved, target_warnings)) = package_resolutions.next() else {
+                continue;
+            };
+            warnings.extend(target_warnings);
             for file in &resolved.files {
                 package_reachable.insert(file.path.clone());
                 // Unlike the detectors below, this one is not gated on the
