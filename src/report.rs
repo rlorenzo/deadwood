@@ -33,7 +33,6 @@ pub fn render_text(analysis: &Analysis) -> String {
     let mut out = String::new();
     for (kind, header) in [
         (FindingKind::DeadFile, "Dead files"),
-        (FindingKind::UnsatisfiableCfg, "Unsatisfiable cfg gates"),
         (FindingKind::UnusedPubItem, "Unused public items"),
         (FindingKind::UnusedReexport, "Unused re-exports"),
         (FindingKind::UnusedDependency, "Unused dependencies"),
@@ -257,15 +256,15 @@ mod tests {
         let analysis = Analysis {
             workspace_root: PathBuf::from("/ws"),
             findings: vec![Finding {
-                kind: FindingKind::UnsatisfiableCfg,
+                kind: FindingKind::MisplacedDependency,
                 severity: Severity::Deny,
-                file: PathBuf::from("src/lib.rs"),
-                line: Some(4),
-                name: Some("win".into()),
+                file: PathBuf::from("Cargo.toml"),
+                line: None,
+                name: Some("helper".into()),
                 module: None,
                 namespace: None,
-                message: "`#[cfg(feature = \"gone\")]` can never hold: package `demo` declares no \
-                          feature `gone`"
+                message: "dependency `helper` is referenced only by the test code of package \
+                          `demo`"
                     .into(),
             }],
             warnings: vec![],
@@ -273,14 +272,14 @@ mod tests {
         };
 
         let text = render_text(&analysis);
-        assert!(text.contains("Unsatisfiable cfg gates:\n"), "{text}");
-        assert!(text.contains("  src/lib.rs:4: `#[cfg("), "{text}");
+        assert!(text.contains("Misplaced dependencies:\n"), "{text}");
+        assert!(text.contains("  Cargo.toml: dependency `helper`"), "{text}");
         assert!(text.contains("1 finding(s)"), "{text}");
 
         let value: serde_json::Value =
             serde_json::from_str(&render_json(&analysis).unwrap()).unwrap();
-        assert_eq!(value["findings"][0]["kind"], "unsatisfiable_cfg");
-        assert_eq!(value["findings"][0]["name"], "win");
+        assert_eq!(value["findings"][0]["kind"], "misplaced_dependency");
+        assert_eq!(value["findings"][0]["name"], "helper");
 
         // And not just this one: every kind there is must land in some group,
         // or its findings vanish from the text while still being counted.

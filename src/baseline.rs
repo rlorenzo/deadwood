@@ -129,8 +129,7 @@
 //!   about the population. They are gone rather than set aside now.
 //!   Two unrelated dead files are indistinguishable
 //!   without a content signal, and this pass does not have one — so it does not
-//!   pretend to. The two dependency kinds and `unsatisfiable_cfg` are out for
-//!   the same reason, and a manifest path moves only when a whole package does,
+//!   pretend to. The two dependency kinds are out for the same reason, and a manifest path moves only when a whole package does,
 //!   which is a rarer event with no signal here either.
 //! - **It runs second, so it can never overrule the file.** A finding the exact
 //!   key matched is not left over, and neither is the entry that matched it. Two
@@ -220,10 +219,9 @@
 //!
 //! # An absent qualifier is not a value: the fallback, in every direction
 //!
-//! Only three of the seven kinds have a module to name, and they are the same
-//! three that bind a name in a namespace. A dead file is not an item at all, the
-//! two dependency kinds name an entry in a manifest, and an unsatisfiable gate
-//! names the site the gate is written at rather than a definition — so the key
+//! Only three of the six kinds have a module to name, and they are the same
+//! three that bind a name in a namespace. A dead file is not an item at all, and
+//! the two dependency kinds name an entry in a manifest — so the key
 //! gained two fields most kinds can never fill, and every baseline written
 //! before each of them fills it for none of them.
 //!
@@ -354,8 +352,8 @@
 //! rather than a hope. Both are recorded on exactly the three kinds that name
 //! an item, and on no other — so every baseline that carries a `namespace`
 //! carries a `module`, and was already unreadable by anything older than that,
-//! while a file recording nothing but dead files, dependency entries or
-//! unsatisfiable gates carries neither and is byte-portable across all three
+//! while a file recording nothing but dead files or dependency entries carries
+//! neither and is byte-portable across all three
 //! versions. Both halves were measured against binaries built from `main` and
 //! from the commit before `module` existed, rather than read off the serde
 //! attribute, and `namespace_is_recorded_on_exactly_the_entries_module_is`
@@ -1702,28 +1700,6 @@ mod tests {
             assert_eq!(reported(&kept), ["beta/Cargo.toml"], "{kind:?}");
             assert_eq!(stale_of(&report).len(), 1, "{kind:?}");
         }
-    }
-
-    /// An unsatisfiable gate names a site rather than a definition: it has a
-    /// name and no module, and half an identity is not one.
-    #[test]
-    fn a_gate_site_has_a_name_and_no_module_so_it_is_not_relocated() {
-        let before = finding(
-            FindingKind::UnsatisfiableCfg,
-            "src/lib.rs",
-            Some(3),
-            Some("mod imp"),
-        );
-        let after = finding(
-            FindingKind::UnsatisfiableCfg,
-            "src/moved.rs",
-            Some(3),
-            Some("mod imp"),
-        );
-
-        let (kept, report) = applied(&baseline(&[before]), vec![after]);
-        assert_eq!(reported(&kept), ["src/moved.rs"]);
-        assert_eq!(stale_of(&report).len(), 1, "{:?}", stale_of(&report));
     }
 
     /// The kind is as load bearing in a relocation as it is in the key. An item

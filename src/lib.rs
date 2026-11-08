@@ -23,9 +23,6 @@
 //!   code that names them cannot see — a `[dependencies]` entry only the
 //!   tests, examples and benches use, or a `[build-dependencies]` entry the
 //!   build script never touches (`src/deps.rs`).
-//! - **Unsatisfiable `cfg` gates**: `#[cfg(...)]` gates that can hold in no
-//!   build of the package — a `mod` behind a feature its manifest does not
-//!   declare is dead by construction (`src/cfg.rs`).
 //!
 //! What each detector reports can be tuned by a `deadwood.toml`
 //! (`src/config.rs`): files to ignore, a severity per finding kind, the crates
@@ -53,7 +50,7 @@ mod glob;
 mod resolve;
 mod unused;
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -83,9 +80,6 @@ pub enum FindingKind {
     /// it can see: a `[dependencies]` entry only tests name, or a
     /// `[build-dependencies]` entry the build script does not.
     MisplacedDependency,
-    /// A `#[cfg(...)]` gate that can hold in no build of its package, so the
-    /// code behind it is never compiled by anyone.
-    UnsatisfiableCfg,
     /// A `pub` item the workspace reaches only through its test code: not
     /// dead, but `pub` for nobody. Off by default — see
     /// [`FindingKind::default_severity`].
@@ -105,7 +99,6 @@ impl FindingKind {
             FindingKind::UnusedReexport => "unused_reexport",
             FindingKind::UnusedDependency => "unused_dependency",
             FindingKind::MisplacedDependency => "misplaced_dependency",
-            FindingKind::UnsatisfiableCfg => "unsatisfiable_cfg",
             FindingKind::TestOnlyItem => "test_only_item",
         }
     }
@@ -129,21 +122,19 @@ impl FindingKind {
             | FindingKind::UnusedPubItem
             | FindingKind::UnusedReexport
             | FindingKind::UnusedDependency
-            | FindingKind::MisplacedDependency
-            | FindingKind::UnsatisfiableCfg => Severity::Deny,
+            | FindingKind::MisplacedDependency => Severity::Deny,
             FindingKind::TestOnlyItem => Severity::Off,
         }
     }
 
     /// Every kind there is, so a caller that must handle all of them cannot
     /// quietly miss the next one.
-    pub const ALL: [FindingKind; 7] = [
+    pub const ALL: [FindingKind; 6] = [
         FindingKind::DeadFile,
         FindingKind::UnusedPubItem,
         FindingKind::UnusedReexport,
         FindingKind::UnusedDependency,
         FindingKind::MisplacedDependency,
-        FindingKind::UnsatisfiableCfg,
         FindingKind::TestOnlyItem,
     ];
 }
@@ -228,10 +219,9 @@ pub struct Finding {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// The module the named item is written in, `crate`-rooted:
-    /// `crate::alpha`. Present for the three item kinds and absent for the four
-    /// that have no module to name — a dead file has no item at all, the two
-    /// dependency kinds name a manifest entry, and an unsatisfiable gate names
-    /// a site rather than a definition.
+    /// `crate::alpha`. Present for the three item kinds and absent for the
+    /// three that have no module to name: a dead file has no item at all, and
+    /// the two dependency kinds name a manifest entry.
     ///
     /// It is here rather than on a baseline entry alone, and that placement was
     /// the decision of the phase that added it. The baseline's format *is* this
@@ -325,7 +315,6 @@ pub fn analyze_with(
     let ignore = config.ignore();
     let mut findings = Vec::new();
     let mut warnings = Vec::new();
-    let mut gate_sites = GateSites::default();
 
     // Every target is a crate of its own for name resolution: a bin and the
     // lib it uses see different scopes, and the same file pulled into two
@@ -428,14 +417,6 @@ pub fn analyze_with(
             warnings.extend(target_warnings);
             for file in &resolved.files {
                 package_reachable.insert(file.path.clone());
-                // Unlike the detectors below, this one is not gated on the
-                // package resolving completely. Whether a gate can hold is a
-                // property of one file's attributes and the manifest's feature
-                // list; a sibling file that failed to parse says nothing about
-                // it, and cannot turn a non-finding into a finding.
-                if let Some(ast) = &file.ast {
-                    gate_sites.record(&file.path, &package.name, gates.gate_sites(ast));
-                }
             }
             package_spliced.extend(resolved.spliced.iter().map(|file| file.path.clone()));
             package_excluded.extend(resolved.excluded);
@@ -783,8 +764,6 @@ pub fn analyze_with(
         );
     }
 
-    findings.extend(gate_sites.into_findings(&meta.workspace_root));
-
     let mut findings = apply_config(findings, &config, &meta.workspace_root);
     findings.sort_by(|a, b| {
         (a.file.as_path(), a.line.unwrap_or(0)).cmp(&(b.file.as_path(), b.line.unwrap_or(0)))
@@ -840,72 +819,6 @@ pub fn analyze_with(
         warnings,
         baseline,
     })
-}
-
-/// Every `#[cfg]` gate seen in the workspace, keyed by where it is written.
-///
-/// The keying is not bookkeeping, it is the correctness argument. Features are
-/// declared per package, and one file can belong to several: `#[path]` pulls
-/// the same source into two members, and a target's root is read once per
-/// target. A gate impossible for one package may be perfectly satisfiable for
-/// another, so a site is only reported when *no* package that compiles it
-/// found the gate satisfiable.
-#[derive(Default)]
-struct GateSites {
-    /// Site to the package and gate that condemned it.
-    impossible: BTreeMap<(PathBuf, usize), (String, cfg::GateSite)>,
-    /// Sites some package can compile, which overrule the map above.
-    satisfiable: HashSet<(PathBuf, usize)>,
-}
-
-impl GateSites {
-    fn record(&mut self, file: &Path, package: &str, sites: Vec<cfg::GateSite>) {
-        for site in sites {
-            let key = (file.to_path_buf(), site.line);
-            match site.verdict {
-                cfg::Verdict::CanHold => {
-                    self.satisfiable.insert(key);
-                }
-                cfg::Verdict::Impossible { .. } => {
-                    self.impossible
-                        .entry(key)
-                        .or_insert_with(|| (package.to_string(), site));
-                }
-            }
-        }
-    }
-
-    fn into_findings(self, workspace_root: &Path) -> Vec<Finding> {
-        self.impossible
-            .into_iter()
-            .filter(|(key, _)| !self.satisfiable.contains(key))
-            .map(|((file, line), (package, site))| Finding {
-                kind: FindingKind::UnsatisfiableCfg,
-                severity: Severity::default(),
-                file: relative_to(&file, workspace_root),
-                line: Some(line),
-                message: match &site.verdict {
-                    cfg::Verdict::Impossible { undeclared } if !undeclared.is_empty() => {
-                        format!(
-                            "`#[cfg({})]` can never hold: package `{package}` declares no {}",
-                            site.gate,
-                            feature_list(undeclared)
-                        )
-                    }
-                    _ => format!(
-                        "`#[cfg({})]` can never hold in any build of package `{package}`",
-                        site.gate
-                    ),
-                },
-                name: site.name,
-                // A gate site, not a definition: the name is whatever the gate
-                // sits on, and nothing here tracks which module that is or
-                // which namespace it binds in.
-                module: None,
-                namespace: None,
-            })
-            .collect()
-    }
 }
 
 /// What a manifest entry of this kind is called in a finding message.
@@ -966,15 +879,6 @@ fn misplacement_evidence(
         _ => {
             format!("is referenced only by the test, example and bench code of package `{package}`")
         }
-    }
-}
-
-/// `feature `x`` or `features `x`, `y``, for the finding message.
-fn feature_list(names: &[String]) -> String {
-    let quoted: Vec<String> = names.iter().map(|name| format!("`{name}`")).collect();
-    match quoted.len() {
-        1 => format!("feature {}", quoted[0]),
-        _ => format!("features {}", quoted.join(", ")),
     }
 }
 
@@ -1171,35 +1075,6 @@ fn crate_names(package: &metadata::Package, target: &metadata::Target) -> Vec<St
 mod tests {
     use super::*;
 
-    /// An impossible gate whose reason is not an undeclared feature —
-    /// `#[cfg(any())]`, or a matrix that rules the predicate out — is worded
-    /// on the build, not on a feature list there is nothing to put in.
-    #[test]
-    fn an_impossible_gate_without_undeclared_features_names_the_build() {
-        let mut sites = GateSites::default();
-        sites.record(
-            Path::new("src/lib.rs"),
-            "pkg",
-            vec![cfg::GateSite {
-                line: 3,
-                name: None,
-                gate: "any()".to_string(),
-                verdict: cfg::Verdict::Impossible {
-                    undeclared: Vec::new(),
-                },
-            }],
-        );
-        let findings = sites.into_findings(Path::new("/ws"));
-        assert_eq!(findings.len(), 1);
-        assert!(
-            findings[0]
-                .message
-                .ends_with("can never hold in any build of package `pkg`"),
-            "no feature clause without a feature to name: {}",
-            findings[0].message
-        );
-    }
-
     /// What a finding calls a manifest entry is the table's own noun: an
     /// "unused dependency" message about a `[build-dependencies]` entry
     /// would send the reader to the wrong table.
@@ -1369,8 +1244,7 @@ mod tests {
                 FindingKind::UnusedReexport => 2,
                 FindingKind::UnusedDependency => 3,
                 FindingKind::MisplacedDependency => 4,
-                FindingKind::UnsatisfiableCfg => 5,
-                FindingKind::TestOnlyItem => 6,
+                FindingKind::TestOnlyItem => 5,
             };
             assert_eq!(FindingKind::ALL[position], kind);
             assert!(seen.insert(kind), "{} is listed twice", kind.label());

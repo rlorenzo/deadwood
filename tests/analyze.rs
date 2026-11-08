@@ -216,18 +216,6 @@ fn file_shared_between_packages_is_counted_once() {
         "shared_dead is unused and must be reported exactly once: {:?}",
         analysis.findings
     );
-
-    // The same file is compiled by two packages with different feature
-    // tables, so `#[cfg(feature = "wide")]` in it is impossible for the member
-    // that does not declare `wide` and ordinary for the one that does. A gate
-    // is only dead by construction when *no* package that compiles it can
-    // satisfy it — otherwise every shared file would report against whichever
-    // member happened to be judged first.
-    assert!(
-        reported(&analysis, FindingKind::UnsatisfiableCfg).is_empty(),
-        "one member declares the feature, so the gate can hold: {:?}",
-        analysis.findings
-    );
 }
 
 /// The three classes of dead code the old identifier census could not see:
@@ -937,40 +925,12 @@ fn paths_through_a_dependency_rename_resolve() {
 // there when the module is part of the analyzed build and gone when it is not.
 
 /// Under the default matrix — every feature, every target, tests included —
-/// every gate that can hold anywhere is followed, exactly as before this phase.
-/// The one thing that is new is the finding about the gate that cannot.
+/// every gate is followed, and so is code behind a gate no build can satisfy:
+/// rustc's `unexpected_cfgs` reports that gate, and the code behind it still
+/// counts as a use of what it names.
 #[test]
-fn the_default_matrix_follows_every_gate_and_reports_the_ones_that_can_never_hold() {
+fn the_default_matrix_follows_every_gate() {
     let analysis = analyze_fixture("cfggates");
-
-    assert_eq!(
-        reported(&analysis, FindingKind::UnsatisfiableCfg),
-        vec![
-            // An item-level gate, `all` with one arm no manifest can satisfy.
-            ("src/declared_feature.rs".to_string(), "never_built"),
-            // A file-level `#![cfg(...)]`, which gates every item below it.
-            ("src/inner_impossible.rs".to_string(), ""),
-            // A `mod` behind a feature that does not exist.
-            ("src/lib.rs".to_string(), "missing_feature"),
-        ],
-        "only gates no build can satisfy are reported: {:?}",
-        analysis.findings
-    );
-    let gate = analysis
-        .findings
-        .iter()
-        .find(|f| {
-            f.kind == FindingKind::UnsatisfiableCfg && f.name.as_deref() == Some("missing_feature")
-        })
-        .expect("the mod gate is reported");
-    assert_eq!(gate.line, Some(15), "the line is the `#[cfg]` attribute's");
-    assert!(
-        gate.message
-            .contains("`#[cfg(feature = \"gone\")]` can never hold")
-            && gate.message.contains("declares no feature `gone`"),
-        "the message must name the gate and the missing feature: {}",
-        gate.message
-    );
 
     assert_eq!(
         reported(&analysis, FindingKind::UnusedPubItem),
@@ -982,8 +942,7 @@ fn the_default_matrix_follows_every_gate_and_reports_the_ones_that_can_never_hol
             ),
             // Not `inner_gated.rs`: two declarations mount it as two modules,
             // so its items take no part in resolution.
-            // Behind the impossible gates: reported *and* still followed, so
-            // that adding a finding kind never moves the other detectors.
+            // Behind the impossible gates: still followed.
             (
                 "src/inner_impossible.rs".to_string(),
                 "from_inner_impossible",
@@ -1114,41 +1073,6 @@ fn a_narrowed_feature_matrix_excludes_gated_code_and_its_optional_dependencies()
             .any(|w| w.contains("`optional_helper`") && w.contains("[cfg] features")),
         "the skip must name the matrix as the reason: {:?}",
         analysis.warnings
-    );
-    // The gate that can never hold is judged against every build there could
-    // be, not against the configured one, so narrowing does not silence it.
-    assert_eq!(
-        reported(&analysis, FindingKind::UnsatisfiableCfg),
-        vec![
-            ("src/inner_impossible.rs".to_string(), ""),
-            ("src/lib.rs".to_string(), "missing_feature")
-        ]
-    );
-}
-
-/// The new kind is a first-class one: `[severity]` reaches it by its serde tag
-/// with no plumbing of its own, and it carries that tag into the JSON.
-#[test]
-fn the_new_finding_kind_is_configurable_and_typed() {
-    let fixture = fixtures().join("cfggates");
-    let analysis =
-        analyze(&fixture, Some(&fixture.join("cfg-off.toml"))).expect("`cfg-off.toml` should load");
-    assert!(
-        reported(&analysis, FindingKind::UnsatisfiableCfg).is_empty(),
-        "`unsatisfiable_cfg = \"off\"` removes the finding entirely: {:?}",
-        analysis.findings
-    );
-
-    let reported = analyze_fixture("cfggates");
-    let json = deadwood::report::render_json(&reported).expect("the report should render");
-    assert!(
-        json.contains("\"kind\": \"unsatisfiable_cfg\""),
-        "the JSON carries the same tag the config file keys off:\n{json}"
-    );
-    let text = deadwood::report::render_text(&reported);
-    assert!(
-        text.contains("Unsatisfiable cfg gates:\n"),
-        "and the text report gives it a group of its own:\n{text}"
     );
 }
 

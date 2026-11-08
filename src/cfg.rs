@@ -37,14 +37,12 @@
 //!    ruled out, so this changes nothing until a `deadwood.toml` says so.
 //! 2. **Can this gate hold in *any* build at all?** Judged against the maximal
 //!    matrix — every feature the manifest declares, every target, test and
-//!    non-test ([`Gates::gate_sites`]). A `mod` behind a feature no manifest
-//!    declares is dead by construction, in every checkout, on every platform.
-//!    That is a finding, and it is the strongest reason this phase exists.
+//!    non-test. A gate that can hold in no build (a feature no manifest
+//!    declares) is rustc's to report, through `unexpected_cfgs`.
 //!
-//! The two are deliberately not the same test. An impossible gate is
-//! *reported*, not hidden: dropping the code behind it would change what every
-//! other detector sees, and a new finding class must not quietly move the
-//! others.
+//! The two are deliberately not the same test. Code behind an impossible gate
+//! is left in the analysis rather than dropped: its mentions keep what they
+//! name alive, which costs findings rather than inventing them.
 //!
 //! # What is evaluated
 //!
@@ -429,9 +427,9 @@ impl<'a> Gates<'a> {
     ///
     /// False only when the configured matrix rules it out *and* the gate could
     /// hold in some other build — that is, when the user's own narrowing is
-    /// what excludes it. A gate that can never hold anywhere is reported by
-    /// [`Gates::gate_sites`] and left in place, so that adding a finding kind
-    /// never moves what the other detectors see.
+    /// what excludes it. A gate that can never hold anywhere is left in place:
+    /// rustc's `unexpected_cfgs` reports it, and the code behind it still
+    /// counts as a use of what it names.
     pub fn compiled(&self, attrs: &[syn::Attribute]) -> bool {
         if eval_attrs(attrs, &self.configured()) != Truth::Never {
             return true;
@@ -456,8 +454,8 @@ impl<'a> Gates<'a> {
     ///   rustc honours it here at all ([`Site`]).
     ///
     /// An item behind a gate that can hold in *no* build answers `false`
-    /// whichever way it is written: it is dead by construction
-    /// ([`Gates::gate_sites`] reports it), not test-only. `#[test]
+    /// whichever way it is written: it is dead by construction, not
+    /// test-only. `#[test]
     /// #[cfg(feature = "nope")] fn` is compiled by nothing, and calling it
     /// test-only would attribute its mentions to a test build that does not
     /// exist either.
@@ -472,19 +470,6 @@ impl<'a> Gates<'a> {
         let confined = eval_attrs(attrs, &non_test) == Truth::Never
             || (site == Site::FreeFn && test_attribute(attrs));
         confined && eval_attrs(attrs, &self.maximal()) != Truth::Never
-    }
-
-    /// The features named by `gate` that the manifest does not declare, when
-    /// the gate can hold in no build at all.
-    fn verdict(&self, gate: &syn::Meta) -> Verdict {
-        if eval(gate, &self.maximal()) != Truth::Never {
-            return Verdict::CanHold;
-        }
-        let mut undeclared = Vec::new();
-        collect_undeclared(gate, &self.declared, &mut undeclared);
-        undeclared.sort();
-        undeclared.dedup();
-        Verdict::Impossible { undeclared }
     }
 
     /// Whether the configured matrix can turn the optional dependency `entry`
@@ -528,105 +513,6 @@ impl<'a> Gates<'a> {
             TargetVerdict::RuledOutByMatrix
         }
     }
-
-    /// Every `#[cfg]` gate on a module-level item of `ast`, with the verdict on
-    /// whether it can hold in any build at all.
-    ///
-    /// Items behind an impossible gate are not descended into: the outermost
-    /// gate is the one to fix, and everything under it is dead for the same
-    /// single reason.
-    pub fn gate_sites(&self, ast: &syn::File) -> Vec<GateSite> {
-        let mut sites = Vec::new();
-        // An inner `#![cfg(...)]` gates the file it is written in. If it can
-        // never hold, every item below it is dead for that one reason, so the
-        // file-level gate is the only one worth naming.
-        if self.walk_attrs(&ast.attrs, None, &mut sites) {
-            return sites;
-        }
-        self.walk_items(&ast.items, &mut sites);
-        sites
-    }
-
-    fn walk_items(&self, items: &[syn::Item], sites: &mut Vec<GateSite>) {
-        for item in items {
-            if self.walk_attrs(attrs_of(item), item_name(item), sites) {
-                continue;
-            }
-            match item {
-                syn::Item::Mod(m) => {
-                    if let Some((_, inner)) = &m.content {
-                        self.walk_items(inner, sites);
-                    }
-                }
-                syn::Item::Impl(i) => self.walk_nested(
-                    i.items
-                        .iter()
-                        .map(|it| (impl_item_attrs(it), impl_item_name(it))),
-                    sites,
-                ),
-                syn::Item::Trait(t) => self.walk_nested(
-                    t.items
-                        .iter()
-                        .map(|it| (trait_item_attrs(it), trait_item_name(it))),
-                    sites,
-                ),
-                syn::Item::ForeignMod(f) => self.walk_nested(
-                    f.items
-                        .iter()
-                        .map(|it| (foreign_item_attrs(it), foreign_item_name(it))),
-                    sites,
-                ),
-                _ => {}
-            }
-        }
-    }
-
-    fn walk_nested<'i>(
-        &self,
-        members: impl Iterator<Item = (&'i [syn::Attribute], Option<String>)>,
-        sites: &mut Vec<GateSite>,
-    ) {
-        for (attrs, name) in members {
-            self.walk_attrs(attrs, name, sites);
-        }
-    }
-
-    /// Record a site per `#[cfg]` attribute; answer whether any of them makes
-    /// the item dead by construction.
-    fn walk_attrs(
-        &self,
-        attrs: &[syn::Attribute],
-        name: Option<String>,
-        sites: &mut Vec<GateSite>,
-    ) -> bool {
-        let mut impossible = false;
-        for attr in attrs {
-            let Some(gate) = cfg_predicate(attr) else {
-                continue;
-            };
-            let verdict = self.verdict(&gate);
-            impossible |= matches!(verdict, Verdict::Impossible { .. });
-            sites.push(GateSite {
-                line: attribute_line(attr),
-                name: name.clone(),
-                gate: render(&gate),
-                verdict,
-            });
-        }
-        impossible
-    }
-}
-
-/// A `#[cfg]` gate found on an item, and what became of it.
-pub struct GateSite {
-    /// Line of the `#[cfg]` attribute itself, which is what a reader has to
-    /// delete.
-    pub line: usize,
-    /// The gated item's name, when it has one (`impl` and `use` do not).
-    pub name: Option<String>,
-    /// The predicate as written, e.g. `feature = "nope"`.
-    pub gate: String,
-    pub verdict: Verdict,
 }
 
 /// What the `cfg` key of a `[target.'...'.dependencies]` table says about the
@@ -643,16 +529,6 @@ pub enum TargetVerdict {
     /// entry that exists to constrain version resolution and is deliberately
     /// never compiled (serde pins `serde_derive` this way).
     NeverBuilt,
-}
-
-/// Whether a gate can hold in any build at all.
-pub enum Verdict {
-    CanHold,
-    /// Dead by construction. `undeclared` names the features the manifest does
-    /// not declare, which is the usual reason and the actionable part.
-    Impossible {
-        undeclared: Vec<String>,
-    },
 }
 
 /// Remove every item the configured matrix leaves out of the analyzed build.
@@ -899,26 +775,6 @@ fn family_of(os: &str) -> Option<Family> {
     }
 }
 
-/// Every `feature = "..."` name in a gate that the manifest does not declare.
-fn collect_undeclared(meta: &syn::Meta, declared: &HashSet<String>, out: &mut Vec<String>) {
-    match meta {
-        syn::Meta::Path(_) => {}
-        syn::Meta::NameValue(nv) => {
-            if single_ident(&nv.path).as_deref() == Some("feature")
-                && let Some(name) = string_literal(&nv.value)
-                && !declared.contains(&name)
-            {
-                out.push(name);
-            }
-        }
-        syn::Meta::List(list) => {
-            for inner in predicates(&list.tokens).unwrap_or_default() {
-                collect_undeclared(&inner, declared, out);
-            }
-        }
-    }
-}
-
 /// The features the matrix turns on, and the optional dependencies they
 /// activate, closed over what each feature enables.
 ///
@@ -995,34 +851,6 @@ fn string_literal(expr: &syn::Expr) -> Option<String> {
     }
 }
 
-/// The predicate as a reader would write it, for the finding message.
-fn render(meta: &syn::Meta) -> String {
-    match meta {
-        syn::Meta::Path(path) => single_ident(path).unwrap_or_else(|| "…".to_string()),
-        syn::Meta::NameValue(nv) => match (single_ident(&nv.path), string_literal(&nv.value)) {
-            (Some(key), Some(value)) => format!("{key} = {value:?}"),
-            _ => "…".to_string(),
-        },
-        syn::Meta::List(list) => {
-            let key = single_ident(&list.path).unwrap_or_else(|| "…".to_string());
-            let inner: Vec<String> = predicates(&list.tokens)
-                .unwrap_or_default()
-                .iter()
-                .map(render)
-                .collect();
-            format!("{key}({})", inner.join(", "))
-        }
-    }
-}
-
-/// The line the `#[cfg]` attribute is written on.
-fn attribute_line(attr: &syn::Attribute) -> usize {
-    attr.path()
-        .segments
-        .first()
-        .map_or(0, |segment| segment.ident.span().start().line)
-}
-
 pub(crate) fn attrs_of(item: &syn::Item) -> &[syn::Attribute] {
     match item {
         syn::Item::Const(i) => &i.attrs,
@@ -1044,24 +872,6 @@ pub(crate) fn attrs_of(item: &syn::Item) -> &[syn::Attribute] {
     }
 }
 
-fn item_name(item: &syn::Item) -> Option<String> {
-    let ident = match item {
-        syn::Item::Const(i) => &i.ident,
-        syn::Item::Enum(i) => &i.ident,
-        syn::Item::ExternCrate(i) => &i.ident,
-        syn::Item::Fn(i) => &i.sig.ident,
-        syn::Item::Mod(i) => &i.ident,
-        syn::Item::Static(i) => &i.ident,
-        syn::Item::Struct(i) => &i.ident,
-        syn::Item::Trait(i) => &i.ident,
-        syn::Item::TraitAlias(i) => &i.ident,
-        syn::Item::Type(i) => &i.ident,
-        syn::Item::Union(i) => &i.ident,
-        _ => return None,
-    };
-    Some(ident.to_string())
-}
-
 pub(crate) fn impl_item_attrs(item: &syn::ImplItem) -> &[syn::Attribute] {
     match item {
         syn::ImplItem::Const(i) => &i.attrs,
@@ -1069,15 +879,6 @@ pub(crate) fn impl_item_attrs(item: &syn::ImplItem) -> &[syn::Attribute] {
         syn::ImplItem::Type(i) => &i.attrs,
         syn::ImplItem::Macro(i) => &i.attrs,
         _ => &[],
-    }
-}
-
-fn impl_item_name(item: &syn::ImplItem) -> Option<String> {
-    match item {
-        syn::ImplItem::Const(i) => Some(i.ident.to_string()),
-        syn::ImplItem::Fn(i) => Some(i.sig.ident.to_string()),
-        syn::ImplItem::Type(i) => Some(i.ident.to_string()),
-        _ => None,
     }
 }
 
@@ -1091,15 +892,6 @@ pub(crate) fn trait_item_attrs(item: &syn::TraitItem) -> &[syn::Attribute] {
     }
 }
 
-fn trait_item_name(item: &syn::TraitItem) -> Option<String> {
-    match item {
-        syn::TraitItem::Const(i) => Some(i.ident.to_string()),
-        syn::TraitItem::Fn(i) => Some(i.sig.ident.to_string()),
-        syn::TraitItem::Type(i) => Some(i.ident.to_string()),
-        _ => None,
-    }
-}
-
 pub(crate) fn foreign_item_attrs(item: &syn::ForeignItem) -> &[syn::Attribute] {
     match item {
         syn::ForeignItem::Fn(i) => &i.attrs,
@@ -1107,15 +899,6 @@ pub(crate) fn foreign_item_attrs(item: &syn::ForeignItem) -> &[syn::Attribute] {
         syn::ForeignItem::Type(i) => &i.attrs,
         syn::ForeignItem::Macro(i) => &i.attrs,
         _ => &[],
-    }
-}
-
-fn foreign_item_name(item: &syn::ForeignItem) -> Option<String> {
-    match item {
-        syn::ForeignItem::Fn(i) => Some(i.sig.ident.to_string()),
-        syn::ForeignItem::Static(i) => Some(i.ident.to_string()),
-        syn::ForeignItem::Type(i) => Some(i.ident.to_string()),
-        _ => None,
     }
 }
 
@@ -1146,6 +929,25 @@ mod tests {
 
     use super::*;
     use crate::metadata::{Dependency, Package};
+
+    /// The name an item declares, for asserting what [`prune`] kept.
+    fn item_name(item: &syn::Item) -> Option<String> {
+        let ident = match item {
+            syn::Item::Const(i) => &i.ident,
+            syn::Item::Enum(i) => &i.ident,
+            syn::Item::ExternCrate(i) => &i.ident,
+            syn::Item::Fn(i) => &i.sig.ident,
+            syn::Item::Mod(i) => &i.ident,
+            syn::Item::Static(i) => &i.ident,
+            syn::Item::Struct(i) => &i.ident,
+            syn::Item::Trait(i) => &i.ident,
+            syn::Item::TraitAlias(i) => &i.ident,
+            syn::Item::Type(i) => &i.ident,
+            syn::Item::Union(i) => &i.ident,
+            _ => return None,
+        };
+        Some(ident.to_string())
+    }
 
     fn package(features: &[(&str, &[&str])], optional: &[&str]) -> Package {
         Package {
@@ -1415,9 +1217,8 @@ mod tests {
         ));
     }
 
-    /// A test attribute is not a configuration predicate, so it is not a gate
-    /// site, it makes nothing unsatisfiable, and — the load-bearing half —
-    /// [`prune`] never removes the function. Deleting it would take its
+    /// A test attribute is not a configuration predicate, so [`prune`] never
+    /// removes the function. Deleting it would take its
     /// references out of every detector's view, which is a different phase's
     /// claim and not this one's.
     #[test]
@@ -1428,10 +1229,6 @@ mod tests {
 
         let source = "#[test]\nfn t() {}\n#[bench]\nfn b() {}\n#[cfg(test)]\nfn gated() {}\n";
         let mut file: syn::File = syn::parse_str(source).unwrap();
-        assert!(
-            gates.gate_sites(&file).len() == 1,
-            "only `cfg(test)` is one"
-        );
         assert!(gates.compiled(attrs_of(&file.items[0])));
         assert!(gates.compiled(attrs_of(&file.items[1])));
 
@@ -1602,29 +1399,6 @@ mod tests {
             panic!("expected the impl block");
         };
         assert_eq!(block.items.len(), 1, "the test-only method goes too");
-    }
-
-    #[test]
-    fn gate_sites_report_the_outermost_impossible_gate_only() {
-        let matrix = Matrix::default();
-        let manifest = package(&[("std", &[])], &[]);
-        let gates = Gates::new(&matrix, &manifest);
-
-        let file: syn::File = syn::parse_str(
-            "#[cfg(feature = \"gone\")]\nmod dead { #[cfg(feature = \"alsogone\")] fn deeper() {} }\n\
-             #[cfg(feature = \"std\")]\nfn alive() {}\n",
-        )
-        .unwrap();
-        let sites = gates.gate_sites(&file);
-
-        assert_eq!(sites.len(), 2, "the nested gate is not visited");
-        assert_eq!(sites[0].name.as_deref(), Some("dead"));
-        assert_eq!(sites[0].gate, "feature = \"gone\"");
-        let Verdict::Impossible { undeclared } = &sites[0].verdict else {
-            panic!("the gate names no declared feature");
-        };
-        assert_eq!(undeclared, &vec!["gone".to_string()]);
-        assert!(matches!(sites[1].verdict, Verdict::CanHold));
     }
 
     #[test]
