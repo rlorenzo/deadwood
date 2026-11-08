@@ -81,19 +81,22 @@ Deadwood needs `cargo` on `PATH` and never touches the network.
 calls it. Inside a workspace that's often false: internal crates and items made
 `pub` out of habit are where dead code piles up.
 
-Three design choices matter before you run it:
+Three design choices shape what it reports.
 
-- **Reachability, not reference counting.** An item survives only if something
-  live names it. A dead subsystem comes out in one run rather than one layer per
-  run, and a mutually recursive pair nothing calls gets reported at all.
-- **False negatives over false positives.** Anything Deadwood can't resolve
-  (macro input, attribute strings, ambiguous paths) counts as a use. Every check
-  was measured against large workspaces, including rust-lang/rust, tokio, serde,
-  bevy, ruff, and bun. Each misfire there became a fix and a regression fixture,
-  recorded in
-  [`docs/HISTORY.md`](https://github.com/rlorenzo/deadwood-rs/blob/main/docs/HISTORY.md).
-- **Reporting only.** Deadwood never rewrites your code, and won't until its
-  precision is proven in the field.
+Deadwood walks references out from your entry points and reports any `pub`
+item the walk never reaches. A dead subsystem comes out in one run rather than
+one layer per run, and two functions that only call each other are reported
+too.
+
+It would rather miss a finding than report a wrong one. Anything Deadwood can't
+resolve (macro input, attribute strings, ambiguous paths) counts as a use. Every
+check was measured against large workspaces, including rust-lang/rust, tokio,
+serde, bevy, ruff, and bun, and each misfire there became a fix and a regression
+fixture, recorded in
+[`docs/HISTORY.md`](https://github.com/rlorenzo/deadwood-rs/blob/main/docs/HISTORY.md).
+
+It never rewrites your code, and won't until its precision is proven in the
+field.
 
 Some jobs belong to other tools. Copy-paste detection is [jscpd](https://jscpd.dev)'s
 ([out of scope](https://github.com/rlorenzo/deadwood-rs/blob/main/docs/SCOPE.md) for now),
