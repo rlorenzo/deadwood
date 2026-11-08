@@ -4,6 +4,7 @@ use proc_macro::TokenStream;
 pub fn derive_key(input: TokenStream) -> TokenStream {
     let name = name_of(input);
     let _store = manifest_path("tag_store");
+    let _helped = keyhelper::helper_tokens();
     quote::quote! { impl ::cache::Key for #name {} }.into()
 }
 

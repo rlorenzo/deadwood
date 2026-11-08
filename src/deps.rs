@@ -447,8 +447,11 @@ pub struct CrateReferences {
 
 impl CrateReferences {
     /// Whether any of the package's code mentions `word` at all.
+    ///
+    /// A macro invoked by path counts too: `genmacros::generate_context!()`
+    /// mentions `genmacros` as a crate and `generate_context` as a macro.
     pub fn mentions(&self, word: &str) -> bool {
-        self.names.contains_key(word)
+        self.names.contains_key(word) || self.invoked_macros.contains(word)
     }
 
     /// Count `words` as mentions whose placement is unknown.

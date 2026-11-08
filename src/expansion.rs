@@ -7,14 +7,17 @@
 //! its source says what it can write: the identifiers its `quote!`-family
 //! invocations use as path heads, and the words of its path-like strings.
 //!
-//! Those words are kept per function, with the functions each one calls, so
+//! Those words are kept per function, with the functions each one calls by
+//! path (`helper(x)`, `Self::emit(..)`, `utils::get_path(..)`), so
 //! that a package is credited with what the macros it *uses* write and not
 //! with everything the macro crate can write. `bevy_render_macros` defines
 //! both `AsBindGroup`, which names `bevy_image`, and `SpecializerKey`, which
 //! does not; crediting the whole crate hid a stale `bevy_image` entry in a
 //! package that only derives `SpecializerKey`. Calls are matched by name
 //! alone, so two helpers sharing one are both followed, which only ever
-//! credits more.
+//! credits more. Method calls are not followed: `.parse()`, `.into()` and
+//! `.new()` name a trait method of every type in the crate, and following
+//! them joined every derive to every other.
 
 use std::collections::{HashMap, HashSet};
 
@@ -179,11 +182,6 @@ impl<'ast> Visit<'ast> for MacroSource {
             self.call(last.ident.to_string());
         }
         syn::visit::visit_expr_path(self, node);
-    }
-
-    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
-        self.call(node.method.to_string());
-        syn::visit::visit_expr_method_call(self, node);
     }
 }
 

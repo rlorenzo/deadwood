@@ -34,6 +34,30 @@ pub struct Metadata {
     /// not.
     #[serde(skip)]
     pub lib_names: HashMap<String, String>,
+    /// Proc macros from outside the workspace that members use, read from the
+    /// same full resolution as [`Metadata::lib_names`] and empty where it
+    /// fails. See [`ExternalMacro`].
+    #[serde(skip)]
+    pub external_macros: Vec<ExternalMacro>,
+}
+
+/// A proc-macro package from outside the workspace, with what is needed to
+/// read what it can expand to.
+///
+/// `tauri::generate_context!` expands to `::serde_json::Value`, so an app's
+/// `serde_json` entry looks unused; the path is written by `tauri-utils`, a
+/// library `tauri-macros` builds its output with. So the sources are the
+/// proc-macro package and every package it depends on, however indirectly,
+/// that itself depends on `quote` — the crates that write code — other than
+/// `syn`, `quote` and `proc-macro2`, which write none of a macro's output.
+#[derive(Debug)]
+pub struct ExternalMacro {
+    /// The packages to read, proc-macro package first.
+    pub sources: Vec<Package>,
+    /// The workspace members whose resolved dependencies reach it, however
+    /// indirectly — a derive is as often re-exported by a library as depended
+    /// on directly.
+    pub users: HashSet<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -235,7 +259,14 @@ pub fn load(path: &Path) -> Result<Metadata> {
 
     let mut metadata: Metadata = serde_json::from_slice(&output.stdout)
         .context("failed to parse `cargo metadata` output")?;
-    metadata.lib_names = lib_names(&manifest);
+    let full = full_resolution(&manifest);
+    metadata.lib_names = full.as_ref().map_or_else(HashMap::new, |full| {
+        full.packages
+            .iter()
+            .filter_map(|package| renamed_lib(&package.package.name, &package.package.targets))
+            .collect()
+    });
+    metadata.external_macros = full.map(external_macros).unwrap_or_default();
     // Workspace members are in front of us with or without a resolvable
     // graph, so a member's renamed lib never depends on the cache the full
     // resolution needs.
@@ -263,34 +294,23 @@ fn renamed_lib(package: &str, targets: &[Target]) -> Option<(String, String)> {
     (lib_name != package.replace('-', "_")).then(|| (package.to_string(), lib_name))
 }
 
-/// The renamed lib targets of every dependency a full, *frozen* resolution
-/// can see: package name to lib (or proc-macro) target name, kept only where
-/// the two differ.
+/// A full, *frozen* resolution of the workspace, which answers
+/// [`Metadata::lib_names`] and [`Metadata::external_macros`].
 ///
 /// Failure of any kind — a missing or outdated lockfile, a cold registry
-/// cache, an unresolvable fixture manifest — yields the empty map, silently: the fallback is the
+/// cache, an unresolvable fixture manifest — yields nothing, silently: the fallback is the
 /// package-name heuristic that has always run, and a warning here would fire
 /// on every fresh checkout for a gap that costs findings rather than
 /// inventing them. Frozen implies offline, so the tenet holds: Deadwood
 /// never reaches for the network, it only reads what some build already
 /// fetched.
-fn lib_names(manifest: &Path) -> HashMap<String, String> {
-    #[derive(Deserialize)]
-    struct Full {
-        packages: Vec<FullPackage>,
-    }
-    #[derive(Deserialize)]
-    struct FullPackage {
-        name: String,
-        targets: Vec<Target>,
-    }
-
+fn full_resolution(manifest: &Path) -> Option<Full> {
     // `--frozen` rather than `--offline` alone: a full resolution can write
     // or update the workspace's `Cargo.lock`, and a linter must not leave a
     // mark on the tree it reads. Frozen asserts the lockfile is present and
     // current and errs into the fallback otherwise — the missing-lock case
     // is a fresh project the heuristic already serves.
-    let full = first_resolution(|features| {
+    first_resolution(|features| {
         let output = Command::new("cargo")
             .args(["metadata", "--format-version", "1", "--frozen"])
             .args(features)
@@ -302,13 +322,128 @@ fn lib_names(manifest: &Path) -> HashMap<String, String> {
             return None;
         }
         serde_json::from_slice::<Full>(&output.stdout).ok()
-    });
-    full.map_or_else(HashMap::new, |full| {
-        full.packages
-            .into_iter()
-            .filter_map(|package| renamed_lib(&package.name, &package.targets))
-            .collect()
     })
+}
+
+/// A full `cargo metadata`: every package the resolution reaches, and the
+/// graph between them.
+#[derive(Deserialize)]
+struct Full {
+    packages: Vec<FullPackage>,
+    workspace_members: Vec<String>,
+    resolve: Option<Resolve>,
+}
+
+#[derive(Deserialize)]
+struct FullPackage {
+    id: String,
+    #[serde(flatten)]
+    package: Package,
+}
+
+#[derive(Deserialize)]
+struct Resolve {
+    nodes: Vec<Node>,
+}
+
+#[derive(Deserialize)]
+struct Node {
+    id: String,
+    #[serde(default)]
+    dependencies: Vec<String>,
+}
+
+/// Every external proc-macro package some workspace member reaches.
+fn external_macros(full: Full) -> Vec<ExternalMacro> {
+    const WRITE_NOTHING: &[&str] = &["syn", "quote", "proc-macro2"];
+    let Some(resolve) = full.resolve else {
+        return Vec::new();
+    };
+    let edges: HashMap<&str, &[String]> = resolve
+        .nodes
+        .iter()
+        .map(|node| (node.id.as_str(), node.dependencies.as_slice()))
+        .collect();
+    let by_id: HashMap<&str, &Package> = full
+        .packages
+        .iter()
+        .map(|package| (package.id.as_str(), &package.package))
+        .collect();
+    let members: HashSet<&str> = full.workspace_members.iter().map(String::as_str).collect();
+    let reach = |from: &str| -> HashSet<&str> {
+        let mut seen = HashSet::new();
+        let mut pending = vec![from];
+        while let Some(id) = pending.pop() {
+            for next in edges.get(id).copied().unwrap_or_default() {
+                if seen.insert(next.as_str()) {
+                    pending.push(next.as_str());
+                }
+            }
+        }
+        seen
+    };
+    let is_proc_macro = |package: &Package| {
+        package
+            .targets
+            .iter()
+            .any(|target| target.kind.iter().any(|kind| kind == "proc-macro"))
+    };
+    let writes_code = |package: &Package| {
+        !WRITE_NOTHING.contains(&package.name.as_str())
+            && package
+                .dependencies
+                .iter()
+                .any(|dependency| dependency.name == "quote")
+    };
+
+    let mut users: HashMap<&str, HashSet<String>> = HashMap::new();
+    for member in &members {
+        let Some(member_package) = by_id.get(member) else {
+            continue;
+        };
+        for id in reach(member) {
+            if !members.contains(id) && by_id.get(id).is_some_and(|package| is_proc_macro(package))
+            {
+                users
+                    .entry(id)
+                    .or_default()
+                    .insert(member_package.name.clone());
+            }
+        }
+    }
+    users
+        .into_iter()
+        .filter_map(|(id, users)| {
+            let mut sources = vec![clone_package(by_id.get(id)?)];
+            for helper in reach(id) {
+                if let Some(package) = by_id.get(helper)
+                    && !members.contains(helper)
+                    && writes_code(package)
+                {
+                    sources.push(clone_package(package));
+                }
+            }
+            Some(ExternalMacro { sources, users })
+        })
+        .collect()
+}
+
+fn clone_package(package: &Package) -> Package {
+    Package {
+        name: package.name.clone(),
+        manifest_path: package.manifest_path.clone(),
+        targets: package
+            .targets
+            .iter()
+            .map(|target| Target {
+                name: target.name.clone(),
+                kind: target.kind.clone(),
+                src_path: target.src_path.clone(),
+            })
+            .collect(),
+        dependencies: Vec::new(),
+        features: package.features.clone(),
+    }
 }
 
 /// Resolve with every feature on, as the analysis itself does by default, so

@@ -4943,3 +4943,43 @@ fn an_include_path_built_from_env_is_followed_where_the_tree_answers_it() {
     assert!(reported(&analysis, FindingKind::DeadFile).is_empty());
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// A proc macro from outside the workspace is read from where the resolution
+/// says its source is — the registry cache, usually, and path dependencies
+/// outside the workspace here — together with the code-writing libraries it
+/// builds its output with. `app` invokes `genmacros::generate_context!`,
+/// whose helper `codegen` writes `::jsonish::Value`, so `app`'s `jsonish`
+/// entry is in use. Reading it takes a full resolution, which needs a
+/// lockfile; the fixture is copied out and given one, since fixture lockfiles
+/// are not committed.
+#[test]
+fn an_external_proc_macros_output_names_dependencies() {
+    fn copy(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for entry in std::fs::read_dir(from).unwrap().flatten() {
+            let target = to.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                copy(&entry.path(), &target);
+            } else {
+                std::fs::copy(entry.path(), target).unwrap();
+            }
+        }
+    }
+    let root = std::env::temp_dir().join(format!("deadwood-externalmacro-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    copy(&fixtures().join("externalmacro"), &root);
+    let locked = std::process::Command::new("cargo")
+        .args(["generate-lockfile", "--offline", "--manifest-path"])
+        .arg(root.join("Cargo.toml"))
+        .status()
+        .expect("cargo runs");
+    assert!(locked.success());
+
+    let analysis = analyze(&root, None).expect("analysis should succeed");
+    assert!(analysis.warnings.is_empty(), "{:?}", analysis.warnings);
+    assert_eq!(
+        reported(&analysis, FindingKind::UnusedDependency),
+        vec![("app/Cargo.toml".to_string(), "unrelated")]
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}

@@ -1,0 +1,12 @@
+# Test fixture: a proc macro from outside the workspace (`vendor/` holds path
+# dependencies that are not members) whose output names a crate the app never
+# writes — tauri's `generate_context!`, which `tauri-utils` builds into
+# `::serde_json::Value`. The macro's helper library `codegen` writes the
+# path, and depends on `quote`, which is how it is told from a library that
+# writes no code. `app` uses the macro, so its `jsonish` entry is in use;
+# its `unrelated` entry is not.
+[workspace]
+resolver = "2"
+members = ["app"]
+exclude = ["vendor"]
+

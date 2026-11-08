@@ -9,7 +9,9 @@
 #   `warn_user_once!`), and declares its rule modules with `lint::rules!`,
 #   which forwards to `lint::rule_module!` (bun's lint crates).
 #
-# `consumer` also needs `tag_store`, which the derive names only in a string
+# `consumer` also needs `helped`, which the derive's helper library
+# `keyhelper` writes (it depends on `quote`, the stand-in member here, which is
+# how a code-writing library is told apart), and `tag_store`, which the derive names only in a string
 # (bevy's manifest lookup), and `attruser` needs `marker`, which an attribute
 # macro from `keymacros` quotes.
 #
@@ -22,5 +24,5 @@
 resolver = "2"
 members = [
     "cache", "keymacros", "facade", "consumer", "paint", "lint", "eslint",
-    "tag_store", "marker", "attruser", "bystander",
+    "tag_store", "marker", "attruser", "bystander", "quote", "keyhelper", "helped",
 ]

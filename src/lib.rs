@@ -636,6 +636,7 @@ pub fn analyze_with(
         &proc_macro_crate,
         &mut references,
     );
+    external_macro_expansions(&meta, &config, &mut references);
 
     // Usage resolution must see every file in the workspace: if module
     // resolution hit any problem, files (and the paths inside them) may be
@@ -1007,29 +1008,71 @@ fn proc_macro_expansions(
     proc_macro_crate: &[bool],
     references: &mut [(&metadata::Package, deps::CrateReferences, cfg::Gates<'_>)],
 ) {
-    let mut expansions: HashMap<&str, expansion::MacroSource> = HashMap::new();
-    for ((unit, package), &is_proc_macro) in
-        crates.iter().zip(package_of_crate).zip(proc_macro_crate)
-    {
-        if !is_proc_macro {
-            continue;
-        }
-        let expansion = expansions.entry(package).or_default();
-        for file in unit.files.iter().chain(&unit.spliced) {
-            if let Some(ast) = &file.ast {
-                expansion.read(ast);
-            }
-        }
-    }
-    if expansions.is_empty() {
-        return;
-    }
-
     let members: HashMap<&str, &metadata::Package> = meta
         .packages
         .iter()
         .map(|package| (package.name.as_str(), package))
         .collect();
+    // A macro's helper libraries write its output as much as it does
+    // (`bevy_macro_utils`): the workspace packages it depends on, however
+    // indirectly, that depend on `quote` themselves.
+    let helpers = |proc_macro: &str| -> HashSet<&str> {
+        let mut seen = HashSet::new();
+        let mut pending = vec![proc_macro];
+        while let Some(name) = pending.pop() {
+            let Some(member) = members.get(name) else {
+                continue;
+            };
+            for dependency in &member.dependencies {
+                if let Some((&next, _)) = members.get_key_value(dependency.name.as_str())
+                    && seen.insert(next)
+                {
+                    pending.push(next);
+                }
+            }
+        }
+        seen.retain(|name| {
+            members[name]
+                .dependencies
+                .iter()
+                .any(|dependency| dependency.name == "quote")
+        });
+        seen
+    };
+    let read_package = |expansion: &mut expansion::MacroSource, wanted: &str, libs_only: bool| {
+        for ((unit, package), &is_proc_macro) in
+            crates.iter().zip(package_of_crate).zip(proc_macro_crate)
+        {
+            // A library is a crate something can name; tests and bins are not.
+            if *package != wanted
+                || (libs_only && unit.names.is_empty())
+                || (!libs_only && !is_proc_macro)
+            {
+                continue;
+            }
+            for file in unit.files.iter().chain(&unit.spliced) {
+                if let Some(ast) = &file.ast {
+                    expansion.read(ast);
+                }
+            }
+        }
+    };
+    let mut expansions: HashMap<&str, expansion::MacroSource> = HashMap::new();
+    for (package, &is_proc_macro) in package_of_crate.iter().zip(proc_macro_crate) {
+        if !is_proc_macro || expansions.contains_key(package) {
+            continue;
+        }
+        let mut expansion = expansion::MacroSource::default();
+        read_package(&mut expansion, package, false);
+        for helper in helpers(package) {
+            read_package(&mut expansion, helper, true);
+        }
+        expansions.insert(package, expansion);
+    }
+    if expansions.is_empty() {
+        return;
+    }
+
     for (package, package_references, _) in references.iter_mut() {
         // Every workspace package this one depends on, however indirectly.
         let mut reached: HashSet<&str> = HashSet::new();
@@ -1054,6 +1097,70 @@ fn proc_macro_expansions(
                 .entry_names()
                 .filter(|name| package_references.mentions(name));
             let words = expansion.words_for(used);
+            package_references.add_opaque_words(&words);
+        }
+    }
+}
+
+/// [`proc_macro_expansions`] for proc macros from outside the workspace, read
+/// from the registry cache a build left: see [`metadata::ExternalMacro`].
+///
+/// Each source is resolved from its lib or proc-macro root like a workspace
+/// crate, under the configured `cfg` matrix and with none of the project's
+/// `ignore` patterns, and anything it warns about is dropped: a file that
+/// cannot be read there costs a mention, never a finding.
+fn external_macro_expansions(
+    meta: &metadata::Metadata,
+    config: &config::Config,
+    references: &mut [(&metadata::Package, deps::CrateReferences, cfg::Gates<'_>)],
+) {
+    if meta.external_macros.is_empty() {
+        return;
+    }
+    let unconfigured = config::Config::default();
+    for external in &meta.external_macros {
+        let users: Vec<usize> = references
+            .iter()
+            .enumerate()
+            .filter(|(_, (package, _, _))| external.users.contains(&package.name))
+            .map(|(index, _)| index)
+            .collect();
+        if users.is_empty() {
+            continue;
+        }
+        let mut source = expansion::MacroSource::default();
+        for package in &external.sources {
+            let gates = cfg::Gates::new(config.cfg(), package);
+            let roots = package.targets.iter().filter(|target| {
+                target
+                    .kind
+                    .iter()
+                    .any(|kind| matches!(kind.as_str(), "lib" | "rlib" | "proc-macro"))
+            });
+            for target in roots {
+                let mut ignored = Vec::new();
+                let resolved = modtree::resolve(
+                    &target.src_path,
+                    unconfigured.ignore(),
+                    &gates,
+                    &mut ignored,
+                );
+                for file in resolved.files.iter().chain(&resolved.spliced) {
+                    if let Some(ast) = &file.ast {
+                        source.read(ast);
+                    }
+                }
+            }
+        }
+        if source.is_empty() {
+            continue;
+        }
+        for index in users {
+            let package_references = &mut references[index].1;
+            let used = source
+                .entry_names()
+                .filter(|name| package_references.mentions(name));
+            let words = source.words_for(used);
             package_references.add_opaque_words(&words);
         }
     }
