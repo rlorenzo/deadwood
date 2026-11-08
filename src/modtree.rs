@@ -1485,7 +1485,7 @@ fn queue_include(
     under: Under<'_>,
     walk: &mut Walk<'_>,
 ) {
-    let Some(included) = crate::deps::included_file(&mac.mac) else {
+    let Some(included) = crate::deps::included_file(&mac.mac, declaring.dir) else {
         return;
     };
     // A path only a build knows is [`crate::deps`]'s to warn about, and this

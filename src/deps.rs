@@ -1209,7 +1209,7 @@ pub(crate) enum Included {
 /// One reader, used by this module and by [`crate::modtree`]: the question
 /// "which file does this `include!` splice in" has one answer, and two copies
 /// of it could come to disagree about which forms are readable.
-pub(crate) fn included_file(mac: &syn::Macro) -> Option<Included> {
+pub(crate) fn included_file(mac: &syn::Macro, dir: &Path) -> Option<Included> {
     // `std::include!` and `core::include!` are the same macro; the last
     // segment is what names it.
     if mac
@@ -1220,10 +1220,124 @@ pub(crate) fn included_file(mac: &syn::Macro) -> Option<Included> {
     {
         return None;
     }
-    Some(match literal_argument(&mac.tokens) {
+    Some(match path_argument(&mac.tokens, dir) {
         Some(path) => Included::At(path),
         None => Included::Unreadable,
     })
+}
+
+/// The path an `include!` names, where it can be worked out without a build:
+/// a string literal, `concat!` of such parts, and `env!` of a variable that
+/// is set in Deadwood's own environment or that cargo derives from the tree —
+/// `CARGO_MANIFEST_DIR`, and `OUT_DIR` once a build has made one. bun
+/// generates its C-ABI thunks under `env!("BUN_CODEGEN_DIR")`, so running
+/// Deadwood with that variable set reads them like any other file.
+fn path_argument(tokens: &TokenStream, dir: &Path) -> Option<String> {
+    let expr: syn::Expr = syn::parse2(tokens.clone()).ok()?;
+    evaluate(&expr, dir)
+}
+
+fn evaluate(expr: &syn::Expr, dir: &Path) -> Option<String> {
+    match expr {
+        syn::Expr::Lit(syn::ExprLit {
+            lit: syn::Lit::Str(text),
+            ..
+        }) => Some(text.value()),
+        syn::Expr::Group(group) => evaluate(&group.expr, dir),
+        syn::Expr::Macro(mac) => {
+            let name = mac.mac.path.segments.last()?.ident.to_string();
+            let args = mac
+                .mac
+                .parse_body_with(
+                    syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated,
+                )
+                .ok()?;
+            match name.as_str() {
+                "concat" => args.iter().map(|arg| evaluate(arg, dir)).collect(),
+                "env" => {
+                    let syn::Expr::Lit(syn::ExprLit {
+                        lit: syn::Lit::Str(variable),
+                        ..
+                    }) = args.first()?
+                    else {
+                        return None;
+                    };
+                    environment(&variable.value(), dir)
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// What `env!(variable)` would give code in the package `dir` belongs to.
+///
+/// The two cargo sets are derived from the tree rather than read from
+/// Deadwood's environment, which under `cargo run` holds cargo's values for
+/// Deadwood itself. Anything else is whatever Deadwood was run with.
+fn environment(variable: &str, dir: &Path) -> Option<String> {
+    let manifest_dir = || {
+        dir.ancestors()
+            .find(|ancestor| ancestor.join("Cargo.toml").is_file())
+    };
+    match variable {
+        "CARGO_MANIFEST_DIR" => Some(manifest_dir()?.to_string_lossy().into_owned()),
+        "OUT_DIR" => out_dir(manifest_dir()?).map(|out| out.to_string_lossy().into_owned()),
+        _ => std::env::var(variable).ok(),
+    }
+}
+
+/// The newest build-script output directory cargo made for the package at
+/// `manifest_dir`: `<target>/<profile>/build/<package>-<hash>/out`, with or
+/// without a target triple between, under `CARGO_TARGET_DIR` or the nearest
+/// `target/` above the package.
+fn out_dir(manifest_dir: &Path) -> Option<PathBuf> {
+    #[derive(serde::Deserialize)]
+    struct Manifest {
+        package: Option<ManifestPackage>,
+    }
+    #[derive(serde::Deserialize)]
+    struct ManifestPackage {
+        name: String,
+    }
+    let manifest = fs::read_to_string(manifest_dir.join("Cargo.toml")).ok()?;
+    let name = toml::from_str::<Manifest>(&manifest).ok()?.package?.name;
+    let target = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .or_else(|| {
+            manifest_dir
+                .ancestors()
+                .map(|ancestor| ancestor.join("target"))
+                .find(|target| target.is_dir())
+        })?;
+    let prefix = format!("{name}-");
+    let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
+    let mut consider = |build: PathBuf| {
+        let Ok(entries) = fs::read_dir(&build) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let out = entry.path().join("out");
+            let named = entry.file_name().to_string_lossy().starts_with(&prefix);
+            if let (true, Ok(meta)) = (named, fs::metadata(&out))
+                && let Ok(modified) = meta.modified()
+                && newest.as_ref().is_none_or(|(time, _)| modified > *time)
+            {
+                newest = Some((modified, out));
+            }
+        }
+    };
+    for profile in fs::read_dir(&target).ok()?.flatten() {
+        consider(profile.path().join("build"));
+        // `<target>/<triple>/<profile>/build`
+        if let Ok(nested) = fs::read_dir(profile.path()) {
+            for inner in nested.flatten() {
+                consider(inner.path().join("build"));
+            }
+        }
+    }
+    newest.map(|(_, out)| out)
 }
 
 /// The single string literal a macro was invoked with, if that is all it was
@@ -1505,7 +1619,7 @@ impl<'ast> Visit<'ast> for Collector<'_, '_> {
         // to this file's directory; anything more elaborate than a literal
         // (`concat!(env!("OUT_DIR"), ..)`) names a file we cannot find, and a
         // file we cannot read may hold the only mention of a dependency.
-        match included_file(node) {
+        match included_file(node, &self.dir) {
             Some(Included::At(path)) => {
                 let at = self.dir.join(path);
                 self.included_code.push((at, self.origin.context));
@@ -2018,7 +2132,7 @@ mod tests {
             let syn::Item::Macro(mac) = &file.items[0] else {
                 panic!("expected a macro invocation");
             };
-            match included_file(&mac.mac) {
+            match included_file(&mac.mac, Path::new("/ws/src")) {
                 None => "not an include".to_string(),
                 Some(Included::At(path)) => format!("at {path}"),
                 Some(Included::Unreadable) => "unreadable".to_string(),
@@ -2029,9 +2143,24 @@ mod tests {
         // `include!` is `core::include!`; a path spelling it out is the same
         // macro and reads the same way.
         assert_eq!(read("std::include!(\"generated.rs\");"), "at generated.rs");
+        // `/ws` has no build output, so `OUT_DIR` has no answer here.
         assert_eq!(
             read("include!(concat!(env!(\"OUT_DIR\"), \"/generated.rs\"));"),
             "unreadable"
+        );
+        assert_eq!(
+            read("include!(env!(\"DEADWOOD_TEST_SURELY_UNSET\"));"),
+            "unreadable"
+        );
+        // A variable Deadwood runs with answers, inside a `concat!` of parts.
+        let path = std::env::var("PATH").expect("tests run with a PATH");
+        assert_eq!(
+            read("include!(concat!(env!(\"PATH\"), \"/a\", \"/b.rs\"));"),
+            format!("at {path}/a/b.rs")
+        );
+        assert_eq!(
+            read("include!(concat!(\"gen/\", \"x.rs\"));"),
+            "at gen/x.rs"
         );
         // `include_str!` splices in text rather than code, and
         // `include_bytes!` is neither; only the last segment `include` is the

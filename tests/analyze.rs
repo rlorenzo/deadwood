@@ -4889,3 +4889,57 @@ fn code_that_cannot_be_read_keeps_alive_what_it_could_name() {
         ]
     );
 }
+
+/// An `include!` path built from `concat!` and `env!` is followed wherever the
+/// tree answers it: `CARGO_MANIFEST_DIR` always, `OUT_DIR` once a build has
+/// made one, and any other variable Deadwood is run with. The generated code
+/// is then read like any other file, so what it calls is alive and nothing
+/// else is kept alive on its behalf.
+#[test]
+fn an_include_path_built_from_env_is_followed_where_the_tree_answers_it() {
+    let root = std::env::temp_dir().join(format!("deadwood-envinclude-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let write = |path: &str, source: &str| {
+        let path = root.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, source).unwrap();
+    };
+    write(
+        "Cargo.toml",
+        "[package]\nname = \"envinclude\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n",
+    );
+    write(
+        "src/main.rs",
+        "include!(concat!(env!(\"OUT_DIR\"), \"/thunks.rs\"));\n\
+         include!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/gen/table.rs\"));\n\
+         pub mod imp {\n    pub fn from_thunk() {}\n    pub fn from_table() {}\n    pub fn stale() {}\n}\n",
+    );
+    write(
+        "gen/table.rs",
+        "pub fn table() { crate::imp::from_table(); }\n",
+    );
+    // An older build's output, and the newest one, which wins. Cargo tags its
+    // target directory, which is how the dead-file walk knows to skip it.
+    write(
+        "target/CACHEDIR.TAG",
+        "Signature: 8a477f597d28d172789f06886806bc55\n",
+    );
+    write(
+        "target/debug/build/envinclude-0ld/out/thunks.rs",
+        "fn main() {}\n",
+    );
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    write(
+        "target/debug/build/envinclude-n3w/out/thunks.rs",
+        "fn main() { crate::imp::from_thunk(); table(); }\n",
+    );
+
+    let analysis = analyze(&root, None).expect("analysis should succeed");
+    assert!(analysis.warnings.is_empty(), "{:?}", analysis.warnings);
+    assert_eq!(
+        reported(&analysis, FindingKind::UnusedPubItem),
+        vec![("src/main.rs".to_string(), "stale")]
+    );
+    assert!(reported(&analysis, FindingKind::DeadFile).is_empty());
+    let _ = std::fs::remove_dir_all(&root);
+}
