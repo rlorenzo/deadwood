@@ -173,8 +173,9 @@ pub struct Resolved {
     /// The module-declaring `macro_rules!` this target defines, for the other
     /// targets of the workspace to resolve their invocations against.
     pub macros: MacroDefs,
-    /// Every macro name the target invokes, directly or from inside one of
-    /// its own macros' rules.
+    /// The macro names another crate's definition could still settle
+    /// something for: invocations no definition here settled, and macros this
+    /// target's own macros invoke from their rules.
     invoked: HashSet<String>,
 }
 
@@ -182,10 +183,17 @@ impl Resolved {
     /// Whether resolving again with `foreign` known would settle an
     /// invocation this pass could not: the target invokes a macro another
     /// crate defines.
+    ///
+    /// Only a macro whose rules, folded through every macro they invoke, end
+    /// in a module declaration counts: one that merely calls `format!` settles
+    /// nothing, and resolving every target that invokes one again doubled
+    /// bun's run.
     pub fn wants_foreign(&self, foreign: &MacroDefs) -> bool {
-        self.invoked
-            .iter()
-            .any(|name| foreign.0.contains_key(name) && !self.macros.0.contains_key(name))
+        self.invoked.iter().any(|name| {
+            !self.macros.0.contains_key(name)
+                && effective_emission(name, &HashMap::new(), foreign)
+                    .is_some_and(|emission| emission.claims_anything())
+        })
     }
 }
 
@@ -560,7 +568,6 @@ pub fn resolve_with(
         // earlier round.
         let unsettled = std::mem::take(&mut macros.invocations);
         for invocation in unsettled {
-            resolved.invoked.insert(invocation.name.clone());
             let Some(emission) = effective_emission(&invocation.name, &macros.emitting, foreign)
             else {
                 macros.invocations.push(invocation);
@@ -761,6 +768,14 @@ pub struct MacroEmission {
 }
 
 impl MacroEmission {
+    /// Whether an invocation would have anything probed: a module the rules
+    /// declare, literally or from the invocation's arguments.
+    fn claims_anything(&self) -> bool {
+        !self.declared.is_empty()
+            || !self.dollar_prefixes.is_empty()
+            || !self.dollar_path_prefixes.is_empty()
+    }
+
     /// Add `other`'s claims, each under `prefix` more inline modules.
     fn merge(&mut self, other: &MacroEmission, prefix: &[String]) {
         let under = |inner: &Vec<String>| [prefix, inner.as_slice()].concat();
@@ -2075,6 +2090,26 @@ mod tests {
             !lint.wants_foreign(&lint.macros),
             "a crate defining every macro it invokes gains nothing from its own"
         );
+        // A foreign macro that only invokes others, and declares nothing
+        // through them, settles nothing either.
+        write(
+            "util/lib.rs",
+            "#[macro_export]\nmacro_rules! log { () => { println!() }; }\n",
+        );
+        write("user/lib.rs", "util::log!();\n");
+        let util = resolve(
+            &root.join("util/lib.rs"),
+            config.ignore(),
+            &gates,
+            &mut warnings,
+        );
+        let user = resolve(
+            &root.join("user/lib.rs"),
+            config.ignore(),
+            &gates,
+            &mut warnings,
+        );
+        assert!(!user.wants_foreign(&util.macros));
         let with = resolve_with(
             &root.join("eslint/lib.rs"),
             config.ignore(),
