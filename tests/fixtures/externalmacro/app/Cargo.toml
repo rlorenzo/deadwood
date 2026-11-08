@@ -1,0 +1,9 @@
+[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+genmacros = { path = "../vendor/genmacros" }
+jsonish = { path = "../vendor/jsonish" }
+unrelated = { path = "../vendor/unrelated" }

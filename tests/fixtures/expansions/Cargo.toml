@@ -1,0 +1,28 @@
+# Test fixture: crates named only by code another workspace crate's macro
+# writes, and modules only another crate's macro declares. Each was a false
+# positive on a large workspace before 1.0:
+#
+# - `consumer` derives `Key` through `facade`'s re-export, and the derive in
+#   `keymacros` expands to a `cache` path (bevy's `ExtractComponent`, ruff's
+#   `CacheKey`).
+# - `eslint` invokes `lint::warn_once!`, whose body names `paint` (ruff's
+#   `warn_user_once!`), and declares its rule modules with `lint::rules!`,
+#   which forwards to `lint::rule_module!` (bun's lint crates).
+#
+# `consumer` also needs `helped`, which the derive's helper library
+# `keyhelper` writes (it depends on `quote`, the stand-in member here, which is
+# how a code-writing library is told apart), and `tag_store`, which the derive names only in a string
+# (bevy's manifest lookup), and `attruser` needs `marker`, which an attribute
+# macro from `keymacros` quotes.
+#
+# And three that must stay findings: `warn_once!` binds a local named
+# `cache`, which names no crate; `keymacros` says "paint" only in prose; and
+# `bystander` depends on the derive crate but never uses a macro from it, so
+# its `cache` entry is still unused. `eslint` writes a `Key` of its own, which
+# is not the derive's, since it doesn't depend on the derive crate.
+[workspace]
+resolver = "2"
+members = [
+    "cache", "keymacros", "facade", "consumer", "paint", "lint", "eslint",
+    "tag_store", "marker", "attruser", "bystander", "quote", "keyhelper", "helped",
+]

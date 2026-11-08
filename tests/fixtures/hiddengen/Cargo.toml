@@ -1,0 +1,8 @@
+# Test fixture: a package whose code is partly generated at build time and
+# spliced in with an `include!` Deadwood cannot follow — bun's C-ABI thunks.
+# The generated code may call anything in `generated` and anything `support`
+# exports, so neither is reported; `support`'s private module is out of its
+# reach, and so is `other`, which `generated` does not depend on.
+[workspace]
+resolver = "2"
+members = ["generated", "support", "other"]

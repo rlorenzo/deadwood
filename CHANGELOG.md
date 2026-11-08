@@ -70,6 +70,40 @@ Three bugs found by a full-codebase review:
 - A file `#[path]` mounts as two modules could report live items dead. Its items no
   longer take part in resolution.
 
+Eight false-positive classes found by running the release candidate over
+bevy, ruff, helix and bun, each checked finding by finding:
+
+- `mod r#struct;` was looked for at `r#struct.rs`, and the warning that raised
+  turned the unused-pub check off for the whole workspace.
+- An optional dependency only benches named was told to move to
+  `[dev-dependencies]`, where Cargo rejects `optional`. A bare `[features]`
+  entry naming an optional dependency's implicit feature now counts as naming
+  the dependency.
+- An item only a doctest named was reported unused. Fenced code in doc
+  comments now counts as a use by the documented item, so an item named only
+  by its own doctest, or by a dead item's, is still reported.
+- A package that `include!`s a file Deadwood cannot read, such as one generated
+  at build time, had its `pub` items reported although that code may call any of
+  them. `include!` paths built from `concat!` and `env!` are now followed where
+  the tree or the environment answers them (`CARGO_MANIFEST_DIR`, a built
+  `OUT_DIR`, any variable Deadwood runs with). Where they still can't be read,
+  the package's items are kept alive, along with the public items of the
+  workspace crates it depends on, and a warning says so.
+- A `macro_rules!` defined in one crate and invoked from another, or invoked
+  from inside another macro's rules, did not have its `mod` declarations
+  followed, so the files it declares were reported dead.
+- A dependency named only in another workspace crate's `macro_rules!` body
+  was reported unused by the crates invoking the macro.
+- A dependency named only by a proc macro's expansion — a derive reached
+  through a re-export, or tauri's `generate_context!` naming `serde_json` —
+  was reported unused. What each macro, and the helper libraries it builds
+  its output with, writes now counts for the packages that use it, read from
+  the registry cache for a macro outside the workspace.
+- A glob import that found a sibling module's private `use` first stopped
+  there, so a `pub use a::*; pub use b::*;` pair reported the item `b` defines
+  as unused when `a` imported it. A private `use` is now visible to a glob only
+  from its own module and the modules inside it.
+
 Eleven bugs, all found by running the analyzer over
 [bun](https://github.com/oven-sh/bun)'s Rust tree — a 108-crate, ~1M-line
 workspace, and the first in the corpus laid out flat, declared through macros,

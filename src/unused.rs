@@ -104,11 +104,24 @@ pub struct Items {
     pub test_only: Vec<TestOnlyItem>,
 }
 
+/// How much of a crate code Deadwood cannot read may name, by crate index —
+/// an empty slice means none of it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Hidden {
+    No,
+    /// Its package includes such code, which can name any of its items.
+    Whole,
+    /// Its package is a workspace dependency of one that does, which can name
+    /// what the crate exports.
+    Surface,
+}
+
 /// Report `pub` items and `pub use` re-exports that nothing refers to,
 /// excluding whatever `public_api` declares to be external surface — and,
 /// separately, the ones only test code reaches.
 pub fn find_items(
     crates: &[CrateUnit],
+    hidden: &[Hidden],
     public_api: &PublicApi,
     warnings: &mut Vec<String>,
 ) -> Items {
@@ -129,6 +142,7 @@ pub fn find_items(
 
     let mut table = SymbolTable::build(crates);
     table.record_references(crates);
+    table.root_hidden_code(hidden);
     Items {
         unused: table
             .unused_definitions(public_api)
@@ -191,9 +205,35 @@ mod tests {
 
     fn unused_names(crates: &[CrateUnit]) -> Vec<String> {
         let mut warnings = Vec::new();
-        let found = find_items(crates, &PublicApi::default(), &mut warnings);
+        let found = find_items(crates, &[], &PublicApi::default(), &mut warnings);
         assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
         found.unused.into_iter().map(|item| item.name).collect()
+    }
+
+    /// bun's generated-thunk shape: a package whose `include!` names a file
+    /// that cannot be read may call any of its own items from it, and any
+    /// public item of the workspace crates it depends on — but not an item
+    /// a dependency keeps in a private module, which nothing outside can name.
+    #[test]
+    fn code_that_cannot_be_read_may_name_what_it_can_see() {
+        let crates = [crate_of(&[(
+            "",
+            "pub fn exported() {}\nmod private { pub fn tucked() {} }\n",
+        )])];
+        let names = |hidden: Hidden| {
+            let mut warnings = Vec::new();
+            let mut names: Vec<String> =
+                find_items(&crates, &[hidden], &PublicApi::default(), &mut warnings)
+                    .unused
+                    .into_iter()
+                    .map(|item| item.name)
+                    .collect();
+            names.sort();
+            names
+        };
+        assert_eq!(names(Hidden::No), ["exported", "tucked"]);
+        assert!(names(Hidden::Whole).is_empty());
+        assert_eq!(names(Hidden::Surface), ["tucked"]);
     }
 
     #[test]
@@ -241,7 +281,7 @@ mod tests {
     fn check_is_skipped_when_a_file_cannot_be_parsed() {
         let unit = crate_of(&[("", "pub fn dead() {}\n"), ("broken", "fn oops( {\n")]);
         let mut warnings = Vec::new();
-        let unused = find_items(&[unit], &PublicApi::default(), &mut warnings).unused;
+        let unused = find_items(&[unit], &[], &PublicApi::default(), &mut warnings).unused;
         assert!(
             unused.is_empty(),
             "incomplete resolution must not report findings"
@@ -271,7 +311,7 @@ mod tests {
         ]);
         let unused = {
             let mut warnings = Vec::new();
-            let found = find_items(&[unit], &PublicApi::default(), &mut warnings);
+            let found = find_items(&[unit], &[], &PublicApi::default(), &mut warnings);
             assert!(warnings.is_empty());
             found.unused
         };
@@ -307,7 +347,7 @@ mod tests {
         ]);
 
         let mut warnings = Vec::new();
-        let found = find_items(&[unit], &PublicApi::default(), &mut warnings);
+        let found = find_items(&[unit], &[], &PublicApi::default(), &mut warnings);
         assert!(warnings.is_empty(), "{warnings:?}");
         let mut bound: Vec<(String, Namespace)> = found
             .unused
@@ -357,7 +397,7 @@ mod tests {
         ]);
 
         let mut warnings = Vec::new();
-        let found = find_items(&[unit], &PublicApi::default(), &mut warnings);
+        let found = find_items(&[unit], &[], &PublicApi::default(), &mut warnings);
         assert!(warnings.is_empty(), "{warnings:?}");
         let mut located: Vec<(String, String)> = found
             .unused
@@ -403,7 +443,7 @@ mod tests {
             ("other", "pub fn called() {}\n"),
         ]);
         let mut warnings = Vec::new();
-        let found = find_items(&[unit], &PublicApi::default(), &mut warnings).unused;
+        let found = find_items(&[unit], &[], &PublicApi::default(), &mut warnings).unused;
         assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
 
         // `called` comes out with `Wrapper` because the only thing naming it
@@ -461,7 +501,7 @@ mod tests {
 
     fn unused_reexports(crates: &[CrateUnit]) -> Vec<String> {
         let mut warnings = Vec::new();
-        let found = find_items(crates, &PublicApi::default(), &mut warnings);
+        let found = find_items(crates, &[], &PublicApi::default(), &mut warnings);
         assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
         found
             .unused

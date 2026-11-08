@@ -77,6 +77,14 @@ reported when nothing in the workspace names it, which is why rooting the
 public surface costs no finding: what it changes is that an item the surface
 *calls* is not dragged down with it.
 
+A doctest is code too. The identifiers in a doc comment's fenced code blocks
+(any block not tagged as another language, `ignore` and hidden `# ` lines
+included) count as uses *by the documented item*, the same way a call in its
+body would. So an item only a neighbour's doctest names stays alive, while one
+only its own doctest names, or only a dead item's doctest names, is still
+reported: deleting the item deletes the doctest with it. Prose around the
+blocks counts for nothing.
+
 That walk runs twice, and the difference between the two answers is a
 finding of its own. Once from the whole root set — the build Deadwood analyzes
 — and once from the root set with the test entry points taken out: `#[test]`

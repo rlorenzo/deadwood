@@ -1,0 +1,8 @@
+[package]
+name = "attruser"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+facade = { path = "../facade" }
+marker = { path = "../marker" }

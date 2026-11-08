@@ -440,9 +440,61 @@ pub struct CrateReferences {
     /// Set when the package pulls in code Deadwood never sees, which would
     /// make any "never referenced" verdict a guess.
     hidden_code: Option<&'static str>,
+    /// The last segment of every macro path the package invokes, for
+    /// [`CrateReferences::add_foreign_macros`].
+    invoked_macros: HashSet<String>,
 }
 
 impl CrateReferences {
+    /// Whether any of the package's code mentions `word` at all.
+    ///
+    /// A macro invoked by path counts too: `genmacros::generate_context!()`
+    /// mentions `genmacros` as a crate and `generate_context` as a macro.
+    pub fn mentions(&self, word: &str) -> bool {
+        self.names.contains_key(word) || self.invoked_macros.contains(word)
+    }
+
+    /// Count `words` as mentions whose placement is unknown.
+    pub fn add_opaque_words<'w>(&mut self, words: impl IntoIterator<Item = &'w String>) {
+        for word in words {
+            self.names
+                .entry(word.clone())
+                .or_default()
+                .insert(Contexts::OPAQUE);
+        }
+    }
+
+    /// Count the words of the workspace macros this package invokes but does
+    /// not define, as mentions whose placement is unknown.
+    ///
+    /// A path in a `macro_rules!` body resolves where the macro is *invoked*:
+    /// ruff's `warn_user_once!` lives in `ruff_linter` and says `use
+    /// colored::Colorize;`, so every crate that invokes it needs `colored`,
+    /// and none of them writes the name. `bodies` maps a macro name to the
+    /// path heads of every workspace definition of it, with the bodies of the
+    /// macros it invokes already folded in, and `own` names the macros this
+    /// package defines itself, whose bodies its own files already counted.
+    pub fn add_foreign_macros(
+        &mut self,
+        bodies: &HashMap<String, HashSet<String>>,
+        own: &HashSet<String>,
+    ) {
+        let words: Vec<String> = self
+            .invoked_macros
+            .iter()
+            .filter(|name| !own.contains(*name))
+            .filter_map(|name| bodies.get(name))
+            .flatten()
+            .cloned()
+            .collect();
+        self.add_opaque_words(&words);
+    }
+
+    /// Why the package holds code Deadwood never sees, if it does.
+    pub fn hidden_code(&self) -> Option<&'static str> {
+        self.hidden_code
+    }
+
     /// Add every crate name the files of one target refer to, attributed to
     /// the code that target is.
     pub fn add_target(&mut self, files: &[ParsedFile], target: &Target, gates: &Gates<'_>) {
@@ -540,6 +592,7 @@ impl CrateReferences {
             file_aliases: HashMap::new(),
             scope_depth: 0,
             hidden_code: &mut self.hidden_code,
+            invoked_macros: &mut self.invoked_macros,
             dir,
             origin,
             at_crate_root,
@@ -907,6 +960,10 @@ pub fn find_misplaced(
             found,
             doubled(dependency, normal_copy),
         ) {
+            // Cargo rejects `optional = true` in `[dev-dependencies]`, so an
+            // optional entry only dev code names has nowhere to move to:
+            // whatever keeps it optional is a reason this check cannot see.
+            Some(Placement::MoveTo(DependencyKind::Development)) if dependency.optional => {}
             Some(Placement::MoveTo(belongs_in)) => misplaced.push(MisplacedDependency {
                 name: dependency.manifest_name().to_string(),
                 declared: dependency.dependency_kind(),
@@ -1123,10 +1180,7 @@ fn doc_attr_text(tokens: &TokenStream) -> Option<String> {
 
 /// Every identifier-shaped word in a piece of text.
 fn words_into(names: &mut HashMap<String, Contexts>, text: &str, context: Contexts) {
-    for word in text
-        .split(|c: char| !c.is_alphanumeric() && c != '_')
-        .filter(|word| !word.is_empty())
-    {
+    for word in crate::expansion::words(text) {
         names.entry(word.to_string()).or_default().insert(context);
     }
 }
@@ -1153,7 +1207,7 @@ pub(crate) enum Included {
 /// One reader, used by this module and by [`crate::modtree`]: the question
 /// "which file does this `include!` splice in" has one answer, and two copies
 /// of it could come to disagree about which forms are readable.
-pub(crate) fn included_file(mac: &syn::Macro) -> Option<Included> {
+pub(crate) fn included_file(mac: &syn::Macro, dir: &Path) -> Option<Included> {
     // `std::include!` and `core::include!` are the same macro; the last
     // segment is what names it.
     if mac
@@ -1164,10 +1218,161 @@ pub(crate) fn included_file(mac: &syn::Macro) -> Option<Included> {
     {
         return None;
     }
-    Some(match literal_argument(&mac.tokens) {
+    Some(match path_argument(&mac.tokens, dir) {
         Some(path) => Included::At(path),
         None => Included::Unreadable,
     })
+}
+
+/// The path an `include!` names, where it can be worked out without a build:
+/// a string literal, `concat!` of such parts, and `env!` of a variable that
+/// is set in Deadwood's own environment or that cargo derives from the tree —
+/// `CARGO_MANIFEST_DIR`, and `OUT_DIR` once a build has made one. bun
+/// generates its C-ABI thunks under `env!("BUN_CODEGEN_DIR")`, so running
+/// Deadwood with that variable set reads them like any other file.
+fn path_argument(tokens: &TokenStream, dir: &Path) -> Option<String> {
+    evaluate(&syn::parse2(tokens.clone()).ok()?, dir)
+}
+
+fn evaluate(expr: &syn::Expr, dir: &Path) -> Option<String> {
+    match expr {
+        syn::Expr::Lit(syn::ExprLit {
+            lit: syn::Lit::Str(text),
+            ..
+        }) => Some(text.value()),
+        syn::Expr::Group(group) => evaluate(&group.expr, dir),
+        syn::Expr::Macro(mac) => {
+            let name = mac.mac.path.segments.last()?.ident.to_string();
+            if name != "concat" && name != "env" {
+                return None;
+            }
+            let args = mac
+                .mac
+                .parse_body_with(
+                    syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated,
+                )
+                .ok()?;
+            match name.as_str() {
+                "concat" => args.iter().map(|arg| evaluate(arg, dir)).collect(),
+                "env" => {
+                    let syn::Expr::Lit(syn::ExprLit {
+                        lit: syn::Lit::Str(variable),
+                        ..
+                    }) = args.first()?
+                    else {
+                        return None;
+                    };
+                    environment(&variable.value(), dir)
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// What `env!(variable)` would give code in the package `dir` belongs to.
+///
+/// The two cargo sets are derived from the tree rather than read from
+/// Deadwood's environment, which under `cargo run` holds cargo's values for
+/// Deadwood itself. Anything else is whatever Deadwood was run with.
+fn environment(variable: &str, dir: &Path) -> Option<String> {
+    let manifest_dir = || {
+        dir.ancestors()
+            .find(|ancestor| ancestor.join("Cargo.toml").is_file())
+    };
+    match variable {
+        "CARGO_MANIFEST_DIR" => Some(manifest_dir()?.to_string_lossy().into_owned()),
+        "OUT_DIR" => out_dir(manifest_dir()?).map(|out| out.to_string_lossy().into_owned()),
+        _ => std::env::var(variable).ok(),
+    }
+}
+
+/// The newest build-script output directory cargo made for the package at
+/// `manifest_dir`: `<target>/<profile>/build/<package>-<hash>/out`, with or
+/// without a target triple between, under `CARGO_TARGET_DIR` or the nearest
+/// `target/` above the package.
+fn out_dir(manifest_dir: &Path) -> Option<PathBuf> {
+    // Every `include!` in a package asks the same question, from both the
+    // module walk and this module's reader, and answering it scans the target
+    // directory.
+    thread_local! {
+        static FOUND: std::cell::RefCell<HashMap<PathBuf, Option<PathBuf>>> =
+            std::cell::RefCell::new(HashMap::new());
+    }
+    if let Some(hit) = FOUND.with(|found| found.borrow().get(manifest_dir).cloned()) {
+        return hit;
+    }
+    let answer = newest_out_dir(manifest_dir);
+    FOUND.with(|found| {
+        found
+            .borrow_mut()
+            .insert(manifest_dir.to_path_buf(), answer.clone())
+    });
+    answer
+}
+
+fn newest_out_dir(manifest_dir: &Path) -> Option<PathBuf> {
+    #[derive(serde::Deserialize)]
+    struct Manifest {
+        package: Option<ManifestPackage>,
+    }
+    #[derive(serde::Deserialize)]
+    struct ManifestPackage {
+        name: String,
+    }
+    let manifest = fs::read_to_string(manifest_dir.join("Cargo.toml")).ok()?;
+    let name = toml::from_str::<Manifest>(&manifest).ok()?.package?.name;
+    // Both places a build may have gone: a shared `CARGO_TARGET_DIR` holds
+    // nothing for a checkout built without it, and the reverse.
+    let targets = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .into_iter()
+        .chain(
+            manifest_dir
+                .ancestors()
+                .map(|ancestor| ancestor.join("target"))
+                .find(|target| target.is_dir()),
+        );
+    // `<package>-<16 hex digits>`, exactly: `tokio-` alone would match
+    // `tokio-macros-<hash>` too.
+    let prefix = format!("{name}-");
+    let is_build_of_package = |dir: &str| {
+        dir.strip_prefix(&prefix)
+            .is_some_and(|hash| hash.len() == 16 && hash.chars().all(|c| c.is_ascii_hexdigit()))
+    };
+    let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
+    let mut consider = |build: PathBuf| {
+        let Ok(entries) = fs::read_dir(&build) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let out = entry.path().join("out");
+            if is_build_of_package(&entry.file_name().to_string_lossy())
+                && let Ok(meta) = fs::metadata(&out)
+                && let Ok(modified) = meta.modified()
+                && newest.as_ref().is_none_or(|(time, _)| modified > *time)
+            {
+                newest = Some((modified, out));
+            }
+        }
+    };
+    let is_dir = |entry: &fs::DirEntry| entry.file_type().is_ok_and(|kind| kind.is_dir());
+    for target in targets {
+        let Ok(profiles) = fs::read_dir(&target) else {
+            continue;
+        };
+        for profile in profiles.flatten().filter(is_dir) {
+            consider(profile.path().join("build"));
+            // `<target>/<triple>/<profile>/build`
+            if let Ok(nested) = fs::read_dir(profile.path()) {
+                for inner in nested.flatten().filter(is_dir) {
+                    consider(inner.path().join("build"));
+                }
+            }
+        }
+    }
+    newest.map(|(_, out)| out)
 }
 
 /// The single string literal a macro was invoked with, if that is all it was
@@ -1215,6 +1420,7 @@ struct Collector<'a, 'g> {
     /// than a `use` would.
     at_crate_root: bool,
     hidden_code: &'a mut Option<&'static str>,
+    invoked_macros: &'a mut HashSet<String>,
     /// Directory of the file being walked, which `include!` paths are
     /// relative to.
     dir: PathBuf,
@@ -1288,7 +1494,14 @@ impl Collector<'_, '_> {
         let mut iter = tokens.clone().into_iter().peekable();
         while let Some(tree) = iter.next() {
             match tree {
-                TokenTree::Ident(ident) => self.insert_opaque(ident.to_string()),
+                TokenTree::Ident(ident) => {
+                    // `name!` inside another macro's input is an invocation
+                    // all the same.
+                    if crate::expansion::bang_follows(iter.peek()) {
+                        self.invoked_macros.insert(ident.to_string());
+                    }
+                    self.insert_opaque(ident.to_string());
+                }
                 TokenTree::Punct(punct) if punct.as_char() == '#' => {
                     // The group is deliberately *not* consumed: the next
                     // iteration recurses into it as before, so the attribute's
@@ -1434,11 +1647,14 @@ impl<'ast> Visit<'ast> for Collector<'_, '_> {
         // `json!` may be a macro imported from a dependency, so a
         // single-segment macro path counts where a plain path would not.
         self.path_head(&node.path);
+        if let Some(last) = node.path.segments.last() {
+            self.invoked_macros.insert(last.ident.to_string());
+        }
         // `include!` splices another file into this one. Its path is relative
         // to this file's directory; anything more elaborate than a literal
         // (`concat!(env!("OUT_DIR"), ..)`) names a file we cannot find, and a
         // file we cannot read may hold the only mention of a dependency.
-        match included_file(node) {
+        match included_file(node, &self.dir) {
             Some(Included::At(path)) => {
                 let at = self.dir.join(path);
                 self.included_code.push((at, self.origin.context));
@@ -1951,7 +2167,7 @@ mod tests {
             let syn::Item::Macro(mac) = &file.items[0] else {
                 panic!("expected a macro invocation");
             };
-            match included_file(&mac.mac) {
+            match included_file(&mac.mac, Path::new("/ws/src")) {
                 None => "not an include".to_string(),
                 Some(Included::At(path)) => format!("at {path}"),
                 Some(Included::Unreadable) => "unreadable".to_string(),
@@ -1962,9 +2178,24 @@ mod tests {
         // `include!` is `core::include!`; a path spelling it out is the same
         // macro and reads the same way.
         assert_eq!(read("std::include!(\"generated.rs\");"), "at generated.rs");
+        // `/ws` has no build output, so `OUT_DIR` has no answer here.
         assert_eq!(
             read("include!(concat!(env!(\"OUT_DIR\"), \"/generated.rs\"));"),
             "unreadable"
+        );
+        assert_eq!(
+            read("include!(env!(\"DEADWOOD_TEST_SURELY_UNSET\"));"),
+            "unreadable"
+        );
+        // A variable Deadwood runs with answers, inside a `concat!` of parts.
+        let path = std::env::var("PATH").expect("tests run with a PATH");
+        assert_eq!(
+            read("include!(concat!(env!(\"PATH\"), \"/a\", \"/b.rs\"));"),
+            format!("at {path}/a/b.rs")
+        );
+        assert_eq!(
+            read("include!(concat!(\"gen/\", \"x.rs\"));"),
+            "at gen/x.rs"
         );
         // `include_str!` splices in text rather than code, and
         // `include_bytes!` is neither; only the last segment `include` is the
@@ -2151,6 +2382,81 @@ mod tests {
             misplaced(&manifest, &refs).0,
             vec![("test_helper".to_string(), DependencyKind::Development)]
         );
+    }
+
+    /// ruff's `warn_user_once!` shape: the macro lives in another workspace
+    /// crate and its body names `colored`, which resolves in the invoking
+    /// crate — so the invoker's `colored` entry is in use, placement unknown.
+    /// A macro the package defines itself was read with its own files.
+    #[test]
+    fn a_dependency_another_crates_macro_body_names_is_in_use() {
+        let manifest = package(vec![dependency("colored"), dependency("linter")]);
+        let bodies = HashMap::from([(
+            "warn_once".to_string(),
+            HashSet::from(["colored".to_string(), "Colorize".to_string()]),
+        )]);
+        let mut refs = references(&["pub fn go() { linter::warn_once!(\"hi\"); }\n"]);
+        assert_eq!(unused(&manifest, &refs).0, vec!["colored".to_string()]);
+        refs.add_foreign_macros(&bodies, &HashSet::from(["warn_once".to_string()]));
+        assert_eq!(
+            unused(&manifest, &refs).0,
+            vec!["colored".to_string()],
+            "its own macro"
+        );
+        refs.add_foreign_macros(&bodies, &HashSet::new());
+        assert!(unused(&manifest, &refs).0.is_empty());
+        assert!(misplaced(&manifest, &refs).0.is_empty());
+    }
+
+    /// ruff_benchmark's shape: optional entries only benches name, enabled by
+    /// bare names in `[features]` that are the implicit features Cargo made
+    /// for them. `[features]` names them, and Cargo rejects an optional
+    /// dev-dependency, so neither can move.
+    #[test]
+    fn an_optional_entry_a_feature_enables_by_its_implicit_name_stays_put() {
+        let refs = references_from(&[
+            ("lib", "pub fn go() {}\n"),
+            ("bench", "fn b() { criterion::run(); }\n"),
+        ]);
+        let mut manifest = package(vec![Dependency {
+            optional: true,
+            ..dependency("criterion")
+        }]);
+        manifest.features = HashMap::from([
+            ("bench".to_string(), vec!["criterion".to_string()]),
+            ("criterion".to_string(), vec!["dep:criterion".to_string()]),
+        ]);
+        assert!(
+            manifest
+                .dependencies_named_by_features()
+                .contains("criterion"),
+            "a bare implicit feature names its dependency"
+        );
+        assert!(misplaced(&manifest, &refs).0.is_empty());
+
+        // Exactly the dependencies: a bare entry naming an ordinary feature is
+        // not one, a one-entry feature is implicit only when that entry is its
+        // own `dep:`, and a feature sharing a dependency's name still names it.
+        manifest.features = HashMap::from([
+            (
+                "bench".to_string(),
+                vec!["criterion".to_string(), "extras".to_string()],
+            ),
+            ("extras".to_string(), vec!["serde/std".to_string()]),
+            ("criterion".to_string(), vec!["dep:criterion".to_string()]),
+            ("x".to_string(), vec!["x/std".to_string()]),
+        ]);
+        let mut named: Vec<String> = manifest
+            .dependencies_named_by_features()
+            .into_iter()
+            .collect();
+        named.sort();
+        assert_eq!(named, ["criterion", "serde", "x"]);
+
+        // With no feature naming it at all, it still cannot be optional in
+        // `[dev-dependencies]`.
+        manifest.features.clear();
+        assert!(misplaced(&manifest, &refs).0.is_empty());
     }
 
     /// The out-of-line half of the `#[cfg(test)] mod` case. The file holds no

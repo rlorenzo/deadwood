@@ -34,9 +34,68 @@ pub struct Metadata {
     /// not.
     #[serde(skip)]
     pub lib_names: HashMap<String, String>,
+    /// Proc macros from outside the workspace that members use, read from the
+    /// same full resolution as [`Metadata::lib_names`] and empty where it
+    /// fails. See [`ExternalMacro`].
+    #[serde(skip)]
+    pub external_macros: Vec<ExternalMacro>,
 }
 
-#[derive(Debug, Deserialize)]
+impl Metadata {
+    /// Every workspace member the members in `roots` depend on, however
+    /// indirectly — the roots themselves only when a cycle leads back.
+    pub fn workspace_reach<'a>(
+        &'a self,
+        roots: impl IntoIterator<Item = &'a str>,
+    ) -> HashSet<&'a str> {
+        let members: HashMap<&str, &Package> = self
+            .packages
+            .iter()
+            .map(|package| (package.name.as_str(), package))
+            .collect();
+        let mut seen = HashSet::new();
+        let mut pending: Vec<&str> = roots.into_iter().collect();
+        while let Some(name) = pending.pop() {
+            let Some(member) = members.get(name) else {
+                continue;
+            };
+            for dependency in &member.dependencies {
+                if let Some((&next, _)) = members.get_key_value(dependency.name.as_str())
+                    && seen.insert(next)
+                {
+                    pending.push(next);
+                }
+            }
+        }
+        seen
+    }
+
+    /// The workspace member named `name`.
+    pub fn member(&self, name: &str) -> Option<&Package> {
+        self.packages.iter().find(|package| package.name == name)
+    }
+}
+
+/// A proc-macro package from outside the workspace, with what is needed to
+/// read what it can expand to.
+///
+/// `tauri::generate_context!` expands to `::serde_json::Value`, so an app's
+/// `serde_json` entry looks unused; the path is written by `tauri-utils`, a
+/// library `tauri-macros` builds its output with. So the sources are the
+/// proc-macro package and every package it depends on, however indirectly,
+/// that itself depends on `quote` — the crates that write code — other than
+/// `syn`, `quote` and `proc-macro2`, which write none of a macro's output.
+#[derive(Debug)]
+pub struct ExternalMacro {
+    /// The packages to read, proc-macro package first.
+    pub sources: Vec<Package>,
+    /// The workspace members whose resolved dependencies reach it, however
+    /// indirectly — a derive is as often re-exported by a library as depended
+    /// on directly.
+    pub users: HashSet<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct Package {
     pub name: String,
     pub manifest_path: PathBuf,
@@ -54,6 +113,22 @@ pub struct Package {
 }
 
 impl Package {
+    /// Whether one of the package's targets is a proc macro.
+    pub fn is_proc_macro(&self) -> bool {
+        self.targets.iter().any(Target::is_proc_macro)
+    }
+
+    /// Whether the package writes code for a macro: it depends on `quote`,
+    /// and is not one of the crates every macro builds on, which write none
+    /// of a macro's output themselves.
+    pub fn writes_code(&self) -> bool {
+        !["syn", "quote", "proc-macro2"].contains(&self.name.as_str())
+            && self
+                .dependencies
+                .iter()
+                .any(|dependency| dependency.name == "quote")
+    }
+
     /// Dependency names the `[features]` table refers to, as
     /// [`Dependency::feature_key`] spells them. A feature writes the manifest
     /// key, which is not what code spells when the lib target has its own name.
@@ -69,19 +144,32 @@ impl Package {
     /// optional dependency alive by its own existence, which is precisely the
     /// verdict the `cfg` matrix now makes it possible to reach.
     pub fn dependencies_named_by_features(&self) -> HashSet<String> {
+        // The features Cargo synthesizes for an optional dependency no
+        // `dep:` entry mentions: `foo = ["dep:foo"]`, under the entry's name.
+        let implicit = |feature: &str| {
+            self.features.get(feature).is_some_and(|enabled| {
+                enabled.len() == 1 && enabled[0].strip_prefix("dep:") == Some(feature)
+            })
+        };
         let mut names = HashSet::new();
         for (feature, enabled) in &self.features {
             for entry in enabled {
-                // A bare entry names another feature of this package, not a
-                // dependency, and must not be mistaken for one.
                 let name = match entry.split_once('/') {
                     Some((dependency, _)) => dependency.trim_end_matches('?'),
                     None => match entry.strip_prefix("dep:") {
                         Some(dependency) => dependency,
+                        // A bare entry names another feature of this package,
+                        // and only an implicit one is a dependency: ruff's
+                        // `ruff_instrumented = ["criterion", ..]` enables the
+                        // optional `criterion` through the feature Cargo made
+                        // for it.
+                        None if implicit(entry) => entry,
                         None => continue,
                     },
                 };
-                if enabled.len() == 1 && name == feature && entry.starts_with("dep:") {
+                // The implicit feature itself is not a mention — every
+                // optional entry has one — only another feature naming it is.
+                if implicit(feature) && name == feature {
                     continue;
                 }
                 names.insert(name.replace('-', "_"));
@@ -91,7 +179,7 @@ impl Package {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Dependency {
     /// The dependency's package name.
     pub name: String,
@@ -183,12 +271,27 @@ impl Dependency {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Target {
     pub name: String,
     pub kind: Vec<String>,
     /// Absolute path to the target's crate root file.
     pub src_path: PathBuf,
+}
+
+impl Target {
+    /// Whether other crates can name the target: a library of any kind,
+    /// proc macros included.
+    pub fn is_lib(&self) -> bool {
+        const LIB_KINDS: &[&str] = &["lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro"];
+        self.kind
+            .iter()
+            .any(|kind| LIB_KINDS.contains(&kind.as_str()))
+    }
+
+    pub fn is_proc_macro(&self) -> bool {
+        self.kind.iter().any(|kind| kind == "proc-macro")
+    }
 }
 
 /// Run `cargo metadata` for the package or workspace at `path`.
@@ -222,7 +325,14 @@ pub fn load(path: &Path) -> Result<Metadata> {
 
     let mut metadata: Metadata = serde_json::from_slice(&output.stdout)
         .context("failed to parse `cargo metadata` output")?;
-    metadata.lib_names = lib_names(&manifest);
+    let full = full_resolution(&manifest);
+    metadata.lib_names = full.as_ref().map_or_else(HashMap::new, |full| {
+        full.packages
+            .iter()
+            .filter_map(|package| renamed_lib(&package.package.name, &package.package.targets))
+            .collect()
+    });
+    metadata.external_macros = full.map(external_macros).unwrap_or_default();
     // Workspace members are in front of us with or without a resolvable
     // graph, so a member's renamed lib never depends on the cache the full
     // resolution needs.
@@ -239,45 +349,28 @@ pub fn load(path: &Path) -> Result<Metadata> {
 /// because that is how a `Dependency` names its package; only the *value* is
 /// normalized to the underscore spelling code uses.
 fn renamed_lib(package: &str, targets: &[Target]) -> Option<(String, String)> {
-    const LIB_KINDS: &[&str] = &["lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro"];
-    let lib = targets.iter().find(|target| {
-        target
-            .kind
-            .iter()
-            .any(|kind| LIB_KINDS.contains(&kind.as_str()))
-    })?;
+    let lib = targets.iter().find(|target| target.is_lib())?;
     let lib_name = lib.name.replace('-', "_");
     (lib_name != package.replace('-', "_")).then(|| (package.to_string(), lib_name))
 }
 
-/// The renamed lib targets of every dependency a full, *frozen* resolution
-/// can see: package name to lib (or proc-macro) target name, kept only where
-/// the two differ.
+/// A full, *frozen* resolution of the workspace, which answers
+/// [`Metadata::lib_names`] and [`Metadata::external_macros`].
 ///
 /// Failure of any kind — a missing or outdated lockfile, a cold registry
-/// cache, an unresolvable fixture manifest — yields the empty map, silently: the fallback is the
+/// cache, an unresolvable fixture manifest — yields nothing, silently: the fallback is the
 /// package-name heuristic that has always run, and a warning here would fire
 /// on every fresh checkout for a gap that costs findings rather than
 /// inventing them. Frozen implies offline, so the tenet holds: Deadwood
 /// never reaches for the network, it only reads what some build already
 /// fetched.
-fn lib_names(manifest: &Path) -> HashMap<String, String> {
-    #[derive(Deserialize)]
-    struct Full {
-        packages: Vec<FullPackage>,
-    }
-    #[derive(Deserialize)]
-    struct FullPackage {
-        name: String,
-        targets: Vec<Target>,
-    }
-
+fn full_resolution(manifest: &Path) -> Option<Full> {
     // `--frozen` rather than `--offline` alone: a full resolution can write
     // or update the workspace's `Cargo.lock`, and a linter must not leave a
     // mark on the tree it reads. Frozen asserts the lockfile is present and
     // current and errs into the fallback otherwise — the missing-lock case
     // is a fresh project the heuristic already serves.
-    let full = first_resolution(|features| {
+    first_resolution(|features| {
         let output = Command::new("cargo")
             .args(["metadata", "--format-version", "1", "--frozen"])
             .args(features)
@@ -289,13 +382,96 @@ fn lib_names(manifest: &Path) -> HashMap<String, String> {
             return None;
         }
         serde_json::from_slice::<Full>(&output.stdout).ok()
-    });
-    full.map_or_else(HashMap::new, |full| {
-        full.packages
-            .into_iter()
-            .filter_map(|package| renamed_lib(&package.name, &package.targets))
-            .collect()
     })
+}
+
+/// A full `cargo metadata`: every package the resolution reaches, and the
+/// graph between them.
+#[derive(Deserialize)]
+struct Full {
+    packages: Vec<FullPackage>,
+    workspace_members: Vec<String>,
+    resolve: Option<Resolve>,
+}
+
+#[derive(Deserialize)]
+struct FullPackage {
+    id: String,
+    #[serde(flatten)]
+    package: Package,
+}
+
+#[derive(Deserialize)]
+struct Resolve {
+    nodes: Vec<Node>,
+}
+
+#[derive(Deserialize)]
+struct Node {
+    id: String,
+    #[serde(default)]
+    dependencies: Vec<String>,
+}
+
+/// Every external proc-macro package some workspace member reaches.
+fn external_macros(full: Full) -> Vec<ExternalMacro> {
+    let Some(resolve) = full.resolve else {
+        return Vec::new();
+    };
+    let edges: HashMap<&str, &[String]> = resolve
+        .nodes
+        .iter()
+        .map(|node| (node.id.as_str(), node.dependencies.as_slice()))
+        .collect();
+    let by_id: HashMap<&str, &Package> = full
+        .packages
+        .iter()
+        .map(|package| (package.id.as_str(), &package.package))
+        .collect();
+    let members: HashSet<&str> = full.workspace_members.iter().map(String::as_str).collect();
+    let reach = |from: &str| -> HashSet<&str> {
+        let mut seen = HashSet::new();
+        let mut pending = vec![from];
+        while let Some(id) = pending.pop() {
+            for next in edges.get(id).copied().unwrap_or_default() {
+                if seen.insert(next.as_str()) {
+                    pending.push(next.as_str());
+                }
+            }
+        }
+        seen
+    };
+
+    let mut users: HashMap<&str, HashSet<String>> = HashMap::new();
+    for member in &members {
+        let Some(member_package) = by_id.get(member) else {
+            continue;
+        };
+        for id in reach(member) {
+            if !members.contains(id) && by_id.get(id).is_some_and(|package| package.is_proc_macro())
+            {
+                users
+                    .entry(id)
+                    .or_default()
+                    .insert(member_package.name.clone());
+            }
+        }
+    }
+    users
+        .into_iter()
+        .filter_map(|(id, users)| {
+            let mut sources = vec![(*by_id.get(id)?).clone()];
+            for helper in reach(id) {
+                if let Some(package) = by_id.get(helper)
+                    && !members.contains(helper)
+                    && package.writes_code()
+                {
+                    sources.push((*package).clone());
+                }
+            }
+            Some(ExternalMacro { sources, users })
+        })
+        .collect()
 }
 
 /// Resolve with every feature on, as the analysis itself does by default, so

@@ -2788,3 +2788,125 @@ the full resolution cannot help.
 Closes [#62](https://github.com/rlorenzo/deadwood/issues/62).
 
 [#62]: https://github.com/rlorenzo/deadwood/issues/62
+
+## Phase 32 — the pre-release corpus run (shipped)
+
+Before tagging 1.0 the release candidate was run over four workspaces with no
+history in the corpus and one private one: bevy, ruff, helix, bun's Rust tree
+(again, at a later commit) and triptape. A subagent checked every finding
+against the source, sampling only within large homogeneous clusters. Eight
+false-positive classes came out, and every one is fixed rather than
+documented. The one that first looked unfixable without expansion, a proc
+macro from outside the workspace, was closed later in the phase.
+
+### What was wrong
+
+- **`mod r#struct;`** was looked for at `r#struct.rs`. The warning it raised
+  turned the unused-pub check off for the whole of bevy, so the 37 findings
+  of the first run were dependency findings only.
+- **Optional entries told to move to `[dev-dependencies]`**, which Cargo
+  rejects for `optional = true`. ruff_benchmark enables them with bare
+  `[features]` entries naming the implicit features Cargo makes for optional
+  dependencies (`ruff_instrumented = ["criterion", ..]`), which the feature
+  reader skipped as "another feature". Both halves are fixed: implicit
+  features now name their dependency, and an optional entry is never told to
+  move to dev.
+- **Doctests were not read.** The fenced blocks of a doc comment now count as
+  uses by the documented item, as an edge rather than a root. So helix-parsec's
+  `take_until`, used by its neighbours' doctests, stays alive, while
+  `ruff_formatter`'s five builders, which only their own doctests use, stay
+  reported.
+- **An unreadable `include!` hid callers.** bun scrapes `// HOST_EXPORT`
+  markers into generated `#[no_mangle]` thunks under an `env!` path, and every
+  hand-written function behind one read as dead (87 findings). A package with
+  hidden code now roots all of its items and the public surface of its
+  workspace dependencies, directly or not. On a bun checkout without its
+  codegen output that is nearly everything, and it costs 55 verified true
+  positives there; the warning says why, and reading the generated files
+  (below) wins them back.
+- **Macros across crates and through macros.** `bun_lint::rules!` expands to
+  `pub mod rules { $( $crate::rule_module! { .. } )* }`, and only
+  `rule_module!` says `pub mod $module;`. Each target was resolved with its
+  own macros only, and an emission never followed an invocation inside the
+  rules, so 894 rule files were dead and 180-odd items they use were too.
+  Targets are now resolved once alone, and again with the workspace's macros
+  where they invoke one they don't define, and a macro's emission folds in the
+  emissions of the macros its rules invoke, one inline-module prefix deeper.
+- **Dependencies named by another crate's macro.** A path in a `macro_rules!`
+  body resolves where the macro is invoked (ruff's `warn_user_once!` names
+  `colored`), and a workspace proc macro's output names crates its users never
+  write (bevy's `ExtractComponent` reaches `bevy_extract` through a
+  `bevy_render` re-export; ruff's `CacheKey` names `ruff_cache`). Both now
+  count, as path heads and path-like strings only: the first cut took every
+  identifier and every string word, and the comparison run against tokio
+  showed `tokio::join!`'s local `futures` and tokio-macros' error prose hiding
+  a real `futures` finding.
+- **Glob lookup stopped at a private import.** `pub use camera::*; pub use
+  clear_color::*;` found `camera.rs`'s private `use crate::MsaaWriteback;`
+  first and went no further (17 findings in bevy, found only once the raw
+  identifier fix turned the check back on). A private `use` is skipped when the
+  importer is outside the module that wrote it, and kept when it is inside,
+  which helix's `use super::*;` needs: the first version skipped it everywhere
+  and invented `get_scopes`.
+
+### Paying back what the first cut cost
+
+The first version of these fixes traded findings for precision in three
+places, and each was then recovered:
+
+- **Generated code is read, not assumed.** `include!` paths built from
+  `concat!` and `env!` are evaluated: `CARGO_MANIFEST_DIR` from the tree,
+  `OUT_DIR` as the newest build-script output cargo made for the package, and
+  anything else from Deadwood's environment. A bun checkout that has run its
+  codegen, analyzed with `BUN_CODEGEN_DIR` set, has its thunks read as
+  ordinary callers. The 87 false positives stay fixed by the reading, and the
+  55 true positives the fallback cost come back. The fallback remains for a
+  path that still cannot be read. (The codegen could not be run here, so
+  this was verified on a fixture rather than on bun.)
+- **Per macro, not per crate.** `bevy_gizmos_render` derives `SpecializerKey`
+  from `bevy_render_macros`, which also defines `AsBindGroup`, which writes
+  `bevy_image`. Each entry point is now credited only with the words of its
+  own function, the functions it calls by path, and code outside any
+  function, so `bevy_image` is reported again. Method calls are not followed:
+  the first version followed them, and `.parse()` joined every derive to
+  every other. The other "lost" bevy finding, `bevy_log`, turned out to be a
+  false positive that the first verification pass got wrong:
+  `bevy_gizmos::resolve_gizmo_camera!` expands to `bevy_log::warn_once!(..)`,
+  so the macro-body reading was right to keep it.
+- **One extra walk, not two.** A target is resolved a second time only when
+  a foreign macro would declare a module through it. Re-resolving every
+  target that invoked any foreign macro had doubled bun's CPU time. A
+  run-wide parse cache was tried and dropped: each target strips its own
+  `cfg`-gated code, so the cache held a second copy of every tree, and bun's
+  peak memory went from 3.4 GB to 6.4 GB for no gain. The branch now uses
+  about 10% more CPU and memory than `main` on bun, which is what reading the
+  894 rule files costs.
+
+And the one left as a limitation is closed too: a proc macro from outside the
+workspace is read from the source a full, frozen `cargo metadata` points at,
+together with its helper libraries (the packages it depends on that depend on
+`quote`), and a workspace proc macro's helper libraries are read the same
+way. triptape analyzes clean without its `allow-in` for
+`tauri::generate_context!`'s `serde_json`.
+
+### What it found
+
+| Workspace | Before | After | False positives fixed |
+| --- | --- | --- | --- |
+| bevy | 37 | 430 | 26 (9 dependency, 17 glob) |
+| ruff | 31 | 16 | 15 |
+| helix | 53 | 52 | 1 |
+| bun | 1,229 | 13 | about 1,160 |
+| triptape | 0 | 0 | 1 (formerly handled by config) |
+| tokio | 7 | 6 | 1 (`tokio-test`, optional) |
+| serde, ripgrep | 5, 3 | 5, 3 | 0 |
+
+bevy's 430 are 28 of the first run's findings — its 24 true positives (the
+first pass's 25, less `bevy_log`) and the 4 wasm entries that are the
+documented transitive-feature case — plus 401 the re-enabled check found,
+all verified: 323 unused `bevy_color` palette constants, 73 other items and
+5 dependency findings in `benches` — and `resource_exists_and_equals`, named
+only by its own doctest, which an unterminated fence in an earlier item's docs
+had hidden until fence state was reset at each item. Every remaining finding in the other workspaces was verified in
+the first pass.
+

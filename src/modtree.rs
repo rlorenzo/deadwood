@@ -170,6 +170,64 @@ pub struct Resolved {
     /// walked, so the symbol table treats these and the files under them like
     /// [`Resolved::spliced`], with their paths read from every mount.
     pub remounted: Vec<(Vec<String>, Vec<String>)>,
+    /// The module-declaring `macro_rules!` this target defines, for the other
+    /// targets of the workspace to resolve their invocations against.
+    pub macros: MacroDefs,
+    /// The macro names another crate's definition could still settle
+    /// something for: invocations no definition here settled, and macros this
+    /// target's own macros invoke from their rules.
+    invoked: HashSet<String>,
+}
+
+impl Resolved {
+    /// Whether resolving again with `foreign` known would settle an
+    /// invocation this pass could not: the target invokes a macro another
+    /// crate defines.
+    ///
+    /// Only a macro whose rules, folded through every macro they invoke, end
+    /// in a module declaration counts: one that merely calls `format!` settles
+    /// nothing, and resolving every target that invokes one again doubled
+    /// bun's run.
+    pub fn wants_foreign(&self, foreign: &MacroDefs) -> bool {
+        let declaring = foreign.declaring();
+        self.invoked
+            .iter()
+            .any(|name| !self.macros.0.contains_key(name) && declaring.contains(name))
+    }
+}
+
+/// Module-declaring `macro_rules!` definitions, by name. See [`resolve_with`].
+#[derive(Default, Clone)]
+pub struct MacroDefs(
+    HashMap<String, MacroEmission>,
+    /// The names whose emission, folded through every forward, declares a
+    /// module — asked once per target, so worked out once.
+    std::cell::OnceCell<HashSet<String>>,
+);
+
+impl MacroDefs {
+    fn declaring(&self) -> &HashSet<String> {
+        self.1.get_or_init(|| {
+            self.0
+                .keys()
+                .filter(|name| {
+                    effective_emission(name, &HashMap::new(), self)
+                        .is_some_and(|emission| emission.claims_anything())
+                })
+                .cloned()
+                .collect()
+        })
+    }
+
+    /// Add `other`'s definitions. Two crates defining one name both count: a
+    /// probe through either costs a `stat` and can only spare a file.
+    pub fn absorb(&mut self, other: &MacroDefs) {
+        self.1.take();
+        for (name, emission) in &other.0 {
+            let mine = self.0.entry(name.clone()).or_default();
+            mine.merge(emission, &[]);
+        }
+    }
 }
 
 /// A source file reached during module resolution.
@@ -290,6 +348,26 @@ pub fn resolve(
     gates: &Gates<'_>,
     warnings: &mut Vec<String>,
 ) -> Resolved {
+    resolve_with(root, ignore, gates, &MacroDefs::default(), warnings)
+}
+
+/// [`resolve`], with the module-declaring macros other crates of the workspace
+/// define known up front.
+///
+/// A macro is invoked across crates as readily as within one: bun's
+/// `bun_lint_eslint` declares its two hundred rule modules with
+/// `bun_lint::rules! { accessor_pairs::AccessorPairs, .. }`, and the
+/// definition lives in `bun_lint`. Resolving each target alone left every one
+/// of those files dead. The caller resolves once with nothing foreign, unions
+/// [`Resolved::macros`] across the workspace, and resolves again with the
+/// union wherever [`Resolved::wants_foreign`] says it would help.
+pub fn resolve_with(
+    root: &Path,
+    ignore: Ignore<'_>,
+    gates: &Gates<'_>,
+    foreign: &MacroDefs,
+    warnings: &mut Vec<String>,
+) -> Resolved {
     // Every path popped, whatever became of it, so that a file reached twice
     // is read once — including one that could not be read at all, or that its
     // own inner `#![cfg(...)]` keeps out of this build. Those two never reach
@@ -303,6 +381,8 @@ pub fn resolve(
         spliced: Vec::new(),
         remounted: Vec::new(),
         excluded: Vec::new(),
+        macros: MacroDefs::default(),
+        invoked: HashSet::new(),
     };
     let mut queue: Vec<Pending> = vec![Pending {
         path: root.to_path_buf(),
@@ -506,10 +586,12 @@ pub fn resolve(
         // earlier round.
         let unsettled = std::mem::take(&mut macros.invocations);
         for invocation in unsettled {
-            let Some(emission) = macros.emitting.get(&invocation.name) else {
+            let Some(emission) = effective_emission(&invocation.name, &macros.emitting, foreign)
+            else {
                 macros.invocations.push(invocation);
                 continue;
             };
+            let emission = &emission;
             let site = SpliceSite {
                 base: invocation.base,
                 dir: invocation.dir,
@@ -559,6 +641,15 @@ pub fn resolve(
         if deferred.is_empty() {
             let spliced = resolved.files.split_off(drained);
             resolved.spliced = spliced;
+            for invocation in &macros.invocations {
+                resolved.invoked.insert(invocation.name.clone());
+            }
+            for emission in macros.emitting.values() {
+                resolved
+                    .invoked
+                    .extend(emission.forwards.iter().map(|(_, name)| name.clone()));
+            }
+            resolved.macros = MacroDefs(std::mem::take(&mut macros.emitting), Default::default());
             return resolved;
         }
         queue.append(&mut deferred);
@@ -668,8 +759,8 @@ struct MacroScan {
 
 /// The module declarations a macro's rules make, relative to wherever the
 /// macro is invoked.
-#[derive(Default)]
-struct MacroEmission {
+#[derive(Default, Clone)]
+pub struct MacroEmission {
     /// Inline-module prefixes under which the rules say `mod $x` —
     /// `supported_targets!` wraps its `mod $module;` in `mod targets { .. }`,
     /// so its invocation idents are probed under `targets/`. An unwrapped
@@ -686,6 +777,81 @@ struct MacroEmission {
     /// this way, `#[path]` attributes included, and the paths are relative to
     /// the file that *invokes* it.
     declared: Vec<TokenMod>,
+    /// Macros the rules invoke, with the inline-module prefix each is invoked
+    /// under. Their own declarations land at this macro's invocation site, one
+    /// prefix deeper: bun's `rules!` expands to `pub mod rules { $(
+    /// $crate::rule_module! { $module::$rule })* }`, and `rule_module!` is
+    /// what finally says `pub mod $module;`.
+    forwards: Vec<(Vec<String>, String)>,
+}
+
+impl MacroEmission {
+    /// Whether an invocation would have anything probed: a module the rules
+    /// declare, literally or from the invocation's arguments.
+    fn claims_anything(&self) -> bool {
+        !self.declared.is_empty()
+            || !self.dollar_prefixes.is_empty()
+            || !self.dollar_path_prefixes.is_empty()
+    }
+
+    /// Add `other`'s claims, each under `prefix` more inline modules.
+    fn merge(&mut self, other: &MacroEmission, prefix: &[String]) {
+        let under = |inner: &Vec<String>| [prefix, inner.as_slice()].concat();
+        for declared in &other.declared {
+            self.declared.push(TokenMod {
+                prefix: under(&declared.prefix),
+                ..declared.clone()
+            });
+        }
+        for inner in &other.dollar_prefixes {
+            let joined = under(inner);
+            if !self.dollar_prefixes.contains(&joined) {
+                self.dollar_prefixes.push(joined);
+            }
+        }
+        for inner in &other.dollar_path_prefixes {
+            let joined = under(inner);
+            if !self.dollar_path_prefixes.contains(&joined) {
+                self.dollar_path_prefixes.push(joined);
+            }
+        }
+        for (inner, name) in &other.forwards {
+            let forward = (under(inner), name.clone());
+            if !self.forwards.contains(&forward) {
+                self.forwards.push(forward);
+            }
+        }
+    }
+}
+
+/// What invoking `name` claims, with every macro its rules invoke folded in —
+/// from this target's definitions first, then the workspace's. `None` when
+/// neither defines it.
+fn effective_emission(
+    name: &str,
+    own: &HashMap<String, MacroEmission>,
+    foreign: &MacroDefs,
+) -> Option<MacroEmission> {
+    let lookup = |name: &str| own.get(name).or_else(|| foreign.0.get(name));
+    let root = lookup(name)?;
+    let mut out = MacroEmission::default();
+    out.merge(root, &[]);
+    // Fold forwards breadth-first; `seen` stops a macro that invokes itself
+    // (directly or round a cycle) from folding forever.
+    let mut seen: HashSet<(Vec<String>, String)> = HashSet::new();
+    let mut pending: Vec<(Vec<String>, String)> = root.forwards.clone();
+    while let Some((prefix, inner)) = pending.pop() {
+        if prefix.len() > 16 || !seen.insert((prefix.clone(), inner.clone())) {
+            continue;
+        }
+        if let Some(emission) = lookup(&inner) {
+            let mut folded = MacroEmission::default();
+            folded.merge(emission, &prefix);
+            pending.append(&mut folded.forwards);
+            out.merge(&folded, &[]);
+        }
+    }
+    Some(out)
 }
 
 /// One macro invocation and the context its candidate modules would resolve
@@ -740,6 +906,9 @@ struct TokenMods {
     /// The inline-module prefixes under which `mod $` was seen carrying a
     /// `#[path = $..]` whose value is a metavariable too.
     dollar_path_prefixes: Vec<Vec<String>>,
+    /// Macros invoked in the stream (`name! { .. }`), with the inline-module
+    /// prefix each sits under.
+    forwards: Vec<(Vec<String>, String)>,
 }
 
 /// Scan a macro token stream for module declarations, without expanding it.
@@ -771,6 +940,14 @@ fn scan_token_mods(tokens: TokenStream, prefix: &[String], found: &mut TokenMods
             TokenTree::Ident(ident) => {
                 let word = ident.to_string();
                 if word != "mod" {
+                    // `name!` followed by its delimited arguments: an
+                    // invocation, whose own `mod`s land here.
+                    if word != "macro_rules" && crate::expansion::bang_follows(iter.peek()) {
+                        let forward = (prefix.to_vec(), word.clone());
+                        if !found.forwards.contains(&forward) {
+                            found.forwards.push(forward);
+                        }
+                    }
                     // `pub` and its `(crate)` group are the only tokens that
                     // legally stand between an attribute and its `mod`;
                     // anything else means the attribute belonged to some
@@ -983,8 +1160,7 @@ fn queue_speculative(
             }
         }
     }
-    let as_file = base.join(format!("{name}.rs"));
-    let as_dir = base.join(name).join("mod.rs");
+    let (as_file, as_dir) = module_files(&base, name);
     if as_file.is_file() {
         candidates.push((as_file, false, true));
     } else if as_dir.is_file() {
@@ -1083,10 +1259,17 @@ fn scan_macro_item(
     }
     if mac.mac.path.is_ident("macro_rules") {
         if let Some(name) = &mac.ident
-            && (!found.declared.is_empty() || !found.dollar_prefixes.is_empty())
+            && (!found.declared.is_empty()
+                || !found.dollar_prefixes.is_empty()
+                || !found.forwards.is_empty())
         {
             let emission = walk.macros.emitting.entry(name.to_string()).or_default();
             emission.declared.extend(found.declared);
+            for forward in found.forwards {
+                if !emission.forwards.contains(&forward) {
+                    emission.forwards.push(forward);
+                }
+            }
             for prefix in found.dollar_prefixes {
                 if !emission.dollar_prefixes.contains(&prefix) {
                     emission.dollar_prefixes.push(prefix);
@@ -1186,7 +1369,7 @@ fn collect_mod_decls(
                 // top of `a.rs` is `a.rs`'s own directory and not `a/`.
                 let nested_base = match path_attr(&m.attrs) {
                     Some(explicit) => under.path_base.join(explicit),
-                    None => under.base.join(&name),
+                    None => under.base.join(file_stem(&name)),
                 };
                 walk.inline_mods.push((child_module.clone(), test_only));
                 collect_mod_decls(
@@ -1254,8 +1437,7 @@ fn collect_mod_decls(
                     }
                     continue;
                 }
-                let as_file = under.base.join(format!("{name}.rs"));
-                let as_dir = under.base.join(&name).join("mod.rs");
+                let (as_file, as_dir) = module_files(under.base, &name);
                 if as_file.is_file() {
                     walk.queue.push(Pending {
                         path: as_file,
@@ -1315,7 +1497,7 @@ fn queue_include(
     under: Under<'_>,
     walk: &mut Walk<'_>,
 ) {
-    let Some(included) = crate::deps::included_file(&mac.mac) else {
+    let Some(included) = crate::deps::included_file(&mac.mac, declaring.dir) else {
         return;
     };
     // A path only a build knows is [`crate::deps`]'s to warn about, and this
@@ -1395,10 +1577,31 @@ fn exclude_subtree(
             };
             (target.to_path_buf(), directory)
         }
-        None => (child_base.join(format!("{name}.rs")), child_base.join(name)),
+        None => {
+            let (file, as_dir) = module_files(child_base, name);
+            (file, parent_of(&as_dir).to_path_buf())
+        }
     };
     excluded.push(normalize(&file));
     excluded.extend(rs_files_under(&directory));
+}
+
+/// The file name a module name maps to. A raw identifier keeps its `r#` in
+/// the module path, where every spelling of it is stringified the same way,
+/// but rustc looks for `mod r#struct;` at `struct.rs` — bevy declares one, and
+/// probing `r#struct.rs` left the module unresolved and every check skipped.
+fn file_stem(name: &str) -> &str {
+    name.strip_prefix("r#").unwrap_or(name)
+}
+
+/// The two files `mod name;` can live in under `base`: `name.rs` and
+/// `name/mod.rs`, raw identifiers unprefixed.
+fn module_files(base: &Path, name: &str) -> (PathBuf, PathBuf) {
+    let stem = file_stem(name);
+    (
+        base.join(format!("{stem}.rs")),
+        base.join(stem).join("mod.rs"),
+    )
 }
 
 /// Every file a `mod`'s attributes name, in the order they are written.
@@ -1812,6 +2015,148 @@ mod tests {
             .collect();
         names.sort();
         names
+    }
+
+    /// bun's lint shape, in one crate: `rules!` wraps an invocation of
+    /// `rule_module!` in `pub mod rules { .. }`, and only `rule_module!` says
+    /// `mod $m;`. The claim folds through the forward, one prefix deeper.
+    #[test]
+    fn a_macro_invoking_a_module_declaring_macro_declares_through_it() {
+        let names = reached(
+            "forwarded-mods",
+            &[
+                (
+                    "lib.rs",
+                    "macro_rules! rule_module {\n    ($m:ident) => { pub mod $m; };\n}\n\
+                     macro_rules! rules {\n    ($($m:ident),*) => {\n        pub mod rules { $(rule_module! { $m })* }\n    };\n}\n\
+                     rules! { alpha, beta }\n",
+                ),
+                ("rules/alpha.rs", "pub fn a() {}\n"),
+                ("rules/beta.rs", "pub fn b() {}\n"),
+                ("rules/gamma.rs", "pub fn dead() {}\n"),
+            ],
+        );
+        assert_eq!(
+            names,
+            ["lib.rs", "rules/alpha.rs", "rules/beta.rs"],
+            "gamma stays dead"
+        );
+    }
+
+    /// Forwarding carries every kind of claim one prefix deeper: a literal
+    /// `mod` in the inner macro, and a `#[path = $f] mod $m;` whose file the
+    /// outer invocation names. A macro invoking itself folds to a fixed point
+    /// rather than forever.
+    #[test]
+    fn a_forward_carries_literal_and_path_claims_and_stops_on_recursion() {
+        let names = reached(
+            "forwarded-kinds",
+            &[
+                (
+                    "lib.rs",
+                    "macro_rules! fixed { () => { mod fixed; }; }\n\
+                     macro_rules! pathed { ($f:literal, $m:ident) => { #[path = $f] mod $m; }; }\n\
+                     macro_rules! wrap {\n    ($($f:literal => $m:ident),*) => {\n        pub mod w { fixed!{} $(pathed!{$f, $m})* }\n    };\n}\n\
+                     macro_rules! again { () => { again!{} wrap!{} }; }\n\
+                     wrap! { \"Unusual.rs\" => odd }\nagain!();\n",
+                ),
+                ("w/fixed.rs", "pub fn f() {}\n"),
+                ("w/Unusual.rs", "pub fn o() {}\n"),
+            ],
+        );
+        assert_eq!(names, ["lib.rs", "w/Unusual.rs", "w/fixed.rs"]);
+    }
+
+    /// The same macros defined in another crate: resolved alone, the invoking
+    /// crate settles nothing; with the defining crate's macros known, it does.
+    #[test]
+    fn a_macro_another_crate_defines_settles_with_its_definitions_known() {
+        let root =
+            std::env::temp_dir().join(format!("deadwood-modtree-foreign-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let write = |path: &str, source: &str| {
+            let path = root.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, source).unwrap();
+        };
+        write(
+            "lint/lib.rs",
+            "#[macro_export]\nmacro_rules! rule_module {\n    ($m:ident) => { pub mod $m; };\n}\n\
+             #[macro_export]\nmacro_rules! rules {\n    ($($m:ident),*) => {\n        pub mod rules { $($crate::rule_module! { $m })* }\n    };\n}\n",
+        );
+        write("eslint/lib.rs", "lint::rules! { alpha }\n");
+        write("eslint/rules/alpha.rs", "pub fn a() {}\n");
+        let config = crate::config::Config::default();
+        let package = crate::cfg::tests_support::bare_package();
+        let gates = crate::cfg::Gates::new(config.cfg(), &package);
+        let mut warnings = Vec::new();
+        let lint = resolve(
+            &root.join("lint/lib.rs"),
+            config.ignore(),
+            &gates,
+            &mut warnings,
+        );
+        let alone = resolve(
+            &root.join("eslint/lib.rs"),
+            config.ignore(),
+            &gates,
+            &mut warnings,
+        );
+        assert!(alone.spliced.is_empty());
+        assert!(alone.wants_foreign(&lint.macros));
+        assert!(
+            !alone.wants_foreign(&MacroDefs::default()),
+            "nothing to gain"
+        );
+        assert!(
+            !lint.wants_foreign(&lint.macros),
+            "a crate defining every macro it invokes gains nothing from its own"
+        );
+        // A foreign macro that only invokes others, and declares nothing
+        // through them, settles nothing either.
+        write(
+            "util/lib.rs",
+            "#[macro_export]\nmacro_rules! log { () => { println!() }; }\n",
+        );
+        write("user/lib.rs", "util::log!();\n");
+        let util = resolve(
+            &root.join("util/lib.rs"),
+            config.ignore(),
+            &gates,
+            &mut warnings,
+        );
+        let user = resolve(
+            &root.join("user/lib.rs"),
+            config.ignore(),
+            &gates,
+            &mut warnings,
+        );
+        assert!(!user.wants_foreign(&util.macros));
+        let with = resolve_with(
+            &root.join("eslint/lib.rs"),
+            config.ignore(),
+            &gates,
+            &lint.macros,
+            &mut warnings,
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let spliced: Vec<_> = with.spliced.iter().map(|file| file.path.clone()).collect();
+        assert_eq!(spliced, [root.join("eslint/rules/alpha.rs")]);
+    }
+
+    /// bevy's `mod r#struct;`: rustc finds a raw-identifier module at the
+    /// unprefixed file name, inline or not, and so does the walk.
+    #[test]
+    fn a_raw_identifier_module_lives_at_its_unprefixed_file() {
+        let names = reached(
+            "raw-ident",
+            &[
+                ("lib.rs", "mod r#struct;\nmod r#type { mod r#enum; }\n"),
+                ("struct.rs", "pub fn a() {}\n"),
+                ("type/enum.rs", "pub fn b() {}\n"),
+            ],
+        );
+        assert_eq!(names, ["lib.rs", "struct.rs", "type/enum.rs"]);
     }
 
     /// The tokio shape [#60] filed 381 times: `cfg_fs! { pub mod fs; }` — a

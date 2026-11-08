@@ -48,6 +48,7 @@ pub mod modtree;
 pub mod report;
 
 mod deps;
+mod expansion;
 mod glob;
 mod resolve;
 mod unused;
@@ -333,6 +334,10 @@ pub fn analyze_with(
     // Package name to its library crate, so a dependency rename can be
     // attached to the crate the alias actually names.
     let mut lib_of_package: HashMap<&str, usize> = HashMap::new();
+    // The package each entry of `crates` came from, by index.
+    let mut package_of_crate: Vec<&str> = Vec::new();
+    // Whether each entry of `crates` is a proc-macro target.
+    let mut proc_macro_crate: Vec<bool> = Vec::new();
     // Crate names each package's code refers to, for the dependency check.
     // Packages whose module tree did not resolve are left out entirely.
     let mut references: Vec<(&metadata::Package, deps::CrateReferences, cfg::Gates<'_>)> =
@@ -350,7 +355,53 @@ pub fn analyze_with(
     // each. Held until the union above is complete.
     let mut dead_file_scans: Vec<(&metadata::Package, Vec<PathBuf>, PathBuf)> = Vec::new();
 
+    // Every target's module tree, resolved up front so that a macro one crate
+    // defines can settle the invocations of another: bun's eslint rules are
+    // declared by `bun_lint::rules!`. Each target is resolved alone first, and
+    // again with the workspace's macros known only where it invokes one it
+    // does not define. The warnings each resolution raised travel with it, to
+    // be replayed where the package's own checks look for them.
+    let mut resolutions: Vec<Vec<(modtree::Resolved, Vec<String>)>> = meta
+        .packages
+        .iter()
+        .map(|package| {
+            let gates = cfg::Gates::new(config.cfg(), package);
+            package
+                .targets
+                .iter()
+                .map(|target| {
+                    let mut target_warnings = Vec::new();
+                    let resolved =
+                        modtree::resolve(&target.src_path, ignore, &gates, &mut target_warnings);
+                    (resolved, target_warnings)
+                })
+                .collect()
+        })
+        .collect();
+    let mut workspace_macros = modtree::MacroDefs::default();
+    for (resolved, _) in resolutions.iter().flatten() {
+        workspace_macros.absorb(&resolved.macros);
+    }
+    for (package, targets) in meta.packages.iter().zip(&mut resolutions) {
+        let gates = cfg::Gates::new(config.cfg(), package);
+        for (target, slot) in package.targets.iter().zip(targets.iter_mut()) {
+            if slot.0.wants_foreign(&workspace_macros) {
+                let mut target_warnings = Vec::new();
+                let resolved = modtree::resolve_with(
+                    &target.src_path,
+                    ignore,
+                    &gates,
+                    &workspace_macros,
+                    &mut target_warnings,
+                );
+                *slot = (resolved, target_warnings);
+            }
+        }
+    }
+    let mut resolutions = resolutions.into_iter();
+
     for package in &meta.packages {
+        let mut package_resolutions = resolutions.next().unwrap_or_default().into_iter();
         let manifest_dir = package
             .manifest_path
             .parent()
@@ -371,7 +422,10 @@ pub fn analyze_with(
         let mut package_spliced: HashSet<PathBuf> = HashSet::new();
         let mut package_references = deps::CrateReferences::default();
         for target in &package.targets {
-            let resolved = modtree::resolve(&target.src_path, ignore, &gates, &mut warnings);
+            let Some((resolved, target_warnings)) = package_resolutions.next() else {
+                continue;
+            };
+            warnings.extend(target_warnings);
             for file in &resolved.files {
                 package_reachable.insert(file.path.clone());
                 // Unlike the detectors below, this one is not gated on the
@@ -422,6 +476,8 @@ pub fn analyze_with(
                 }
             }
             spliced.extend(remounted);
+            package_of_crate.push(package.name.as_str());
+            proc_macro_crate.push(target.is_proc_macro());
             crates.push(resolve::CrateUnit {
                 names,
                 // The same rule the dependency check places a mention by: a
@@ -563,11 +619,22 @@ pub fn analyze_with(
 
     add_dependency_aliases(&meta, &lib_of_package, &mut crates);
 
+    // What other crates' macros write is code the invoking crate compiles.
+    expansion::credit_macros(
+        &meta,
+        &config,
+        &crates,
+        &package_of_crate,
+        &proc_macro_crate,
+        &mut references,
+    );
+
     // Usage resolution must see every file in the workspace: if module
     // resolution hit any problem, files (and the paths inside them) may be
     // missing, and unseen paths would turn into false positives.
     if warnings.is_empty() {
-        let items = unused::find_items(&crates, config.public_api(), &mut warnings);
+        let hidden = hidden_code_reach(&meta, &references, &package_of_crate, &mut warnings);
+        let items = unused::find_items(&crates, &hidden, config.public_api(), &mut warnings);
         findings.extend(items.unused.into_iter().map(|item| Finding {
             kind: if item.reexport {
                 FindingKind::UnusedReexport
@@ -911,6 +978,51 @@ fn feature_list(names: &[String]) -> String {
     }
 }
 
+/// Which crates code Deadwood could not read may be naming, for the unused-pub
+/// check.
+///
+/// A package that `include!`s a file Deadwood cannot open — generated at build
+/// time, most often, under `OUT_DIR` or a path an `env!` names — holds code
+/// that can call any of its own items and anything its workspace dependencies
+/// export. bun writes its C-ABI thunks into such a file and calls a
+/// hand-written `pub fn` from each, so every one of those read as dead. The
+/// dependency checks already stand down for the package itself; here the
+/// package's own items are all [`unused::Hidden::Whole`], and the public
+/// surface of every workspace crate it depends on, directly or not,
+/// [`unused::Hidden::Surface`] — a re-export chain the hidden code walks is as
+/// invisible as the code.
+fn hidden_code_reach(
+    meta: &metadata::Metadata,
+    references: &[(&metadata::Package, deps::CrateReferences, cfg::Gates<'_>)],
+    package_of_crate: &[&str],
+    warnings: &mut Vec<String>,
+) -> Vec<unused::Hidden> {
+    let mut whole: HashSet<&str> = HashSet::new();
+    for (package, package_references, _) in references {
+        if let Some(reason) = package_references.hidden_code() {
+            whole.insert(package.name.as_str());
+            warnings.push(format!(
+                "unused-pub check limited for package `{}` and the workspace crates it depends on: \
+                 {reason}, and that code may name any of their public items",
+                package.name
+            ));
+        }
+    }
+    let surface = meta.workspace_reach(whole.iter().copied());
+    package_of_crate
+        .iter()
+        .map(|package| {
+            if whole.contains(package) {
+                unused::Hidden::Whole
+            } else if surface.contains(package) {
+                unused::Hidden::Surface
+            } else {
+                unused::Hidden::No
+            }
+        })
+        .collect()
+}
+
 /// Drop the findings the configuration silences and label the rest with their
 /// configured severity.
 ///
@@ -1044,12 +1156,7 @@ fn dead_file_roots(package: &metadata::Package, manifest_dir: &Path) -> Vec<Path
 /// crate names. The package name is kept as a fallback for the usual case
 /// where a package does not rename its lib target.
 fn crate_names(package: &metadata::Package, target: &metadata::Target) -> Vec<String> {
-    const LIB_KINDS: [&str; 6] = ["lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro"];
-    if !target
-        .kind
-        .iter()
-        .any(|kind| LIB_KINDS.contains(&kind.as_str()))
-    {
+    if !target.is_lib() {
         return Vec::new();
     }
     let mut names = vec![target.name.replace('-', "_")];

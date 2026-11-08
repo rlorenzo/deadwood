@@ -17,6 +17,28 @@ Tracked here rather than hidden. Almost all of them cost findings rather than in
   a file are still invisible to resolution: the module path the macro gives
   them is unknowable without expansion, so they are neither reported nor able
   to keep anything else alive.
+- Module-declaring macros are followed across crates and through each other:
+  `bun_lint::rules! { .. }` defined in one crate and invoked from another
+  expands to `pub mod rules { $( $crate::rule_module! { .. } )* }`, and the
+  `pub mod $module;` in `rule_module!` is probed under `rules/` at the
+  invocation site. Which macro an invocation means is decided by its last path
+  segment, so two workspace macros sharing a name both contribute their
+  claims, which only ever spares files.
+- An `include!` path is followed when it is a literal or a `concat!` of
+  literals and `env!`s whose values the tree or the environment gives:
+  `CARGO_MANIFEST_DIR` is the including package's directory, `OUT_DIR` is the
+  newest build-script output directory cargo made for the package (under
+  `CARGO_TARGET_DIR` or the nearest `target/`), and any other variable is
+  whatever Deadwood is run with. So generated code is read like any other
+  file once a build has made it: bun's thunks are under
+  `env!("BUN_CODEGEN_DIR")`, and running Deadwood with that variable set reads
+  them. Results then depend on the environment, as the build's do.
+- Code that still cannot be read keeps alive what it could name. A package
+  that `include!`s a file Deadwood cannot open has every item kept alive, and
+  so does the public surface of every workspace crate it depends on, directly
+  or not. On a bun checkout without its codegen output, `bun_runtime` depends
+  on nearly the whole workspace, so the unused-pub check reports almost
+  nothing there. A warning names each such package.
 - Lexical scopes are tracked syntactically, so a binding a macro expands to
   shadows nothing — though an identifier in macro input already counts as a
   use of every item with that name, so the two errors point the same way. A
@@ -138,6 +160,38 @@ Tracked here rather than hidden. Almost all of them cost findings rather than in
   crate (`#[derive(Serialize)]` emits `extern crate serde as _serde;`). The
   price is the mirror image: a genuinely stale `X` beside a live companion is
   missed, never invented.
+- A dependency named only by what a proc macro expands to is kept alive by
+  reading the macro: every identifier its `quote!`-family invocations write as
+  the head of a path (`::x::Y`, `extern crate x`) and every word of its
+  whitespace-free string literals (`"bevy_extract"`, `"{}::Key"`) counts as a
+  mention by a package that uses the macro. What counts is per macro: the
+  function behind the derive, attribute or function-like macro the package
+  names, the functions it calls by path (`helper(..)`, `utils::get_path(..)`;
+  method calls are not followed, since `.parse()` would join every derive to
+  every other), and code outside any function. The macro's helper libraries
+  are read with it — the packages it depends on, however indirectly, that
+  depend on `quote` themselves (`bevy_macro_utils`, `tauri-codegen`,
+  `tauri-utils`). A package is a user when it names one of the macro's entry
+  points and its dependencies reach the proc-macro package, however
+  indirectly, which covers a derive re-exported by a library (bevy's
+  `ExtractComponent` through `bevy_render`, naming `bevy_extract`).
+
+  A proc macro from *outside* the workspace is read from the source a full,
+  frozen `cargo metadata` points at, which is the registry cache any checkout
+  that has built once holds. On a cold cache it is not read, and
+  `tauri::generate_context!`'s `::serde_json::Value` leaves an app's
+  `serde_json` entry looking unused, or misplaced when only tests name it;
+  building once is the fix, and `[dependencies.allow-in]` in `deadwood.toml`
+  the alternative. Calls are matched by name, so a helper sharing a name with
+  another macro's is followed too, which costs findings rather than inventing
+  them.
+- A path in a `macro_rules!` body resolves in the crate that invokes the macro,
+  so the path heads in a workspace macro's body count as mentions by every
+  package that invokes it (ruff's `warn_user_once!` in `ruff_linter` says `use
+  colored::Colorize;`). They count by name, with the bodies of the macros a
+  body invokes folded in, and with nowhere to place them, so such a dependency
+  is never reported misplaced either. A bare identifier in a body is not read
+  this way: it is far more often a local (`tokio::join!` binds `futures`).
 - A crate renamed by `extern crate real as alias;` or `use real as alias;` is
   followed: every `alias::` in the crate that declares it counts for `real`, so
   a package that renames one dependency to the name of another — `serde_json`

@@ -43,8 +43,10 @@
 //!   import, since the glob may well be where they come from;
 //! - paths that run through an alias or module we cannot pin down.
 //!
-//! Doc comments are the one string we do not scan: they are prose, and
-//! mentioning an item in one should not keep it alive.
+//! Doc comment prose is the one string we do not scan: mentioning an item in
+//! a sentence should not keep it alive. The fenced code blocks in it are
+//! another matter — rustdoc compiles them as doctests — so their identifiers
+//! count as uses the way macro input does.
 //!
 //! A path that resolves cleanly to nothing in the workspace (`std`, an
 //! external crate, or a local name matching no item) marks nothing.
@@ -391,6 +393,10 @@ struct Def {
     /// for this: it also excludes `fn main` and the attribute escape hatches,
     /// which are roots for entirely different reasons.
     is_pub: bool,
+    /// A private module-level `use` alias. A glob import does not bring one
+    /// in — it imports only what is visible to the importer — so a glob
+    /// lookup from outside its module passes over it ([`SymbolTable::lookup_in`]).
+    private_import: bool,
     /// Whether something outside the source calls this — an entry point, a
     /// linker export, or an explicit opt-out — and whether a build without
     /// tests is one of the things that does. See [`entry_point_attr`].
@@ -837,6 +843,31 @@ impl SymbolTable {
         }
     }
 
+    /// Root what code Deadwood could not read may name: every definition of a
+    /// [`crate::unused::Hidden::Whole`] crate, and the public surface of a
+    /// [`crate::unused::Hidden::Surface`] one. See `hidden_code_reach` in the
+    /// crate root for where the two come from.
+    pub(crate) fn root_hidden_code(&mut self, hidden: &[crate::unused::Hidden]) {
+        use crate::unused::Hidden;
+        if hidden.iter().all(|&h| h == Hidden::No) {
+            return;
+        }
+        let surface = self.externally_reachable_modules();
+        let rooted: Vec<usize> = (0..self.defs.len())
+            .filter(|&id| {
+                let def = &self.defs[id];
+                match hidden.get(self.modules[def.module].krate) {
+                    Some(Hidden::Whole) => true,
+                    Some(Hidden::Surface) => def.is_pub && surface.contains(&def.module),
+                    _ => false,
+                }
+            })
+            .collect();
+        for id in rooted {
+            self.mark_def_used(&Referrer::Root, id);
+        }
+    }
+
     /// Resolve every path in `crates`, marking the definitions they name.
     ///
     /// Spliced files are walked here and nowhere else: they write paths that
@@ -863,7 +894,14 @@ impl SymbolTable {
                     value_scopes: Vec::new(),
                     type_scopes: Vec::new(),
                     enclosing: Referrer::Root,
+                    doc_fence: None,
                 };
+                // A crate's or module's `//!` docs hold doctests as much as
+                // an item's do.
+                for attr in &ast.attrs {
+                    walker.scan_doc_attr(attr);
+                }
+                walker.doc_fence = None;
                 for item in &ast.items {
                     walker.visit_item(item);
                 }
@@ -1437,6 +1475,7 @@ impl SymbolTable {
             // is reached decides nothing, and neither flag needs
             // to claim anything.
             is_pub: false,
+            private_import: false,
             entry_point: EntryPoint::None,
             child: Some(child),
             target: None,
@@ -1470,6 +1509,7 @@ impl SymbolTable {
                 module,
                 reportable: false,
                 is_pub: false,
+                private_import: false,
                 entry_point: EntryPoint::None,
                 child: Some(root),
                 target: None,
@@ -1501,6 +1541,7 @@ impl SymbolTable {
                 module,
                 reportable: is_pub && !is_main && !has_skip_attr(attrs),
                 is_pub,
+                private_import: false,
                 entry_point,
                 child: None,
                 target: None,
@@ -1528,6 +1569,7 @@ impl SymbolTable {
         test_context: bool,
     ) {
         let is_pub = matches!(item.vis, syn::Visibility::Public(_));
+        let is_private = top_level && matches!(item.vis, syn::Visibility::Inherited);
         let absolute = item.leading_colon.is_some();
         let mut leaves = Vec::new();
         flatten_use(&item.tree, &mut Vec::new(), &mut leaves);
@@ -1566,6 +1608,7 @@ impl SymbolTable {
                 // reachable only from whatever goes through it, which is what
                 // lets a dead import stop keeping its target alive.
                 is_pub: kind == DefKind::Reexport,
+                private_import: is_private,
                 entry_point: entry_point_attr(&item.attrs, test_context),
                 child: None,
                 target: Some(path),
@@ -1619,16 +1662,39 @@ impl SymbolTable {
 
     /// Look `name` up in `module`, following resolved glob imports.
     fn lookup(&self, module: usize, name: &str) -> Step {
-        self.lookup_in(module, name, &mut HashSet::new())
+        self.lookup_in(module, name, &mut HashSet::new(), module)
     }
 
-    fn lookup_in(&self, module: usize, name: &str, visited: &mut HashSet<usize>) -> Step {
+    /// [`SymbolTable::lookup`] on behalf of `importer`, the module the lookup
+    /// started in, with `visited` guarding against glob cycles. A glob brings
+    /// in only what is visible there, and a private `use` is visible only inside the
+    /// module that writes it and that module's descendants: bevy's `pub use
+    /// camera::*; pub use clear_color::*;` at a crate root found `camera.rs`'s
+    /// private `use crate::MsaaWriteback;` first, followed it back into the
+    /// same lookup, and never reached the definition in `clear_color`. helix's
+    /// `use super::*;` in a child module does see the parent's private
+    /// imports, and keeps them.
+    fn lookup_in(
+        &self,
+        module: usize,
+        name: &str,
+        visited: &mut HashSet<usize>,
+        importer: usize,
+    ) -> Step {
         if !visited.insert(module) {
             // Already accounted for on another branch of a glob cycle.
             return Step::Absent;
         }
         if let Some(defs) = self.modules[module].items.get(name) {
-            return Step::Defs(defs.clone());
+            let within = self.is_within(importer, module);
+            let defs: Vec<usize> = defs
+                .iter()
+                .copied()
+                .filter(|&id| within || !self.defs[id].private_import)
+                .collect();
+            if !defs.is_empty() {
+                return Step::Defs(defs);
+            }
         }
         // Past a `cfg`-gated glob, every source and not the first to answer: under
         // the default union of builds, two globs defining one name are
@@ -1639,7 +1705,7 @@ impl SymbolTable {
         let mut unknown = self.modules[module].opaque;
         let mut found = Vec::new();
         for &source in &self.modules[module].glob_sources {
-            match self.lookup_in(source, name, visited) {
+            match self.lookup_in(source, name, visited, importer) {
                 Step::Defs(defs) if !alternatives => return Step::Defs(defs),
                 Step::Defs(defs) => found.extend(defs),
                 Step::Unknown => unknown = true,
@@ -1652,6 +1718,19 @@ impl SymbolTable {
             Step::Unknown
         } else {
             Step::Absent
+        }
+    }
+
+    /// Whether `module` is `ancestor` or nested somewhere inside it.
+    fn is_within(&self, mut module: usize, ancestor: usize) -> bool {
+        loop {
+            if module == ancestor {
+                return true;
+            }
+            match self.modules[module].parent {
+                Some(parent) => module = parent,
+                None => return false,
+            }
         }
     }
 
@@ -2004,6 +2083,24 @@ impl SymbolTable {
         }
     }
 
+    /// [`SymbolTable::mark_name_used`], attributed to `from` rather than to the
+    /// root set: for a channel whose referrer is known even though the item
+    /// it names is not, which is what a doctest is.
+    ///
+    /// An item naming itself is skipped: a doctest showing how to call the
+    /// item it documents is no evidence that anything else does.
+    fn mark_name_used_by(&mut self, from: &Referrer, name: &str) {
+        let Some(ids) = self.by_name.get(name) else {
+            return;
+        };
+        for id in ids.clone() {
+            if matches!(from, Referrer::Defs(defs) if defs == &[id]) {
+                continue;
+            }
+            self.mark_def_used(from, id);
+        }
+    }
+
     /// Mark every identifier in an unexpanded token stream, at any nesting
     /// depth. Macro input can name anything, and we do not expand it.
     fn mark_tokens_used(&mut self, tokens: &TokenStream) {
@@ -2109,9 +2206,112 @@ struct RefWalker<'a> {
     /// The definition the paths being walked are written inside, which is what
     /// turns a flat set of uses into a graph.
     enclosing: Referrer,
+    /// Inside a fenced block of the doc comment being read: `Some(true)` for
+    /// one rustdoc compiles as a doctest, `Some(false)` for another language.
+    /// A doc comment arrives one `#[doc]` line at a time, so the fence state
+    /// has to outlive the attribute that opened it.
+    doc_fence: Option<bool>,
 }
 
+/// Info-string words that mark a fenced block as something other than Rust.
+/// Anything else — no tag, `rust`, `no_run`, `should_panic`, `ignore`,
+/// `edition2021`, an unknown word — is read as code: marking a name used is
+/// the safe direction, so the list only needs to catch the common prose ones.
+const NON_RUST_FENCES: &[&str] = &[
+    "text",
+    "txt",
+    "plain",
+    "console",
+    "sh",
+    "bash",
+    "shell",
+    "zsh",
+    "toml",
+    "json",
+    "yaml",
+    "yml",
+    "html",
+    "xml",
+    "css",
+    "js",
+    "javascript",
+    "ts",
+    "typescript",
+    "c",
+    "cpp",
+    "c++",
+    "python",
+    "py",
+    "diff",
+    "markdown",
+    "md",
+    "sql",
+    "ini",
+    "dot",
+    "mermaid",
+];
+
 impl RefWalker<'_> {
+    /// Read one `#[doc = "..."]` line for doctest code.
+    ///
+    /// Doc *prose* is not scanned — naming an item in a sentence should not
+    /// keep it alive — but a doctest is code: rustdoc compiles it against the
+    /// crate, so deleting an item one names breaks `cargo test`. helix-parsec's
+    /// `take_until` is used only by the doctests of its neighbours. Doctests
+    /// are separate crates that link the dev-dependencies, and what they name
+    /// is spelled through the crate's public paths, so each identifier is read
+    /// the way macro input is, as a use of every item with that name — but
+    /// one the documented item makes, not a root. The doctest goes when the
+    /// item does, so an item only its own doctest names is still reported,
+    /// and so is one only a dead item's doctest names.
+    fn scan_doc_attr(&mut self, attr: &syn::Attribute) {
+        let syn::Meta::NameValue(nv) = &attr.meta else {
+            return;
+        };
+        if !nv.path.is_ident("doc") {
+            return;
+        }
+        let syn::Expr::Lit(syn::ExprLit {
+            lit: syn::Lit::Str(text),
+            ..
+        }) = &nv.value
+        else {
+            return;
+        };
+        let mut code: HashSet<String> = HashSet::new();
+        for line in text.value().lines() {
+            let trimmed = line.trim_start();
+            let fence = ["```", "~~~"]
+                .into_iter()
+                .find_map(|marker| trimmed.strip_prefix(marker));
+            if let Some(info) = fence {
+                self.doc_fence = match self.doc_fence {
+                    Some(_) => None,
+                    None => {
+                        let first = info
+                            .split(|c: char| c == ',' || c.is_whitespace())
+                            .find(|word| !word.is_empty())
+                            .unwrap_or("")
+                            .to_ascii_lowercase();
+                        Some(!NON_RUST_FENCES.contains(&first.as_str()))
+                    }
+                };
+                continue;
+            }
+            if self.doc_fence == Some(true) {
+                code.extend(crate::expansion::words(line).map(str::to_string));
+            }
+        }
+        // Once per name per attribute: a block naming `new` twenty times is
+        // one use, and each mark is an edge per item of that name.
+        if !code.is_empty() {
+            let from = self.enclosing.clone();
+            for word in code {
+                self.table.mark_name_used_by(&from, &word);
+            }
+        }
+    }
+
     /// Run `body` with one more binding frame in each namespace.
     fn in_scope(&mut self, body: impl FnOnce(&mut Self)) {
         self.value_scopes.push(HashSet::new());
@@ -2287,6 +2487,9 @@ impl<'ast> Visit<'ast> for RefWalker<'_> {
     /// module's `helper`, so the enclosing scopes are set aside rather than
     /// merely shadowed.
     fn visit_item(&mut self, node: &'ast syn::Item) {
+        // Rustdoc ends an unterminated fence with the doc block it is in, so
+        // one item's docs start outside any fence whatever the last one left.
+        self.doc_fence = None;
         let values = std::mem::take(&mut self.value_scopes);
         let types = std::mem::take(&mut self.type_scopes);
         let pos = std::mem::replace(&mut self.pos, PathPos::Other);
@@ -2305,15 +2508,28 @@ impl<'ast> Visit<'ast> for RefWalker<'_> {
     /// A member of an `impl` or `trait` opens a scope for its own generics
     /// and parameters, on top of the block's — `impl<T> Foo<T>` is in scope
     /// throughout every method.
+    fn visit_field(&mut self, node: &'ast syn::Field) {
+        self.doc_fence = None;
+        syn::visit::visit_field(self, node);
+    }
+
+    fn visit_variant(&mut self, node: &'ast syn::Variant) {
+        self.doc_fence = None;
+        syn::visit::visit_variant(self, node);
+    }
+
     fn visit_impl_item(&mut self, node: &'ast syn::ImplItem) {
+        self.doc_fence = None;
         self.in_scope(|walker| syn::visit::visit_impl_item(walker, node));
     }
 
     fn visit_trait_item(&mut self, node: &'ast syn::TraitItem) {
+        self.doc_fence = None;
         self.in_scope(|walker| syn::visit::visit_trait_item(walker, node));
     }
 
     fn visit_foreign_item(&mut self, node: &'ast syn::ForeignItem) {
+        self.doc_fence = None;
         self.in_scope(|walker| syn::visit::visit_foreign_item(walker, node));
     }
 
@@ -2548,6 +2764,7 @@ impl<'ast> Visit<'ast> for RefWalker<'_> {
     }
 
     fn visit_attribute(&mut self, node: &'ast syn::Attribute) {
+        self.scan_doc_attr(node);
         // Attribute arguments are resolved by macro expansion, which we do
         // not perform, so every identifier counts as a use.
         match &node.meta {
@@ -4013,6 +4230,105 @@ mod tests {
                 "pub fn leaf() -> u32 { 1 }\npub fn middle() -> u32 { leaf() }\nfn main() { let _ = middle(); }\n"
             )
             .is_empty()
+        );
+    }
+
+    /// helix-parsec's shape: an item only a neighbour's doctest names. The
+    /// doctest is code rustdoc compiles, so the name is a use — hidden `# `
+    /// lines and `//!` docs included — while prose and a `text` block are not.
+    #[test]
+    fn a_doctest_names_items_and_prose_does_not() {
+        let source = "//! ```\n//! # use krate::from_crate_docs;\n//! ```\n\
+            pub fn from_crate_docs() {}\n\
+            pub fn helper() {}\n\
+            pub fn hidden() {}\n\
+            pub fn prose() {}\n\
+            pub fn shell() {}\n\
+            pub fn tagged() {}\n\
+            /// Calls `prose` in a sentence.\n\
+            /// ```no_run\n/// use krate::helper;\n/// # krate::hidden();\n/// ```\n\
+            /// ```text\n/// shell\n/// ```\n\
+            /// ```sh,ignore\n/// tagged\n/// ```\n\
+            pub fn documented() {}\n";
+        assert_eq!(
+            unused_in_root(source),
+            vec!["prose", "shell", "tagged", "documented"]
+        );
+
+        // An unterminated fence ends with its item's docs: the next item's
+        // balanced block is still read as code, and its prose as prose.
+        let source = "pub fn named() {}\npub fn prose_word() {}\n\
+            /// ```\n/// unclosed\npub fn first() {}\n\
+            /// ```\n/// krate::named();\n/// ```\n/// prose_word\npub fn second() {}\n";
+        let unused = unused_in_root(source);
+        assert!(!unused.contains(&"named".to_string()), "{unused:?}");
+        assert!(unused.contains(&"prose_word".to_string()), "{unused:?}");
+
+        // An item only its own doctest names is still dead, and so is one
+        // only a dead item's doctest names.
+        let source = "pub fn dead_helper() {}\n\
+            /// ```\n/// krate::alone();\n/// krate::dead_helper();\n/// ```\n\
+            pub fn alone() {}\n";
+        let unused = unused_in_binary_root(source);
+        assert!(unused.contains(&"alone".to_string()), "{unused:?}");
+        assert!(unused.contains(&"dead_helper".to_string()), "{unused:?}");
+
+        // In a library too, where the documented item is surface and so
+        // always reached: its own doctest is not a use of it.
+        assert_eq!(
+            unused_in_root("/// ```\n/// krate::shown();\n/// ```\npub fn shown() {}\n"),
+            vec!["shown"]
+        );
+    }
+
+    /// bevy's `pub use camera::*; pub use clear_color::*;`, where `camera`
+    /// privately imports the type `clear_color` defines. A glob does not
+    /// export a private `use`, so the name resolves through the second glob.
+    #[test]
+    fn a_glob_passes_over_a_private_import_to_the_definition_behind_it() {
+        assert_eq!(
+            unused_in_binary(&[
+                (
+                    "",
+                    "mod a;\nmod b;\npub use a::*;\npub use b::*;\nfn main() { f(Thing); }\n"
+                ),
+                ("a", "use crate::Thing;\npub fn f(_: Thing) {}\n"),
+                ("b", "pub struct Thing;\npub struct Unused;\n"),
+            ]),
+            vec!["Unused"]
+        );
+        // A `pub(crate) use` is visible crate-wide, so a glob from anywhere in
+        // the crate goes through it.
+        assert_eq!(
+            unused_in_binary(&[
+                (
+                    "",
+                    "mod a;\nmod deep;\npub use a::*;\nfn main() { let _ = Thing; }\n"
+                ),
+                ("a", "pub(crate) use crate::deep::Thing;\n"),
+                ("deep", "pub struct Thing;\n"),
+            ]),
+            Vec::<String>::new()
+        );
+        // From a child module the parent's private imports are visible, so
+        // `use super::*;` keeps resolving through them.
+        assert_eq!(
+            unused_in_binary(&[
+                (
+                    "",
+                    "mod defs;\nmod commands;\nfn main() { commands::run(); }\n"
+                ),
+                ("defs", "pub fn scopes() {}\n"),
+                (
+                    "commands",
+                    "use crate::defs;\nmod typed;\npub fn run() { typed::go(); }\n"
+                ),
+                (
+                    "commands/typed",
+                    "use super::*;\npub fn go() { defs::scopes(); }\n"
+                ),
+            ]),
+            Vec::<String>::new()
         );
     }
 
