@@ -125,7 +125,7 @@ code you've since deleted are reported as stale, never as failures. See
 
 ```yaml
 - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-- uses: rlorenzo/deadwood-rs@<release-commit-sha> # v1.0.0
+- uses: rlorenzo/deadwood-rs@d887c6476b2c7dc40abd8cbc7d48e345344a9257 # v1.0.0
   with:
     path: .       # workspace to analyze (default `.`)
     args: ""      # extra arguments for `deadwood check`, e.g. `--json`
