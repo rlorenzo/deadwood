@@ -84,16 +84,21 @@ bevy, ruff, helix and bun, each checked finding by finding:
   by its own doctest, or by a dead item's, is still reported.
 - A package that `include!`s a file Deadwood cannot read, such as one generated
   at build time, had its `pub` items reported although that code may call any of
-  them. They are now kept alive, along with the public items of the workspace
-  crates it depends on, and a warning says so.
+  them. `include!` paths built from `concat!` and `env!` are now followed where
+  the tree or the environment answers them (`CARGO_MANIFEST_DIR`, a built
+  `OUT_DIR`, any variable Deadwood runs with). Where they still can't be read,
+  the package's items are kept alive, along with the public items of the
+  workspace crates it depends on, and a warning says so.
 - A `macro_rules!` defined in one crate and invoked from another, or invoked
   from inside another macro's rules, did not have its `mod` declarations
   followed, so the files it declares were reported dead.
 - A dependency named only in another workspace crate's `macro_rules!` body
   was reported unused by the crates invoking the macro.
-- A dependency named only by a workspace proc macro's expansion — a derive
-  reached through a re-export, say — was reported unused. What the macro
-  crate quotes now counts for every package that uses its macros.
+- A dependency named only by a proc macro's expansion — a derive reached
+  through a re-export, or tauri's `generate_context!` naming `serde_json` —
+  was reported unused. What each macro, and the helper libraries it builds
+  its output with, writes now counts for the packages that use it, read from
+  the registry cache for a macro outside the workspace.
 - A glob import that found a sibling module's private `use` first stopped
   there, so a `pub use a::*; pub use b::*;` pair reported the item `b` defines
   as unused when `a` imported it. A private `use` is now visible to a glob only

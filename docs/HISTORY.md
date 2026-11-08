@@ -2819,8 +2819,10 @@ documented, except the one that can't be fixed without expansion.
   markers into generated `#[no_mangle]` thunks under an `env!` path, and every
   hand-written function behind one read as dead (87 findings). A package with
   hidden code now roots all of its items and the public surface of its
-  workspace dependencies, directly or not. On bun that is nearly everything,
-  and it costs 55 verified true positives there; the warning says why.
+  workspace dependencies, directly or not. On a bun checkout without its
+  codegen output that is nearly everything, and it costs 55 verified true
+  positives there; the warning says why, and reading the generated files
+  (below) wins them back.
 - **Macros across crates and through macros.** `bun_lint::rules!` expands to
   `pub mod rules { $( $crate::rule_module! { .. } )* }`, and only
   `rule_module!` says `pub mod $module;`. Each target was resolved with its
@@ -2846,29 +2848,62 @@ documented, except the one that can't be fixed without expansion.
   which helix's `use super::*;` needs: the first version skipped it everywhere
   and invented `get_scopes`.
 
-The one left as a limitation: a proc macro from outside the workspace
-(`tauri::generate_context!` emitting `::serde_json::Value`) is not read, which
-triptape already answers with `[dependencies.allow-in]`.
+### Paying back what the first cut cost
+
+The first version of these fixes traded findings for precision in three
+places, and each was then recovered:
+
+- **Generated code is read, not assumed.** `include!` paths built from
+  `concat!` and `env!` are evaluated: `CARGO_MANIFEST_DIR` from the tree,
+  `OUT_DIR` as the newest build-script output cargo made for the package, and
+  anything else from Deadwood's environment. A bun checkout that has run its
+  codegen, analyzed with `BUN_CODEGEN_DIR` set, has its thunks read as
+  ordinary callers. The 87 false positives stay fixed by the reading, and the
+  55 true positives the fallback cost come back. The fallback remains for a
+  path that still cannot be read. (The codegen could not be run here, so
+  this was verified on a fixture rather than on bun.)
+- **Per macro, not per crate.** `bevy_gizmos_render` derives `SpecializerKey`
+  from `bevy_render_macros`, which also defines `AsBindGroup`, which writes
+  `bevy_image`. Each entry point is now credited only with the words of its
+  own function, the functions it calls by path, and code outside any
+  function, so `bevy_image` is reported again. Method calls are not followed:
+  the first version followed them, and `.parse()` joined every derive to
+  every other. The other "lost" bevy finding, `bevy_log`, turned out to be a
+  false positive that the first verification pass got wrong:
+  `bevy_gizmos::resolve_gizmo_camera!` expands to `bevy_log::warn_once!(..)`,
+  so the macro-body reading was right to keep it.
+- **One extra walk, not two.** A target is resolved a second time only when
+  a foreign macro would declare a module through it. Re-resolving every
+  target that invoked any foreign macro had doubled bun's CPU time. A
+  run-wide parse cache was tried and dropped: each target strips its own
+  `cfg`-gated code, so the cache held a second copy of every tree, and bun's
+  peak memory went from 3.4 GB to 6.4 GB for no gain. The branch now uses
+  about 10% more CPU and memory than `main` on bun, which is what reading the
+  894 rule files costs.
+
+And the one left as a limitation is closed too: a proc macro from outside the
+workspace is read from the source a full, frozen `cargo metadata` points at,
+together with its helper libraries (the packages it depends on that depend on
+`quote`), and a workspace proc macro's helper libraries are read the same
+way. triptape analyzes clean without its `allow-in` for
+`tauri::generate_context!`'s `serde_json`.
 
 ### What it found
 
 | Workspace | Before | After | False positives fixed |
 | --- | --- | --- | --- |
-| bevy | 37 | 428 | 25 (8 dependency, 17 glob) |
+| bevy | 37 | 429 | 26 (9 dependency, 17 glob) |
 | ruff | 31 | 16 | 15 |
 | helix | 53 | 52 | 1 |
 | bun | 1,229 | 13 | about 1,160 |
-| triptape | 0 | 0 | 0 (1 handled by config) |
+| triptape | 0 | 0 | 1 (formerly handled by config) |
 | tokio | 7 | 6 | 1 (`tokio-test`, optional) |
 | serde, ripgrep | 5, 3 | 5, 3 | 0 |
 
-bevy's 428 are 27 of the first run's findings — its 25 true positives less
-two, and the 4 wasm entries that are the documented transitive-feature case —
-plus 401 the re-enabled check found, all verified: 323 unused `bevy_color`
-palette constants, 73 other items and 5 dependency findings in `benches`. The
-two lost are `bevy_image` and `bevy_log` in `bevy_gizmos_render`, now counted
-as named by a derive whose crate quotes those paths: the price of reading a
-proc macro's output by name. Every remaining finding in the other workspaces was verified in
-the first pass. bun's wall clock went from about 6.6s to 10s, from the second
-resolution of the targets that invoke another crate's macros.
+bevy's 429 are 28 of the first run's findings — its 24 true positives (the
+first pass's 25, less `bevy_log`) and the 4 wasm entries that are the
+documented transitive-feature case — plus 401 the re-enabled check found,
+all verified: 323 unused `bevy_color` palette constants, 73 other items and
+5 dependency findings in `benches`. Every remaining finding in the other workspaces was verified in
+the first pass.
 
