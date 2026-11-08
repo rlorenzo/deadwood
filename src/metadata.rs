@@ -24,7 +24,7 @@ pub struct Metadata {
     /// `rustls-webpki` one named `webpki`, and code spells the *lib* name,
     /// so matching mentions against the package name reports such an entry
     /// unused against code that uses it
-    /// ([#62](https://github.com/rlorenzo/deadwood/issues/62)).
+    /// ([#62](https://github.com/rlorenzo/deadwood-rs/issues/62)).
     ///
     /// Filled by a full `cargo metadata --frozen --all-features` (default
     /// features alone if that fails) when the workspace has a current lockfile and a cached dependency graph — true of any checkout

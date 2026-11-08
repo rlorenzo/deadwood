@@ -220,7 +220,7 @@ const TEST_BUILD_ATTRS: &[&str] = &["test", "bench"];
 /// expansion. Neither refusal leaves the function's mentions attributed as
 /// library code any more: both spellings are an attribute macro to
 /// [`unexpandable_macro`], which hands the item to the opaque context instead
-/// of guessing ([#49](https://github.com/rlorenzo/deadwood/issues/49)).
+/// of guessing ([#49](https://github.com/rlorenzo/deadwood-rs/issues/49)).
 fn test_attribute(attrs: &[syn::Attribute]) -> bool {
     attrs.iter().any(|attr| {
         matches!(attr.meta, syn::Meta::Path(_))
@@ -602,7 +602,7 @@ fn eval(meta: &syn::Meta, world: &World<'_>) -> Truth {
             // is a dev-context build exactly as `cargo test` is — it links
             // the dev-dependencies, and no build a consumer makes sets
             // either cfg. Telling them apart buys nothing any check needs
-            // ([#63](https://github.com/rlorenzo/deadwood/issues/63));
+            // ([#63](https://github.com/rlorenzo/deadwood-rs/issues/63));
             // folding them means `#[cfg(doctest)]` confines to a test build
             // the way `#[cfg(test)]` always has.
             Some("test" | "doctest") => {
@@ -1243,7 +1243,7 @@ mod tests {
     /// and `#[cfg(not(doctest))]` is ordinary code, exactly as
     /// `#[cfg(not(test))]` is.
     ///
-    /// [#63]: https://github.com/rlorenzo/deadwood/issues/63
+    /// [#63]: https://github.com/rlorenzo/deadwood-rs/issues/63
     #[test]
     fn a_cfg_doctest_gate_confines_like_cfg_test() {
         let matrix = Matrix::default();

@@ -65,7 +65,7 @@
 //!   fn twin` in two inline modules of one file differ in nothing else the key
 //!   looks at, so one entry used to suppress both — and a *third* `twin` added
 //!   later was suppressed before it existed
-//!   ([#16](https://github.com/rlorenzo/deadwood/issues/16)). The module path
+//!   ([#16](https://github.com/rlorenzo/deadwood-rs/issues/16)). The module path
 //!   is `crate`-rooted and crate-relative (`crate`, `crate::alpha`), it is what
 //!   [`crate::Finding::module`] carries, and — the property that makes it
 //!   admissible at all — it does not move when code above it does. That is the
@@ -75,7 +75,7 @@
 //!   `#[allow(non_snake_case)] pub fn Group(..)` beside it share a kind, a file,
 //!   a name *and* a module, so one entry covered both and a third same-named
 //!   item added to that module was suppressed before it existed
-//!   ([#30](https://github.com/rlorenzo/deadwood/issues/30)). What separates
+//!   ([#30](https://github.com/rlorenzo/deadwood-rs/issues/30)). What separates
 //!   those two is the namespace Rust binds each name in
 //!   ([`crate::Namespace`]), and it passes the same admissibility test the
 //!   module does: a definition does not change namespace because code around it
@@ -100,7 +100,7 @@
 //! `git mv src/legacy.rs src/legacy/mod.rs` changes no code and no item, and
 //! under the key above it turns every finding in the file into a new one and
 //! every entry recording them into a stale one. A pure rename failing the run
-//! is the defect ([#17](https://github.com/rlorenzo/deadwood/issues/17)).
+//! is the defect ([#17](https://github.com/rlorenzo/deadwood-rs/issues/17)).
 //!
 //! The fix is not rename detection, and nothing here computes a similarity
 //! signal. It is the observation that for an *item* the file is a second name
@@ -175,7 +175,7 @@
 //!
 //! # The four kinds stay out, and that is now an answer rather than a residual
 //!
-//! [#32](https://github.com/rlorenzo/deadwood/issues/32) asked for the two
+//! [#32](https://github.com/rlorenzo/deadwood-rs/issues/32) asked for the two
 //! events this pass declines — a `dead_file` that moved, and a package
 //! directory that moved, which defeats even the item kinds because
 //! [`Packages::holding`] resolves a recorded path by containment and a path in
@@ -368,7 +368,7 @@
 //! read and applied by `main` and by the pre-`module` binary alike, and the
 //! same file with one extra key on each entry makes both of them exit 2 with
 //! ``unknown field `package` ``. That is the bill
-//! [#32](https://github.com/rlorenzo/deadwood/issues/32) was closed rather than
+//! [#32](https://github.com/rlorenzo/deadwood-rs/issues/32) was closed rather than
 //! pay.
 //!
 //! Relaxing the strictness would not fix any of it — the strict reader is the
@@ -1793,7 +1793,7 @@ mod tests {
     }
 
     /// The manifest half of the same event, which is the half
-    /// [#32](https://github.com/rlorenzo/deadwood/issues/32) called the cheap
+    /// [#32](https://github.com/rlorenzo/deadwood-rs/issues/32) called the cheap
     /// one — and whose refusal has a *different cause* than the item kinds'
     /// above, which is worth pinning because the issue's proposed fix turns on
     /// it.

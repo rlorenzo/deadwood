@@ -1,5 +1,5 @@
 //! The reproducer from
-//! [#28](https://github.com/rlorenzo/deadwood/issues/28), and the shapes
+//! [#28](https://github.com/rlorenzo/deadwood-rs/issues/28), and the shapes
 //! around it that must keep their answers.
 //!
 //! Every module below is private, so nothing here is on the public surface by

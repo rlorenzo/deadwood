@@ -8,7 +8,7 @@
 # compiles.
 #
 # `pub use nook::plain;` reaches the same place by a third route
-# ([#28](https://github.com/rlorenzo/deadwood/issues/28)): the re-export *is* a
+# ([#28](https://github.com/rlorenzo/deadwood-rs/issues/28)): the re-export *is* a
 # definition, but there is no item behind it to record an edge to, so what
 # became nameable is everything inside the module. `reexport` carries that form
 # and the four shapes that must not move with it.

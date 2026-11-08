@@ -147,7 +147,7 @@ impl FindingKind {
 /// module. Nothing else on a [`Finding`] tells those two apart — same kind,
 /// same file, same name, same module — so this is what a baseline entry needs
 /// to name one of them without covering the other
-/// ([#30](https://github.com/rlorenzo/deadwood/issues/30)).
+/// ([#30](https://github.com/rlorenzo/deadwood-rs/issues/30)).
 ///
 /// Three values, not two, and the third is a quarter of the `pub` structs in
 /// the corpus: a **unit or tuple** struct binds its name in *both* namespaces,
@@ -991,7 +991,7 @@ fn add_dependency_aliases(
 /// invoked with — and on macOS the standard temp directory reaches its files
 /// through a symlink (`/var` is `/private/var`), so the plain prefix strip
 /// misses and the report printed an absolute path where every other line was
-/// relative ([#53](https://github.com/rlorenzo/deadwood/issues/53)).
+/// relative ([#53](https://github.com/rlorenzo/deadwood-rs/issues/53)).
 /// Canonicalizing both sides settles the spelling; a path that is still not
 /// under the root after that genuinely lives elsewhere, and stays absolute.
 fn relative_to(path: &Path, root: &Path) -> PathBuf {
@@ -1160,7 +1160,7 @@ mod tests {
     /// The display strip must survive the root and the path spelling one
     /// place two ways. macOS hands every test a temp directory behind a
     /// symlink (`/var` is `/private/var`), which is where
-    /// [#53](https://github.com/rlorenzo/deadwood/issues/53) was found — this
+    /// [#53](https://github.com/rlorenzo/deadwood-rs/issues/53) was found — this
     /// builds its own symlink so the case exists on every platform CI runs.
     #[cfg(unix)]
     #[test]

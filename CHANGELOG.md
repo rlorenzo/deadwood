@@ -3,7 +3,7 @@
 Notable changes per release, newest first. The full phase-by-phase record, with
 every decision, its rejected alternatives, and the corpus measurements and
 mutation runs behind it, is in
-[`docs/HISTORY.md`](https://github.com/rlorenzo/deadwood/blob/main/docs/HISTORY.md).
+[`docs/HISTORY.md`](https://github.com/rlorenzo/deadwood-rs/blob/main/docs/HISTORY.md).
 
 ## 1.0.0 — 2026-11-04
 

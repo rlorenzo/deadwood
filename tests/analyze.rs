@@ -316,7 +316,7 @@ fn unresolvable_paths_keep_their_targets_alive() {
 /// through the crate root's glob re-export and a module alias still lands
 /// on the item it names.
 ///
-/// [#77]: https://github.com/rlorenzo/deadwood/issues/77
+/// [#77]: https://github.com/rlorenzo/deadwood-rs/issues/77
 #[test]
 fn a_self_import_does_not_cut_the_paths_beside_it() {
     let analysis = analyze_fixture("selfuse");
@@ -334,7 +334,7 @@ fn a_self_import_does_not_cut_the_paths_beside_it() {
 /// deleting it breaks every one of them ([#73]). The neighbour that registers
 /// nothing still answers for itself.
 ///
-/// [#73]: https://github.com/rlorenzo/deadwood/issues/73
+/// [#73]: https://github.com/rlorenzo/deadwood-rs/issues/73
 #[test]
 fn proc_macro_entry_points_are_never_unused() {
     let analysis = analyze_fixture("procmacro");
@@ -353,7 +353,7 @@ fn proc_macro_entry_points_are_never_unused() {
 /// ([#74]). The neighbours whose attributes rewrite nothing still answer
 /// for themselves.
 ///
-/// [#74]: https://github.com/rlorenzo/deadwood/issues/74
+/// [#74]: https://github.com/rlorenzo/deadwood-rs/issues/74
 #[test]
 fn an_item_under_an_unexpandable_attribute_macro_is_never_unused() {
     let analysis = analyze_fixture("attrexport");
@@ -514,7 +514,7 @@ fn a_librarys_public_surface_keeps_what_it_calls_alive() {
 
 /// `mod inner; pub use inner::*;` puts `inner`'s items on a library's public
 /// surface, and the root set follows the glob there
-/// ([#25](https://github.com/rlorenzo/deadwood/issues/25)). Rooting *removes*
+/// ([#25](https://github.com/rlorenzo/deadwood-rs/issues/25)). Rooting *removes*
 /// findings, so the assertions that matter most here are the ones that must
 /// still be made.
 #[test]
@@ -586,7 +586,7 @@ fn a_pub_use_glob_puts_what_it_re_exports_on_the_public_surface() {
 
 /// `mod nook; pub use nook::sub;` puts `sub`'s items on a library's public
 /// surface by a third route, beside the glob one
-/// ([#28](https://github.com/rlorenzo/deadwood/issues/28)). This reports
+/// ([#28](https://github.com/rlorenzo/deadwood-rs/issues/28)). This reports
 /// *less*, so the assertions that matter most are again the ones that must
 /// still be made — and the whole of `reexport`'s report is here, since no
 /// registry crate produces a finding this rule can move.
@@ -1668,7 +1668,7 @@ fn a_dev_dependency_the_library_names_is_reported_as_belonging_in_dependencies()
 /// dev-dependency" — is false on both counts for a doubled crate: the
 /// `[dependencies]` copy links it and the manifest compiles. What is true of
 /// `stale_dev_copy_crate` is that the copy adds nothing, and the message says
-/// exactly that ([#61](https://github.com/rlorenzo/deadwood/issues/61)).
+/// exactly that ([#61](https://github.com/rlorenzo/deadwood-rs/issues/61)).
 #[test]
 fn a_stale_dev_copy_is_worded_as_a_duplicate_rather_than_a_move() {
     let analysis = analyze_fixture("depkinds");
@@ -1723,7 +1723,7 @@ fn a_dev_dependency_both_the_library_and_the_tests_name_still_belongs_in_depende
 /// `serde_core`. Without this the library appears to name its own
 /// dev-dependency, which phase 21's claim turns into a finding invented against
 /// a manifest that compiles
-/// ([#48](https://github.com/rlorenzo/deadwood/issues/48)).
+/// ([#48](https://github.com/rlorenzo/deadwood-rs/issues/48)).
 #[test]
 fn a_renamed_extern_crate_does_not_charge_its_mentions_to_the_entry_it_shadows() {
     let analysis = analyze_fixture("depkinds");
@@ -2040,7 +2040,7 @@ fn an_attribute_deadwood_cannot_expand_does_not_confine_a_dependency_to_the_test
     }
 }
 
-/// The finding [#49](https://github.com/rlorenzo/deadwood/issues/49) filed as
+/// The finding [#49](https://github.com/rlorenzo/deadwood-rs/issues/49) filed as
 /// invented, in every spelling the fixture pins. A `#[tokio::test]`-shaped
 /// macro expands to the built-in `#[test]`, so a `[dev-dependencies]` entry
 /// named only from the function it owns is correctly declared — and phase 21's
@@ -2123,7 +2123,7 @@ fn an_attribute_macro_in_a_dev_target_changes_nothing() {
     );
 }
 
-/// The doubled manifest [#55](https://github.com/rlorenzo/deadwood/issues/55)
+/// The doubled manifest [#55](https://github.com/rlorenzo/deadwood-rs/issues/55)
 /// filed, in both of its spellings. `doubled_features_crate` is declared in
 /// both tables and named by both kinds of code: the library mentions justify
 /// the `[dependencies]` copy, the `tests/it.rs` mention justifies the dev
@@ -3881,7 +3881,7 @@ fn both_writing_flags_round_trip_the_namespace_of_every_entry() {
 }
 
 /// The shape `windows-sys` has, and the whole of what
-/// [#39](https://github.com/rlorenzo/deadwood/issues/39) is: a crate root that
+/// [#39](https://github.com/rlorenzo/deadwood-rs/issues/39) is: a crate root that
 /// reaches its module tree through `include!("...")`. Every file under it is
 /// compiled by the build that actually happens, so none of them is dead — and
 /// that includes the ones the included file declares with `mod`, which is 245
@@ -4410,7 +4410,7 @@ fn dead_files_are_found_where_the_manifest_puts_the_crate_root() {
 }
 
 /// The module tree a macro token stream declares
-/// ([#60](https://github.com/rlorenzo/deadwood/issues/60)): tokio's 381
+/// ([#60](https://github.com/rlorenzo/deadwood-rs/issues/60)): tokio's 381
 /// dead-file findings were live subtrees behind `cfg_fs!`-style wrappers,
 /// serde's a tree written inside a `macro_rules!` body, `rustc_target`'s 330
 /// the idents of `supported_targets!`. The `macromods` fixture holds all
@@ -4459,7 +4459,7 @@ fn a_mod_declared_only_in_a_macro_token_stream_spares_its_file() {
     );
 }
 
-/// The md-5 shape ([#62](https://github.com/rlorenzo/deadwood/issues/62))
+/// The md-5 shape ([#62](https://github.com/rlorenzo/deadwood-rs/issues/62))
 /// through a workspace member: `app` declares `spoked` by package name and
 /// spells its *lib* name (`wheel`) in code. A member's lib rename is visible
 /// with or without a resolvable dependency graph, so the entry is never

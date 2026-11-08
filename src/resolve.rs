@@ -658,7 +658,7 @@ impl SymbolTable {
         // in a scope that was never fully read, and the target it names is
         // reported dead ([#77]).
         //
-        // [#77]: https://github.com/rlorenzo/deadwood/issues/77
+        // [#77]: https://github.com/rlorenzo/deadwood-rs/issues/77
         for (krate, unit) in crates.iter().enumerate() {
             for file in &unit.spliced {
                 let Some(ast) = &file.ast else { continue };
@@ -939,7 +939,7 @@ impl SymbolTable {
     /// separately deletable and separately located, and the alternative needs
     /// a name for the group — which the baseline keys on, and which would move
     /// whenever a member joined or left it
-    /// ([#16](https://github.com/rlorenzo/deadwood/issues/16) is already open
+    /// ([#16](https://github.com/rlorenzo/deadwood-rs/issues/16) is already open
     /// on that key being weaker than it looks). Falling out of the
     /// per-definition rule is also what makes the answer identical run to run.
     ///
@@ -1035,7 +1035,7 @@ impl SymbolTable {
             // item nothing names is reported however rooted it is; this claim is
             // only ever made about items something does name. The surface filter
             // was phase 10's second copy of the rule
-            // ([#25](https://github.com/rlorenzo/deadwood/issues/25)), and it is
+            // ([#25](https://github.com/rlorenzo/deadwood-rs/issues/25)), and it is
             // gone because the root set now answers for it.
             .filter(|def| {
                 let site = site(def);
@@ -1225,7 +1225,7 @@ impl SymbolTable {
     /// and reaching it reaches what it names. A named `pub use` of a **module**
     /// is a different fact and is the third edge below: there is no item to
     /// record an edge to, and what became nameable is everything *inside* the
-    /// module ([#28](https://github.com/rlorenzo/deadwood/issues/28)).
+    /// module ([#28](https://github.com/rlorenzo/deadwood-rs/issues/28)).
     ///
     /// The closure follows three edges, and needs all three. A `pub use` glob
     /// reaches the module it names; a named `pub use` reaches the module it
@@ -1249,7 +1249,7 @@ impl SymbolTable {
     /// rather than filtering a second time. Phase 10 consulted a second copy of
     /// this rule from the last of those alone, where it could only remove a
     /// finding; folding it into the root set is
-    /// [#25](https://github.com/rlorenzo/deadwood/issues/25), and it is what
+    /// [#25](https://github.com/rlorenzo/deadwood-rs/issues/25), and it is what
     /// keeps the two from drifting.
     ///
     /// A glob whose target is *outside* the workspace reaches nothing here — it
@@ -3054,7 +3054,7 @@ fn describe(
 /// read `use a::{self};` — a binding whose target is spelled with its own
 /// name — as a cycle bottoming out at the alias depth cap, instead of the
 /// crate the head goes on to name once the import steps aside
-/// ([#77](https://github.com/rlorenzo/deadwood/issues/77)). Filtering to
+/// ([#77](https://github.com/rlorenzo/deadwood-rs/issues/77)). Filtering to
 /// empty answers [`Step::Absent`], which is what routes the head to the
 /// extern fallback the way rustc itself resolves it.
 fn without(step: Step, skip: Option<usize>) -> Step {
@@ -3106,7 +3106,7 @@ fn has_skip_attr(attrs: &[syn::Attribute]) -> bool {
     // changes nothing below the item; it silences only the claim made
     // about the item itself.
     //
-    // [#74]: https://github.com/rlorenzo/deadwood/issues/74
+    // [#74]: https://github.com/rlorenzo/deadwood-rs/issues/74
     if crate::cfg::unexpandable_macro(attrs) {
         return true;
     }
@@ -3121,7 +3121,7 @@ fn has_skip_attr(attrs: &[syn::Attribute]) -> bool {
         // macro ([#73]). Already a root (`ENTRY_POINT_ATTRS`); this keeps
         // the entry point itself off the report.
         //
-        // [#73]: https://github.com/rlorenzo/deadwood/issues/73
+        // [#73]: https://github.com/rlorenzo/deadwood-rs/issues/73
         if attr_is(
             attr,
             &["proc_macro", "proc_macro_derive", "proc_macro_attribute"],
@@ -3134,7 +3134,7 @@ fn has_skip_attr(attrs: &[syn::Attribute]) -> bool {
         // advice an unused-item finding gives — silently drops the README's
         // doctest coverage ([#63]).
         //
-        // [#63]: https://github.com/rlorenzo/deadwood/issues/63
+        // [#63]: https://github.com/rlorenzo/deadwood-rs/issues/63
         if requires_doctest(attr) {
             return true;
         }
@@ -3223,7 +3223,7 @@ fn entry_point_attr(attrs: &[syn::Attribute], test_context: bool) -> EntryPoint 
     // ReadmeDoctests;`, which exists to run a README's examples as doctests
     // and is referenced by nothing, deliberately; reporting it tells a
     // project to delete its README's test coverage
-    // ([#63](https://github.com/rlorenzo/deadwood/issues/63)). Rooted in both
+    // ([#63](https://github.com/rlorenzo/deadwood-rs/issues/63)). Rooted in both
     // walks, like the linker exports: the consumer is a tool, not the tests.
     if attrs.iter().any(requires_doctest) {
         return EntryPoint::NonTest;
@@ -3295,7 +3295,7 @@ mod tests {
     /// findings in every crate using that idiom — and a feature merely
     /// *named* "doctest" is a string, not the cfg.
     ///
-    /// [#63]: https://github.com/rlorenzo/deadwood/issues/63
+    /// [#63]: https://github.com/rlorenzo/deadwood-rs/issues/63
     #[test]
     fn a_cfg_gate_requires_doctest_only_as_a_bare_path_outside_not() {
         let file: syn::File = syn::parse_str(
@@ -4366,7 +4366,7 @@ mod tests {
     /// and may have emitted anything beside it — bun's `#[bun_jsc::host_fn]`
     /// writes an `extern "C"` shim, giving the item a caller no path in any
     /// workspace can spell — so the item is never reported
-    /// ([#74](https://github.com/rlorenzo/deadwood/issues/74)). What its body
+    /// ([#74](https://github.com/rlorenzo/deadwood-rs/issues/74)). What its body
     /// names was already alive by the opaque rule, and its inert-attributed
     /// neighbours still answer for themselves.
     #[test]
@@ -4528,7 +4528,7 @@ mod tests {
     // matter more than the ones that go quiet.
 
     /// The reproducer from
-    /// [#25](https://github.com/rlorenzo/deadwood/issues/25): a consumer can
+    /// [#25](https://github.com/rlorenzo/deadwood-rs/issues/25): a consumer can
     /// write `globgap::thing`, so the fact that its only in-workspace referrer
     /// is dead is not evidence about it. `helper`, which nothing names at all,
     /// is right and stays.
@@ -4764,7 +4764,7 @@ mod tests {
 
     // -- the public surface, through a named `pub use` of a module ----------
     //
-    // The third edge ([#28](https://github.com/rlorenzo/deadwood/issues/28)).
+    // The third edge ([#28](https://github.com/rlorenzo/deadwood-rs/issues/28)).
     // A named `pub use` of an *item* is an edge the reference walk already
     // records; a named `pub use` of a **module** has no item to record an edge
     // to, and what became nameable is everything inside it. Every case below
@@ -4772,7 +4772,7 @@ mod tests {
     // ancestor, since `mod sub; pub use sub as api;` is E0365.
 
     /// The reproducer from
-    /// [#28](https://github.com/rlorenzo/deadwood/issues/28): a consumer can
+    /// [#28](https://github.com/rlorenzo/deadwood-rs/issues/28): a consumer can
     /// write `fixture::sub::thing`, so the fact that its only in-workspace
     /// referrer is dead is not evidence about it.
     #[test]
@@ -5128,7 +5128,7 @@ mod tests {
     /// head, so the target resolves to the extern crate, exactly as rustc
     /// reads it; letting the import answer would chase itself to the alias
     /// depth cap and cut every later `fixture::`-headed path short
-    /// ([#77](https://github.com/rlorenzo/deadwood/issues/77)).
+    /// ([#77](https://github.com/rlorenzo/deadwood-rs/issues/77)).
     #[test]
     fn a_self_import_of_a_crate_is_the_crate() {
         let dep = unit(&[("", "pub mod m {\n    pub fn f() -> u32 { 1 }\n}\n")]);
@@ -5165,7 +5165,7 @@ mod tests {
     /// a path in one that leans on its own import —
     /// `Output::enable()` under `use fixture::Output;` — must resolve, or
     /// the target it names is reported dead out of a scope that was never
-    /// fully read ([#77](https://github.com/rlorenzo/deadwood/issues/77)).
+    /// fully read ([#77](https://github.com/rlorenzo/deadwood-rs/issues/77)).
     #[test]
     fn a_spliced_files_imports_resolve_its_paths() {
         let dep = unit(&[(
@@ -5345,7 +5345,7 @@ mod tests {
     /// the derive or attribute the function registers, never the function,
     /// so no resolved path in any workspace will ever name it — and deleting
     /// it, the advice the finding gives, breaks every crate using the macro
-    /// ([#73](https://github.com/rlorenzo/deadwood/issues/73)).
+    /// ([#73](https://github.com/rlorenzo/deadwood-rs/issues/73)).
     #[test]
     fn a_proc_macro_entry_point_is_quiet_and_keeps_what_it_reaches() {
         for attribute in [

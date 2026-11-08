@@ -23,7 +23,7 @@ whole rust-lang/rust workspace in seconds.
 
 cargo-udeps needs nightly and a full build. Deadwood needs neither, and it can
 record a baseline so an existing codebase only fails on new findings.
-[`docs/ANALYSIS.md`](https://github.com/rlorenzo/deadwood/blob/main/docs/ANALYSIS.md)
+[`docs/ANALYSIS.md`](https://github.com/rlorenzo/deadwood-rs/blob/main/docs/ANALYSIS.md)
 has the exact rule behind each check.
 
 ## Install
@@ -38,10 +38,10 @@ $ cargo install deadwood-rs
 Or build from the repository:
 
 ```console
-$ cargo install --locked --git https://github.com/rlorenzo/deadwood
+$ cargo install --locked --git https://github.com/rlorenzo/deadwood-rs
 ```
 
-Each [GitHub release](https://github.com/rlorenzo/deadwood/releases) has prebuilt
+Each [GitHub release](https://github.com/rlorenzo/deadwood-rs/releases) has prebuilt
 binaries with SHA-256 checksums for Linux (x86_64, aarch64), macOS (Intel, Apple
 silicon), and Windows.
 
@@ -91,12 +91,12 @@ Three design choices matter before you run it:
   was measured against large workspaces, including rust-lang/rust, tokio, serde,
   bevy, ruff, and bun. Each misfire there became a fix and a regression fixture,
   recorded in
-  [`docs/HISTORY.md`](https://github.com/rlorenzo/deadwood/blob/main/docs/HISTORY.md).
+  [`docs/HISTORY.md`](https://github.com/rlorenzo/deadwood-rs/blob/main/docs/HISTORY.md).
 - **Reporting only.** Deadwood never rewrites your code, and won't until its
   precision is proven in the field.
 
 Some jobs belong to other tools. Copy-paste detection is [jscpd](https://jscpd.dev)'s
-([out of scope](https://github.com/rlorenzo/deadwood/blob/main/docs/SCOPE.md) for now),
+([out of scope](https://github.com/rlorenzo/deadwood-rs/blob/main/docs/SCOPE.md) for now),
 security advisories are [`cargo-audit`](https://crates.io/crates/cargo-audit)'s,
 and license policy is [`cargo-deny`](https://crates.io/crates/cargo-deny)'s. If
 unused dependencies are your only question,
@@ -119,13 +119,13 @@ No issues found.
 
 Matching survives line drift and, for item findings, moved files. Entries for
 code you've since deleted are reported as stale, never as failures. See
-[`docs/BASELINE.md`](https://github.com/rlorenzo/deadwood/blob/main/docs/BASELINE.md).
+[`docs/BASELINE.md`](https://github.com/rlorenzo/deadwood-rs/blob/main/docs/BASELINE.md).
 
 ## GitHub Action
 
 ```yaml
 - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-- uses: rlorenzo/deadwood@<release-commit-sha> # v1.0.0
+- uses: rlorenzo/deadwood-rs@<release-commit-sha> # v1.0.0
   with:
     path: .       # workspace to analyze (default `.`)
     args: ""      # extra arguments for `deadwood check`, e.g. `--json`
@@ -160,7 +160,7 @@ features = ["default", "serde"]
 Mistakes, including unknown keys, are exit 2 rather than silently ignored. For
 libraries with outside consumers, treat unused-pub findings as advisory until the
 crate is listed under `[public-api]`. Every setting is in
-[`docs/CONFIGURATION.md`](https://github.com/rlorenzo/deadwood/blob/main/docs/CONFIGURATION.md).
+[`docs/CONFIGURATION.md`](https://github.com/rlorenzo/deadwood-rs/blob/main/docs/CONFIGURATION.md).
 
 ## Limitations
 
@@ -169,7 +169,7 @@ and trait dispatch, so it misses some dead code by design. It can't see consumer
 outside the workspace, so a `pub` item only they use looks dead. A dependency
 that's named by no code, such as one declared to turn on a transitive feature, is
 reported until you list it under `[dependencies]`. The full list is in
-[`docs/LIMITATIONS.md`](https://github.com/rlorenzo/deadwood/blob/main/docs/LIMITATIONS.md).
+[`docs/LIMITATIONS.md`](https://github.com/rlorenzo/deadwood-rs/blob/main/docs/LIMITATIONS.md).
 
 ## Development
 
@@ -180,19 +180,19 @@ $ scripts/check.sh --fix # apply rustfmt + clippy fixes
 ```
 
 CI runs the same gate on every push and PR. See
-[CONTRIBUTING.md](https://github.com/rlorenzo/deadwood/blob/main/CONTRIBUTING.md)
+[CONTRIBUTING.md](https://github.com/rlorenzo/deadwood-rs/blob/main/CONTRIBUTING.md)
 for how changes are shaped, and
-[`docs/SCOPE.md`](https://github.com/rlorenzo/deadwood/blob/main/docs/SCOPE.md) for
+[`docs/SCOPE.md`](https://github.com/rlorenzo/deadwood-rs/blob/main/docs/SCOPE.md) for
 what's in and out of scope.
 
 ## Getting help
 
 Questions, bugs, and feature requests go through
-[GitHub issues](https://github.com/rlorenzo/deadwood/issues). For a bug, a small
+[GitHub issues](https://github.com/rlorenzo/deadwood-rs/issues). For a bug, a small
 fixture package that reproduces it is ideal. The
-[code of conduct](https://github.com/rlorenzo/deadwood/blob/main/CODE_OF_CONDUCT.md)
+[code of conduct](https://github.com/rlorenzo/deadwood-rs/blob/main/CODE_OF_CONDUCT.md)
 covers the project's spaces.
 
 ## License
 
-MIT. See [LICENSE](https://github.com/rlorenzo/deadwood/blob/main/LICENSE).
+MIT. See [LICENSE](https://github.com/rlorenzo/deadwood-rs/blob/main/LICENSE).

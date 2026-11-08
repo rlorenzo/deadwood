@@ -97,8 +97,8 @@ allowlist, and a dependency allowlist. The decisions that shaped it:
   dependency, because the four wildcards the settings need are the whole
   requirement.
 
-Closes [#4](https://github.com/rlorenzo/deadwood/issues/4) and
-[#9](https://github.com/rlorenzo/deadwood/issues/9).
+Closes [#4](https://github.com/rlorenzo/deadwood-rs/issues/4) and
+[#9](https://github.com/rlorenzo/deadwood-rs/issues/9).
 
 ## Phase 4 — `cfg` awareness (shipped)
 
@@ -166,7 +166,7 @@ shape was chosen for that risk rather than for coverage.
   finding changed, and not one newly-judged dependency entry turned into a
   false positive.
 
-Closes [#5](https://github.com/rlorenzo/deadwood/issues/5).
+Closes [#5](https://github.com/rlorenzo/deadwood-rs/issues/5).
 
 ## Phase 5 — misplaced dependency kinds (shipped)
 
@@ -209,7 +209,7 @@ The phase is entirely about noise, so the decisions are the deliverable.
   answer. A dev-dependency the library appears to name is never reported: that
   manifest does not compile, so a mis-attribution on our side is the likelier
   explanation. The known one was
-  [#14](https://github.com/rlorenzo/deadwood/issues/14) — a `#[cfg(test)] mod
+  [#14](https://github.com/rlorenzo/deadwood-rs/issues/14) — a `#[cfg(test)] mod
   tests;` whose gate lives in the parent file — closed in phase 7 below.
   Reporting only where the evidence is positive is what kept that gap from
   becoming a false positive while it was open.
@@ -220,7 +220,7 @@ The phase is entirely about noise, so the decisions are the deliverable.
   two that were not are named only in a doc example and inside a
   `macro_rules!` body, exactly as designed.
 
-Closes [#10](https://github.com/rlorenzo/deadwood/issues/10).
+Closes [#10](https://github.com/rlorenzo/deadwood-rs/issues/10).
 
 ## Phase 6 — baseline file (shipped)
 
@@ -261,7 +261,7 @@ several corollaries.
   reporting the (n+1)th as new was rejected: with the line out of the key we
   cannot say which occurrence is new, so the report would point at a line that
   is very likely baselined — a wrong finding where this is a missed one
-  ([#16](https://github.com/rlorenzo/deadwood/issues/16)).
+  ([#16](https://github.com/rlorenzo/deadwood-rs/issues/16)).
 - **Stale entries are reported and never fail the run.** The exit code follows
   severity and nothing else, a fixed finding has no severity, and failing a
   build because a developer deleted dead code is how a tool gets uninstalled.
@@ -278,9 +278,9 @@ several corollaries.
   genuine `unsatisfiable_cfg` was recorded, went quiet, survived being pushed 30
   lines down the file, went stale when the gate was deleted, and pruned away.
 
-Closes [#6](https://github.com/rlorenzo/deadwood/issues/6), and files the two
-gaps it leaves: [#16](https://github.com/rlorenzo/deadwood/issues/16), a key two
-findings share, and [#17](https://github.com/rlorenzo/deadwood/issues/17), a
+Closes [#6](https://github.com/rlorenzo/deadwood-rs/issues/6), and files the two
+gaps it leaves: [#16](https://github.com/rlorenzo/deadwood-rs/issues/16), a key two
+findings share, and [#17](https://github.com/rlorenzo/deadwood-rs/issues/17), a
 moved file un-baselining everything in it.
 
 ## Phase 7 — a `mod` declaration's gate reaches the file it names (shipped)
@@ -315,7 +315,7 @@ named went unreported. Module resolution now carries the answer with the file
   byte-identical to phase 6 across every other fixture and the 34 crates in the
   local registry, and on Deadwood itself.
 
-Closes [#14](https://github.com/rlorenzo/deadwood/issues/14).
+Closes [#14](https://github.com/rlorenzo/deadwood-rs/issues/14).
 
 ## Phase 8 — lexical scope tracking (shipped)
 
@@ -378,7 +378,7 @@ One nuance in the issue's example does *not* land here. `pub struct Cfg;` in
 dead only because `entry` is, which is reachability — item 1 below — and not
 lexical scope. The `helper` half of that example is reported.
 
-Closes [#8](https://github.com/rlorenzo/deadwood/issues/8).
+Closes [#8](https://github.com/rlorenzo/deadwood-rs/issues/8).
 
 ## Phase 9 — reachability, not reference counting (shipped)
 
@@ -432,7 +432,7 @@ that.
 - **A dead cycle reports every member, not the group once.** Each member is
   separately deletable and separately located; a group finding would need a
   name, the baseline keys on names, and a group's name moves whenever a member
-  joins or leaves it ([#16](https://github.com/rlorenzo/deadwood/issues/16) is
+  joins or leaves it ([#16](https://github.com/rlorenzo/deadwood-rs/issues/16) is
   already open on that key being weaker than it looks). Falling out of the
   per-definition rule is also what makes the answer identical run to run.
 - **An `impl` block hangs off its self type and, where we can resolve it, its
@@ -467,7 +467,7 @@ that.
   `impl` owner, the `use` attribution, the opaque-is-a-root rule, the
   second-referrer edge — and all fifteen were caught by a named test.
 
-Closes [#21](https://github.com/rlorenzo/deadwood/issues/21).
+Closes [#21](https://github.com/rlorenzo/deadwood-rs/issues/21).
 
 ## Phase 10 — a "test-only item" finding kind (shipped)
 
@@ -509,7 +509,7 @@ fifty lines — so the numbers are first.
   folded into the root set here: rooting those items changes what
   `unused_pub_item` says about the code naming them, which is a behavior change
   to a shipped kind and wanted its own measurement. It was filed as
-  [#25](https://github.com/rlorenzo/deadwood/issues/25), with the
+  [#25](https://github.com/rlorenzo/deadwood-rs/issues/25), with the
   false-positive it already caused, and phase 11 below is where it moved — so
   the exclusion described here is gone, and this kind now reads the answer off
   the root set like every other.
@@ -601,14 +601,14 @@ copy of a rule `src/cfg.rs` already owns. Simulating the fix with a
 deliberately over-broad predicate changed **not one finding** across the
 fixtures, the registry crates and Deadwood itself, so it is filed with that
 number in it rather than built on a hunch
-([#27](https://github.com/rlorenzo/deadwood/issues/27)). Phase 14 closed it,
+([#27](https://github.com/rlorenzo/deadwood-rs/issues/27)). Phase 14 closed it,
 and on a different number: that one measures the *output*, which for a
 missed-finding gap is exactly what cannot see the cost.
 
-Closes [#23](https://github.com/rlorenzo/deadwood/issues/23), and files the two
-gaps it leaves: [#25](https://github.com/rlorenzo/deadwood/issues/25), a glob
+Closes [#23](https://github.com/rlorenzo/deadwood-rs/issues/23), and files the two
+gaps it leaves: [#25](https://github.com/rlorenzo/deadwood-rs/issues/25), a glob
 re-export the public-surface rule does not follow, and
-[#27](https://github.com/rlorenzo/deadwood/issues/27), the inline `#[cfg(test)]
+[#27](https://github.com/rlorenzo/deadwood-rs/issues/27), the inline `#[cfg(test)]
 mod` above.
 
 ## Phase 11 — a `pub use` glob is public surface (shipped)
@@ -713,7 +713,7 @@ closure's two edges dropped, each edge's `pub` half dropped (`use` for `pub
 use`, `mod` for `pub mod`), the library check, the seed set, and the `is_pub`
 half of the surface root — and all nine were caught by a named test.
 
-Closes [#25](https://github.com/rlorenzo/deadwood/issues/25).
+Closes [#25](https://github.com/rlorenzo/deadwood-rs/issues/25).
 
 ## Phase 12 — a baseline entry a same-named neighbour cannot share (shipped)
 
@@ -753,7 +753,7 @@ migration is most of what the phase is.
   2 and 3, twice each. Those are two different items in one module, separated
   only by Rust's namespaces, which nothing in the key models. That residual is
   filed rather than guessed at
-  ([#30](https://github.com/rlorenzo/deadwood/issues/30)).
+  ([#30](https://github.com/rlorenzo/deadwood-rs/issues/30)).
 - **Where the module lives, and this was the phase's real decision.** On
   `Finding`, which means `--json` grows a key. The alternative — the field on the
   baseline entry alone — breaks the invariant the whole format rests on, that an
@@ -835,8 +835,8 @@ spelled as an empty path, the module path truncated so inline `mod`s stop
 separating, and an unqualified entry made a different shared key from a qualified
 one — and all fourteen were caught by a named test.
 
-Closes [#16](https://github.com/rlorenzo/deadwood/issues/16), and files the
-residual it leaves: [#30](https://github.com/rlorenzo/deadwood/issues/30), two
+Closes [#16](https://github.com/rlorenzo/deadwood-rs/issues/16), and files the
+residual it leaves: [#30](https://github.com/rlorenzo/deadwood-rs/issues/30), two
 definitions that share a file, a name *and* a module.
 
 ## Phase 13 — a baseline entry that survives a moved file (shipped)
@@ -925,7 +925,7 @@ number that separates them is what the phase turns on.
   dependency entry recorded against another manifest behave exactly as they did
   before this phase; `unsatisfiable_cfg` is out of range by the same rule and for
   the same reason — it names a gate site, not an item. The residual is filed
-  ([#32](https://github.com/rlorenzo/deadwood/issues/32)), including the half of
+  ([#32](https://github.com/rlorenzo/deadwood-rs/issues/32)), including the half of
   it that is cheap — a package that moves keeps its name, and only the entry not
   recording that name stops it being matchable — and the half that is not, which
   is `dead_file` and wants a content signal and its own argument. One more
@@ -949,8 +949,8 @@ that carries a module also carries a name, so an entry that lost the requirement
 still has nothing to pair with. That is the trap phase 10 hit, reported instead
 of hidden.
 
-Closes [#17](https://github.com/rlorenzo/deadwood/issues/17), and files the
-residual it leaves: [#32](https://github.com/rlorenzo/deadwood/issues/32), the
+Closes [#17](https://github.com/rlorenzo/deadwood-rs/issues/17), and files the
+residual it leaves: [#32](https://github.com/rlorenzo/deadwood-rs/issues/32), the
 kinds with no item identity, and a package directory that moves.
 
 ## Phase 14 — the two spellings of a `#[cfg(test)] mod` agree (shipped)
@@ -1054,7 +1054,7 @@ than reported as a catch: dropping the `test_only` filter from
 `confined_inline_mods` while leaving the unconfined subtraction in place
 removes exactly the entries it removes.
 
-Closes [#27](https://github.com/rlorenzo/deadwood/issues/27).
+Closes [#27](https://github.com/rlorenzo/deadwood-rs/issues/27).
 
 ## Phase 15 — a named `pub use` of a module is public surface (shipped)
 
@@ -1173,7 +1173,7 @@ mutation that isolates this phase's half of the second one is "widen the root
 set but not the re-export filter", and that is caught by this phase's tests
 alone.
 
-Closes [#28](https://github.com/rlorenzo/deadwood/issues/28).
+Closes [#28](https://github.com/rlorenzo/deadwood-rs/issues/28).
 
 ## Phase 16 — a baseline entry that names one of two same-named neighbours (shipped)
 
@@ -1304,7 +1304,7 @@ Rust separates those two by.
   which namespaces its target occupies, so a reportable `pub use` of a braced
   struct beside a `pub fn` of that name in one module — which compiles — still
   shares a key. Zero occurrences in the corpus, and filed rather than guessed at
-  ([#37](https://github.com/rlorenzo/deadwood/issues/37)).
+  ([#37](https://github.com/rlorenzo/deadwood-rs/issues/37)).
 
 Recall was checked by mutation: twenty-two inversions — the namespace dropped
 from the finding's key, from the entry's key and from what is written; the field
@@ -1325,8 +1325,8 @@ other side: "a `mod` declaration binds a value" is invisible in every output,
 because a `mod` is never reportable, and the only thing that catches it is the
 kind-to-namespace table test written for exactly that reason.
 
-Closes [#30](https://github.com/rlorenzo/deadwood/issues/30), and files the
-residual it leaves: [#37](https://github.com/rlorenzo/deadwood/issues/37), a
+Closes [#30](https://github.com/rlorenzo/deadwood-rs/issues/30), and files the
+residual it leaves: [#37](https://github.com/rlorenzo/deadwood-rs/issues/37), a
 `use` alias claiming both namespaces because resolution does not say which.
 
 ## Phase 17 — the identity a moved dead file does not have (measured; #32 closed, behaviour unchanged)
@@ -1336,7 +1336,7 @@ item. Four kinds have no identity a move preserves — `dead_file`, the two
 dependency kinds, `unsatisfiable_cfg` — and a **package directory** that moves
 defeats even the item kinds, because an entry's package is resolved by
 containment and a path in no package resolves to nothing.
-[#32](https://github.com/rlorenzo/deadwood/issues/32) asked for both. This phase
+[#32](https://github.com/rlorenzo/deadwood-rs/issues/32) asked for both. This phase
 measured both and closed it as working as intended. No behaviour changed; the
 boundary moved from prose into fixtures, and the design the next phase would
 start from is written down below rather than dismissed in a line.
@@ -1361,7 +1361,7 @@ made on different evidence.
   compiled. A population of invented findings cannot be evidence for how often a
   *real* finding is moved, and quoting 70% without saying so would be the
   misleading kind of measurement. Filed as its own defect
-  ([#39](https://github.com/rlorenzo/deadwood/issues/39)) — it is the largest
+  ([#39](https://github.com/rlorenzo/deadwood-rs/issues/39)) — it is the largest
   single source of false positives the corpus has ever shown, and it was found
   by measuring for something else. The roadmap's "88 of 219" predates the
   lockfile change and is replaced by the 80 of 208 above. **Phase 18 closed
@@ -1488,9 +1488,9 @@ actually proposes, which had one unit test between them before and now have a
 fixture as well. Reporting that the other way round would be claiming credit for
 phase 13's coverage.
 
-Closes [#32](https://github.com/rlorenzo/deadwood/issues/32) as working as
+Closes [#32](https://github.com/rlorenzo/deadwood-rs/issues/32) as working as
 intended, and files what measuring for it turned up:
-[#39](https://github.com/rlorenzo/deadwood/issues/39), an `include!`-ed module
+[#39](https://github.com/rlorenzo/deadwood-rs/issues/39), an `include!`-ed module
 tree reported dead, 246 findings in one crate.
 
 ## Phase 18 — the module tree an `include!` splices in (shipped)
@@ -1504,7 +1504,7 @@ was findings *invented* rather than missed. The module tree now follows a
 literal-path `include!`, and the file it names plus everything a `mod` chain
 from that file reaches is not a dead file.
 
-**This phase went before [#37](https://github.com/rlorenzo/deadwood/issues/37),
+**This phase went before [#37](https://github.com/rlorenzo/deadwood-rs/issues/37),
 and the roadmap said the opposite.** #39 was item 2 on the Next list and #37 was
 item 1, which contradicts the rule phase 15 stated — *"#27 lost findings; this
 one invents them, which is the direction this project cares about most, so a
@@ -1657,7 +1657,7 @@ Output is unchanged — 360 artefacts over the 60 targets, byte-identical — an
 that is the point: this is the one value in the phase that a test has to
 defend, because nothing else does.
 
-Closes [#39](https://github.com/rlorenzo/deadwood/issues/39).
+Closes [#39](https://github.com/rlorenzo/deadwood-rs/issues/39).
 
 ## Phase 19 — what a `use` alias actually binds (shipped)
 
@@ -1670,7 +1670,7 @@ everything. A second pass over alias definitions, after the table exists, now
 walks each target with the same walker the marking pass uses and records what
 the target binds. Everything it cannot be certain of keeps `Both`.
 
-**Three of [#37](https://github.com/rlorenzo/deadwood/issues/37)'s claims were
+**Three of [#37](https://github.com/rlorenzo/deadwood-rs/issues/37)'s claims were
 wrong and one was stale. All four were checked before anything was built, and
 the third is the reason this phase's fixture is not the one the issue asks
 for.**
@@ -1830,7 +1830,7 @@ for both alias kinds leaves no second rule to drift, and
 defend it. Phase 18's lesson is the precedent: a value no output could see was
 wrong there and review found it.
 
-Closes [#37](https://github.com/rlorenzo/deadwood/issues/37).
+Closes [#37](https://github.com/rlorenzo/deadwood-rs/issues/37).
 
 ## Phase 20 — a `#[test]` function is test code (shipped)
 
@@ -1843,9 +1843,9 @@ wherever it sits"*, which was true and incomplete. This phase closes the gap:
 `#[test]` and `#[bench]` confine the function they sit on, so what such a
 function names is dev code with no `#[cfg(test)]` anywhere near it.
 
-**This phase is [#44](https://github.com/rlorenzo/deadwood/issues/44), which it
+**This phase is [#44](https://github.com/rlorenzo/deadwood-rs/issues/44), which it
 filed, and it does not close
-[#42](https://github.com/rlorenzo/deadwood/issues/42), which was item 1 on the
+[#42](https://github.com/rlorenzo/deadwood-rs/issues/42), which was item 1 on the
 Next list.** #42 asks for a measurement before anything is built and names the
 answer it expects — zero `[dev-dependencies]` entries the library appears to
 name, which would be the argument for closing it. The measurement was taken and
@@ -1989,7 +1989,7 @@ both sides — the unit test naming the claim, and a `build.rs` entry in `depkin
 that a mutated build reports as belonging in `[dev-dependencies]`. Phase 18's
 lesson stands: an invisible mutation is a reason to write the test.
 
-Closes [#44](https://github.com/rlorenzo/deadwood/issues/44).
+Closes [#44](https://github.com/rlorenzo/deadwood-rs/issues/44).
 
 ## Phase 21 — the claim phase 5 refused (shipped)
 
@@ -2002,8 +2002,8 @@ The refusal was never about the reasoning. It was that a mis-attribution of
 ours was the likelier explanation, so the claim would have invented findings
 against manifests that compile — the direction this project cares about most.
 Both known sources are now closed:
-[#14](https://github.com/rlorenzo/deadwood/issues/14) (phase 7) and
-[#44](https://github.com/rlorenzo/deadwood/issues/44) (phase 20).
+[#14](https://github.com/rlorenzo/deadwood-rs/issues/14) (phase 7) and
+[#44](https://github.com/rlorenzo/deadwood-rs/issues/44) (phase 20).
 This phase takes the measurement #42 asked for with both closed, and makes the
 claim.
 
@@ -2087,7 +2087,7 @@ survived the first run — the opaque guard above, and a message that dropped it
 direction and read as the *other* claim while still passing a test that only
 checked the table names. Both have tests now.
 
-Closes [#42](https://github.com/rlorenzo/deadwood/issues/42).
+Closes [#42](https://github.com/rlorenzo/deadwood-rs/issues/42).
 
 ## Phase 22 — a crate is not always spelled like its entry (shipped)
 
@@ -2104,7 +2104,7 @@ this project ranks above all others.
 
 The phase began as a survey of what to do next, and the candidate on the list
 was relaxing the opaque guard
-([#50](https://github.com/rlorenzo/deadwood/issues/50)):
+([#50](https://github.com/rlorenzo/deadwood-rs/issues/50)):
 it costs real findings, two of four in phase 21's own recall check. Measured
 corpus-wide, the guard blocks exactly **two** placement claims — one a
 `depkinds` fixture entry, and one `serde_json`'s `serde`.
@@ -2198,7 +2198,7 @@ removing a key and re-inserting the same contexts under the same name leaves
 the map as it was — so the branch went, and the reasoning stayed as a doc
 comment. A branch no test can distinguish is not a branch worth keeping.
 
-Closes [#48](https://github.com/rlorenzo/deadwood/issues/48).
+Closes [#48](https://github.com/rlorenzo/deadwood-rs/issues/48).
 
 ## Phase 23 — an item an attribute macro owns is macro input (shipped)
 
@@ -2285,11 +2285,11 @@ same *findings* on every other pinned shape — `DEV` and opaque are equally
 silent about a correctly-placed dev entry — and the battery confirmed it is
 the only test that can see the difference.
 
-Closes [#49](https://github.com/rlorenzo/deadwood/issues/49).
+Closes [#49](https://github.com/rlorenzo/deadwood-rs/issues/49).
 
 ## Phase 24 — the opaque guard's population, counted (shipped)
 
-[#50](https://github.com/rlorenzo/deadwood/issues/50) proposed relaxing the
+[#50](https://github.com/rlorenzo/deadwood-rs/issues/50) proposed relaxing the
 guard that stops a placement claim when any mention of the entry is opaque: an
 opaque mention would no longer suppress when the non-opaque part of the
 context set is decisive on its own. The issue set its own bar — re-measure
@@ -2329,7 +2329,7 @@ package — no opaque mention anywhere — and the invented finding appears:
 the dev copy is reported as belonging in `[dependencies]`, against a manifest
 that compiles. Every registry instance is masked by an incidental doc-comment
 or macro mention, which is precisely how #48 hid. Filed as
-[#55](https://github.com/rlorenzo/deadwood/issues/55), now first on the Next
+[#55](https://github.com/rlorenzo/deadwood-rs/issues/55), now first on the Next
 list; relaxing the guard before it is fixed would invent
 `zerocopy-derive`-shaped findings rather than recover missed ones.
 
@@ -2339,7 +2339,7 @@ experiment with no live-tree instance. If #55 ships, the population should be
 counted again before anyone builds the relaxation; this entry is the
 write-up for whoever does.
 
-Closes [#50](https://github.com/rlorenzo/deadwood/issues/50).
+Closes [#50](https://github.com/rlorenzo/deadwood-rs/issues/50).
 
 ## Phase 25 — a claim is judged on the entry's own evidence (shipped)
 
@@ -2394,7 +2394,7 @@ one-runtime-mention rule), consulting the doubling in the Build arm (loses
 `stale_build_crate`), and counting any table as the doubling entry (a dev
 entry doubles itself, same loss as the third).
 
-Closes [#55](https://github.com/rlorenzo/deadwood/issues/55).
+Closes [#55](https://github.com/rlorenzo/deadwood-rs/issues/55).
 
 ## Phase 26 — one place, spelled two ways (shipped)
 
@@ -2433,7 +2433,7 @@ elsewhere and stays absolute, exactly as before.
   both inversions — dropping the canonicalized retry, and canonicalizing only
   one side. Two mutations, both caught.
 
-Closes [#53](https://github.com/rlorenzo/deadwood/issues/53).
+Closes [#53](https://github.com/rlorenzo/deadwood-rs/issues/53).
 
 ## Phase 27 — a doubled dev copy is judged on what it enables (shipped)
 
@@ -2512,10 +2512,10 @@ metadata` to make the comparison at all; `depkinds` gained the two
 load-bearing spellings (`loadbearing_dev_copy_crate`, `defaults_off_crate`)
 as permanent pins beside the stale one.
 
-Closes [#61](https://github.com/rlorenzo/deadwood/issues/61).
+Closes [#61](https://github.com/rlorenzo/deadwood-rs/issues/61).
 
-[#55]: https://github.com/rlorenzo/deadwood/issues/55
-[#61]: https://github.com/rlorenzo/deadwood/issues/61
+[#55]: https://github.com/rlorenzo/deadwood-rs/issues/55
+[#61]: https://github.com/rlorenzo/deadwood-rs/issues/61
 
 ## Phase 28 — a `mod` declaration inside a macro token stream is a claim (shipped)
 
@@ -2613,9 +2613,9 @@ declares are spared, `src/orphan.rs` beside them is still the finding it
 always was, and the unreferenced `pub fn` in a macro-reached file produces
 nothing.
 
-Closes [#60](https://github.com/rlorenzo/deadwood/issues/60).
+Closes [#60](https://github.com/rlorenzo/deadwood-rs/issues/60).
 
-[#60]: https://github.com/rlorenzo/deadwood/issues/60
+[#60]: https://github.com/rlorenzo/deadwood-rs/issues/60
 
 ## Phase 29 — a reference that exists only for rustdoc claims nothing false (shipped)
 
@@ -2681,9 +2681,9 @@ Measured against the ten-workspace public corpus, combined with phase 28:
 idiom beside its existing findings, pinning that the unused list does not
 grow.
 
-Closes [#63](https://github.com/rlorenzo/deadwood/issues/63).
+Closes [#63](https://github.com/rlorenzo/deadwood-rs/issues/63).
 
-[#63]: https://github.com/rlorenzo/deadwood/issues/63
+[#63]: https://github.com/rlorenzo/deadwood-rs/issues/63
 
 ## Phase 30 — a derive's expansion names its base crate (shipped)
 
@@ -2728,9 +2728,9 @@ The `deps` fixture pins the pair (`widget`/`widget_derive`, spared through a
 `#[derive(FromWidget)]`) and the boundary (`lonely`/`lonely_derived`, still
 a finding).
 
-Closes [#64](https://github.com/rlorenzo/deadwood/issues/64).
+Closes [#64](https://github.com/rlorenzo/deadwood-rs/issues/64).
 
-[#64]: https://github.com/rlorenzo/deadwood/issues/64
+[#64]: https://github.com/rlorenzo/deadwood-rs/issues/64
 
 ## Phase 31 — a dependency is spelled by its lib target name (shipped)
 
@@ -2785,9 +2785,9 @@ The `crosscrate` fixture gained `spoked` (lib name `wheel`) for the
 end-to-end member path; the new `libname` fixture pins the same claim where
 the full resolution cannot help.
 
-Closes [#62](https://github.com/rlorenzo/deadwood/issues/62).
+Closes [#62](https://github.com/rlorenzo/deadwood-rs/issues/62).
 
-[#62]: https://github.com/rlorenzo/deadwood/issues/62
+[#62]: https://github.com/rlorenzo/deadwood-rs/issues/62
 
 ## Phase 32 — the pre-release corpus run (shipped)
 

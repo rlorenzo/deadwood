@@ -1,5 +1,5 @@
 //! The reproducer from
-//! [#25](https://github.com/rlorenzo/deadwood/issues/25), and the shapes
+//! [#25](https://github.com/rlorenzo/deadwood-rs/issues/25), and the shapes
 //! around it that must keep their answers.
 
 mod imported;

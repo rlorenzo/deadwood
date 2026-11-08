@@ -3,7 +3,7 @@
 Deadwood is small and deliberate, and the process below keeps it that way.
 Participation is covered by the [code of conduct](CODE_OF_CONDUCT.md).
 Questions and ideas are welcome in
-[GitHub issues](https://github.com/rlorenzo/deadwood/issues). This is a
+[GitHub issues](https://github.com/rlorenzo/deadwood-rs/issues). This is a
 spare-time project, so expect responses in days, not hours.
 
 ## The quality gate
