@@ -2910,3 +2910,19 @@ only by its own doctest, which an unterminated fence in an earlier item's docs
 had hidden until fence state was reset at each item. Every remaining finding in the other workspaces was verified in
 the first pass.
 
+
+## Phase 33: the `unsatisfiable_cfg` check is dropped (shipped)
+
+The README review behind 1.0 compared each check with what `rustc` and Clippy
+already report. For unsatisfiable `cfg` gates the answer was close to
+everything. rustc's `unexpected_cfgs` lint, on by default since 1.80, warns at
+any gate that names a feature the manifest doesn't declare, and that was the
+case this check existed for. Its combinators don't track how atoms relate
+(`all(feature = "a", not(feature = "a"))` reads as satisfiable), so in practice
+it reported nothing else.
+
+The finding kind, its `[severity]` key, its text group and its baseline
+handling are gone. `cfg` evaluation stays: the configured matrix still decides
+what is in the analyzed build, and code behind a gate no build satisfies is
+still read, so its mentions keep counting as uses. The corpus run is unchanged
+apart from the findings of this kind, which none of the eight workspaces had.
