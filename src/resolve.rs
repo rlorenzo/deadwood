@@ -393,6 +393,10 @@ struct Def {
     /// for this: it also excludes `fn main` and the attribute escape hatches,
     /// which are roots for entirely different reasons.
     is_pub: bool,
+    /// A private module-level `use` alias. A glob import does not bring one
+    /// in — it imports only what is visible to the importer — so a glob
+    /// lookup from outside its module passes over it ([`SymbolTable::lookup_in`]).
+    private_import: bool,
     /// Whether something outside the source calls this — an entry point, a
     /// linker export, or an explicit opt-out — and whether a build without
     /// tests is one of the things that does. See [`entry_point_attr`].
@@ -480,10 +484,6 @@ pub(crate) struct SymbolTable {
     /// would be a guess, so paths that start with one fall back to the
     /// conservative rule instead.
     ambiguous_externs: HashSet<String>,
-    /// Private module-level `use` aliases. A glob import does not bring them
-    /// in — it imports only what the module makes visible — so a glob lookup
-    /// passes over them to the glob sources after.
-    private_imports: HashSet<usize>,
     /// Every definition sharing a name, for the conservative fallback.
     by_name: HashMap<String, Vec<usize>>,
     /// Module lookup by crate and module path.
@@ -579,7 +579,6 @@ impl SymbolTable {
             roots: Vec::new(),
             externs: HashMap::new(),
             ambiguous_externs: HashSet::new(),
-            private_imports: HashSet::new(),
             by_name: HashMap::new(),
             by_path: HashMap::new(),
             is_library: crates.iter().map(|unit| !unit.names.is_empty()).collect(),
@@ -1476,6 +1475,7 @@ impl SymbolTable {
             // is reached decides nothing, and neither flag needs
             // to claim anything.
             is_pub: false,
+            private_import: false,
             entry_point: EntryPoint::None,
             child: Some(child),
             target: None,
@@ -1509,6 +1509,7 @@ impl SymbolTable {
                 module,
                 reportable: false,
                 is_pub: false,
+                private_import: false,
                 entry_point: EntryPoint::None,
                 child: Some(root),
                 target: None,
@@ -1540,6 +1541,7 @@ impl SymbolTable {
                 module,
                 reportable: is_pub && !is_main && !has_skip_attr(attrs),
                 is_pub,
+                private_import: false,
                 entry_point,
                 child: None,
                 target: None,
@@ -1593,10 +1595,6 @@ impl SymbolTable {
             } else {
                 DefKind::Import
             };
-            let id = self.defs.len();
-            if is_private {
-                self.private_imports.insert(id);
-            }
             self.add_def(Def {
                 name,
                 kind,
@@ -1610,6 +1608,7 @@ impl SymbolTable {
                 // reachable only from whatever goes through it, which is what
                 // lets a dead import stop keeping its target alive.
                 is_pub: kind == DefKind::Reexport,
+                private_import: is_private,
                 entry_point: entry_point_attr(&item.attrs, test_context),
                 child: None,
                 target: Some(path),
@@ -1666,9 +1665,9 @@ impl SymbolTable {
         self.lookup_in(module, name, &mut HashSet::new(), module)
     }
 
-    ///
-    /// `importer` is the module the lookup started in. A glob brings in only
-    /// what is visible there, and a private `use` is visible only inside the
+    /// [`SymbolTable::lookup`] on behalf of `importer`, the module the lookup
+    /// started in, with `visited` guarding against glob cycles. A glob brings
+    /// in only what is visible there, and a private `use` is visible only inside the
     /// module that writes it and that module's descendants: bevy's `pub use
     /// camera::*; pub use clear_color::*;` at a crate root found `camera.rs`'s
     /// private `use crate::MsaaWriteback;` first, followed it back into the
@@ -1687,14 +1686,12 @@ impl SymbolTable {
             return Step::Absent;
         }
         if let Some(defs) = self.modules[module].items.get(name) {
-            let defs: Vec<usize> = if !self.is_within(importer, module) {
-                defs.iter()
-                    .copied()
-                    .filter(|id| !self.private_imports.contains(id))
-                    .collect()
-            } else {
-                defs.clone()
-            };
+            let within = self.is_within(importer, module);
+            let defs: Vec<usize> = defs
+                .iter()
+                .copied()
+                .filter(|&id| within || !self.defs[id].private_import)
+                .collect();
             if !defs.is_empty() {
                 return Step::Defs(defs);
             }
@@ -2089,6 +2086,7 @@ impl SymbolTable {
     /// [`SymbolTable::mark_name_used`], attributed to `from` rather than to the
     /// root set: for a channel whose referrer is known even though the item
     /// it names is not, which is what a doctest is.
+    ///
     /// An item naming itself is skipped: a doctest showing how to call the
     /// item it documents is no evidence that anything else does.
     fn mark_name_used_by(&mut self, from: &Referrer, name: &str) {
@@ -2280,6 +2278,7 @@ impl RefWalker<'_> {
         else {
             return;
         };
+        let mut code: HashSet<String> = HashSet::new();
         for line in text.value().lines() {
             let trimmed = line.trim_start();
             let fence = ["```", "~~~"]
@@ -2300,13 +2299,15 @@ impl RefWalker<'_> {
                 continue;
             }
             if self.doc_fence == Some(true) {
-                let from = self.enclosing.clone();
-                for word in line
-                    .split(|c: char| !c.is_alphanumeric() && c != '_')
-                    .filter(|word| !word.is_empty())
-                {
-                    self.table.mark_name_used_by(&from, word);
-                }
+                code.extend(crate::expansion::words(line).map(str::to_string));
+            }
+        }
+        // Once per name per attribute: a block naming `new` twenty times is
+        // one use, and each mark is an edge per item of that name.
+        if !code.is_empty() {
+            let from = self.enclosing.clone();
+            for word in code {
+                self.table.mark_name_used_by(&from, &word);
             }
         }
     }

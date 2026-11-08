@@ -41,6 +41,41 @@ pub struct Metadata {
     pub external_macros: Vec<ExternalMacro>,
 }
 
+impl Metadata {
+    /// Every workspace member the members in `roots` depend on, however
+    /// indirectly — the roots themselves only when a cycle leads back.
+    pub fn workspace_reach<'a>(
+        &'a self,
+        roots: impl IntoIterator<Item = &'a str>,
+    ) -> HashSet<&'a str> {
+        let members: HashMap<&str, &Package> = self
+            .packages
+            .iter()
+            .map(|package| (package.name.as_str(), package))
+            .collect();
+        let mut seen = HashSet::new();
+        let mut pending: Vec<&str> = roots.into_iter().collect();
+        while let Some(name) = pending.pop() {
+            let Some(member) = members.get(name) else {
+                continue;
+            };
+            for dependency in &member.dependencies {
+                if let Some((&next, _)) = members.get_key_value(dependency.name.as_str())
+                    && seen.insert(next)
+                {
+                    pending.push(next);
+                }
+            }
+        }
+        seen
+    }
+
+    /// The workspace member named `name`.
+    pub fn member(&self, name: &str) -> Option<&Package> {
+        self.packages.iter().find(|package| package.name == name)
+    }
+}
+
 /// A proc-macro package from outside the workspace, with what is needed to
 /// read what it can expand to.
 ///
@@ -60,7 +95,7 @@ pub struct ExternalMacro {
     pub users: HashSet<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Package {
     pub name: String,
     pub manifest_path: PathBuf,
@@ -78,6 +113,22 @@ pub struct Package {
 }
 
 impl Package {
+    /// Whether one of the package's targets is a proc macro.
+    pub fn is_proc_macro(&self) -> bool {
+        self.targets.iter().any(Target::is_proc_macro)
+    }
+
+    /// Whether the package writes code for a macro: it depends on `quote`,
+    /// and is not one of the crates every macro builds on, which write none
+    /// of a macro's output themselves.
+    pub fn writes_code(&self) -> bool {
+        !["syn", "quote", "proc-macro2"].contains(&self.name.as_str())
+            && self
+                .dependencies
+                .iter()
+                .any(|dependency| dependency.name == "quote")
+    }
+
     /// Dependency names the `[features]` table refers to, as
     /// [`Dependency::feature_key`] spells them. A feature writes the manifest
     /// key, which is not what code spells when the lib target has its own name.
@@ -96,9 +147,9 @@ impl Package {
         // The features Cargo synthesizes for an optional dependency no
         // `dep:` entry mentions: `foo = ["dep:foo"]`, under the entry's name.
         let implicit = |feature: &str| {
-            self.features
-                .get(feature)
-                .is_some_and(|enabled| enabled.len() == 1 && enabled[0] == format!("dep:{feature}"))
+            self.features.get(feature).is_some_and(|enabled| {
+                enabled.len() == 1 && enabled[0].strip_prefix("dep:") == Some(feature)
+            })
         };
         let mut names = HashSet::new();
         for (feature, enabled) in &self.features {
@@ -128,7 +179,7 @@ impl Package {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Dependency {
     /// The dependency's package name.
     pub name: String,
@@ -220,12 +271,27 @@ impl Dependency {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Target {
     pub name: String,
     pub kind: Vec<String>,
     /// Absolute path to the target's crate root file.
     pub src_path: PathBuf,
+}
+
+impl Target {
+    /// Whether other crates can name the target: a library of any kind,
+    /// proc macros included.
+    pub fn is_lib(&self) -> bool {
+        const LIB_KINDS: &[&str] = &["lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro"];
+        self.kind
+            .iter()
+            .any(|kind| LIB_KINDS.contains(&kind.as_str()))
+    }
+
+    pub fn is_proc_macro(&self) -> bool {
+        self.kind.iter().any(|kind| kind == "proc-macro")
+    }
 }
 
 /// Run `cargo metadata` for the package or workspace at `path`.
@@ -283,13 +349,7 @@ pub fn load(path: &Path) -> Result<Metadata> {
 /// because that is how a `Dependency` names its package; only the *value* is
 /// normalized to the underscore spelling code uses.
 fn renamed_lib(package: &str, targets: &[Target]) -> Option<(String, String)> {
-    const LIB_KINDS: &[&str] = &["lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro"];
-    let lib = targets.iter().find(|target| {
-        target
-            .kind
-            .iter()
-            .any(|kind| LIB_KINDS.contains(&kind.as_str()))
-    })?;
+    let lib = targets.iter().find(|target| target.is_lib())?;
     let lib_name = lib.name.replace('-', "_");
     (lib_name != package.replace('-', "_")).then(|| (package.to_string(), lib_name))
 }
@@ -355,7 +415,6 @@ struct Node {
 
 /// Every external proc-macro package some workspace member reaches.
 fn external_macros(full: Full) -> Vec<ExternalMacro> {
-    const WRITE_NOTHING: &[&str] = &["syn", "quote", "proc-macro2"];
     let Some(resolve) = full.resolve else {
         return Vec::new();
     };
@@ -382,19 +441,6 @@ fn external_macros(full: Full) -> Vec<ExternalMacro> {
         }
         seen
     };
-    let is_proc_macro = |package: &Package| {
-        package
-            .targets
-            .iter()
-            .any(|target| target.kind.iter().any(|kind| kind == "proc-macro"))
-    };
-    let writes_code = |package: &Package| {
-        !WRITE_NOTHING.contains(&package.name.as_str())
-            && package
-                .dependencies
-                .iter()
-                .any(|dependency| dependency.name == "quote")
-    };
 
     let mut users: HashMap<&str, HashSet<String>> = HashMap::new();
     for member in &members {
@@ -402,7 +448,7 @@ fn external_macros(full: Full) -> Vec<ExternalMacro> {
             continue;
         };
         for id in reach(member) {
-            if !members.contains(id) && by_id.get(id).is_some_and(|package| is_proc_macro(package))
+            if !members.contains(id) && by_id.get(id).is_some_and(|package| package.is_proc_macro())
             {
                 users
                     .entry(id)
@@ -414,36 +460,18 @@ fn external_macros(full: Full) -> Vec<ExternalMacro> {
     users
         .into_iter()
         .filter_map(|(id, users)| {
-            let mut sources = vec![clone_package(by_id.get(id)?)];
+            let mut sources = vec![(*by_id.get(id)?).clone()];
             for helper in reach(id) {
                 if let Some(package) = by_id.get(helper)
                     && !members.contains(helper)
-                    && writes_code(package)
+                    && package.writes_code()
                 {
-                    sources.push(clone_package(package));
+                    sources.push((*package).clone());
                 }
             }
             Some(ExternalMacro { sources, users })
         })
         .collect()
-}
-
-fn clone_package(package: &Package) -> Package {
-    Package {
-        name: package.name.clone(),
-        manifest_path: package.manifest_path.clone(),
-        targets: package
-            .targets
-            .iter()
-            .map(|target| Target {
-                name: target.name.clone(),
-                kind: target.kind.clone(),
-                src_path: target.src_path.clone(),
-            })
-            .collect(),
-        dependencies: Vec::new(),
-        features: package.features.clone(),
-    }
 }
 
 /// Resolve with every feature on, as the analysis itself does by default, so

@@ -479,17 +479,15 @@ impl CrateReferences {
         bodies: &HashMap<String, HashSet<String>>,
         own: &HashSet<String>,
     ) {
-        for name in &self.invoked_macros {
-            if own.contains(name) {
-                continue;
-            }
-            for word in bodies.get(name).into_iter().flatten() {
-                self.names
-                    .entry(word.clone())
-                    .or_default()
-                    .insert(Contexts::OPAQUE);
-            }
-        }
+        let words: Vec<String> = self
+            .invoked_macros
+            .iter()
+            .filter(|name| !own.contains(*name))
+            .filter_map(|name| bodies.get(name))
+            .flatten()
+            .cloned()
+            .collect();
+        self.add_opaque_words(&words);
     }
 
     /// Why the package holds code Deadwood never sees, if it does.
@@ -1182,10 +1180,7 @@ fn doc_attr_text(tokens: &TokenStream) -> Option<String> {
 
 /// Every identifier-shaped word in a piece of text.
 fn words_into(names: &mut HashMap<String, Contexts>, text: &str, context: Contexts) {
-    for word in text
-        .split(|c: char| !c.is_alphanumeric() && c != '_')
-        .filter(|word| !word.is_empty())
-    {
+    for word in crate::expansion::words(text) {
         names.entry(word.to_string()).or_default().insert(context);
     }
 }
@@ -1236,8 +1231,7 @@ pub(crate) fn included_file(mac: &syn::Macro, dir: &Path) -> Option<Included> {
 /// generates its C-ABI thunks under `env!("BUN_CODEGEN_DIR")`, so running
 /// Deadwood with that variable set reads them like any other file.
 fn path_argument(tokens: &TokenStream, dir: &Path) -> Option<String> {
-    let expr: syn::Expr = syn::parse2(tokens.clone()).ok()?;
-    evaluate(&expr, dir)
+    evaluate(&syn::parse2(tokens.clone()).ok()?, dir)
 }
 
 fn evaluate(expr: &syn::Expr, dir: &Path) -> Option<String> {
@@ -1249,6 +1243,9 @@ fn evaluate(expr: &syn::Expr, dir: &Path) -> Option<String> {
         syn::Expr::Group(group) => evaluate(&group.expr, dir),
         syn::Expr::Macro(mac) => {
             let name = mac.mac.path.segments.last()?.ident.to_string();
+            if name != "concat" && name != "env" {
+                return None;
+            }
             let args = mac
                 .mac
                 .parse_body_with(
@@ -1296,6 +1293,26 @@ fn environment(variable: &str, dir: &Path) -> Option<String> {
 /// without a target triple between, under `CARGO_TARGET_DIR` or the nearest
 /// `target/` above the package.
 fn out_dir(manifest_dir: &Path) -> Option<PathBuf> {
+    // Every `include!` in a package asks the same question, from both the
+    // module walk and this module's reader, and answering it scans the target
+    // directory.
+    thread_local! {
+        static FOUND: std::cell::RefCell<HashMap<PathBuf, Option<PathBuf>>> =
+            std::cell::RefCell::new(HashMap::new());
+    }
+    if let Some(hit) = FOUND.with(|found| found.borrow().get(manifest_dir).cloned()) {
+        return hit;
+    }
+    let answer = newest_out_dir(manifest_dir);
+    FOUND.with(|found| {
+        found
+            .borrow_mut()
+            .insert(manifest_dir.to_path_buf(), answer.clone())
+    });
+    answer
+}
+
+fn newest_out_dir(manifest_dir: &Path) -> Option<PathBuf> {
     #[derive(serde::Deserialize)]
     struct Manifest {
         package: Option<ManifestPackage>,
@@ -1465,7 +1482,7 @@ impl Collector<'_, '_> {
                 TokenTree::Ident(ident) => {
                     // `name!` inside another macro's input is an invocation
                     // all the same.
-                    if matches!(iter.peek(), Some(TokenTree::Punct(p)) if p.as_char() == '!') {
+                    if crate::expansion::bang_follows(iter.peek()) {
                         self.invoked_macros.insert(ident.to_string());
                     }
                     self.insert_opaque(ident.to_string());

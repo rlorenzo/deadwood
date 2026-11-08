@@ -189,22 +189,40 @@ impl Resolved {
     /// nothing, and resolving every target that invokes one again doubled
     /// bun's run.
     pub fn wants_foreign(&self, foreign: &MacroDefs) -> bool {
-        self.invoked.iter().any(|name| {
-            !self.macros.0.contains_key(name)
-                && effective_emission(name, &HashMap::new(), foreign)
-                    .is_some_and(|emission| emission.claims_anything())
-        })
+        let declaring = foreign.declaring();
+        self.invoked
+            .iter()
+            .any(|name| !self.macros.0.contains_key(name) && declaring.contains(name))
     }
 }
 
 /// Module-declaring `macro_rules!` definitions, by name. See [`resolve_with`].
 #[derive(Default, Clone)]
-pub struct MacroDefs(HashMap<String, MacroEmission>);
+pub struct MacroDefs(
+    HashMap<String, MacroEmission>,
+    /// The names whose emission, folded through every forward, declares a
+    /// module — asked once per target, so worked out once.
+    std::cell::OnceCell<HashSet<String>>,
+);
 
 impl MacroDefs {
+    fn declaring(&self) -> &HashSet<String> {
+        self.1.get_or_init(|| {
+            self.0
+                .keys()
+                .filter(|name| {
+                    effective_emission(name, &HashMap::new(), self)
+                        .is_some_and(|emission| emission.claims_anything())
+                })
+                .cloned()
+                .collect()
+        })
+    }
+
     /// Add `other`'s definitions. Two crates defining one name both count: a
     /// probe through either costs a `stat` and can only spare a file.
     pub fn absorb(&mut self, other: &MacroDefs) {
+        self.1.take();
         for (name, emission) in &other.0 {
             let mine = self.0.entry(name.clone()).or_default();
             mine.merge(emission, &[]);
@@ -631,7 +649,7 @@ pub fn resolve_with(
                     .invoked
                     .extend(emission.forwards.iter().map(|(_, name)| name.clone()));
             }
-            resolved.macros = MacroDefs(std::mem::take(&mut macros.emitting));
+            resolved.macros = MacroDefs(std::mem::take(&mut macros.emitting), Default::default());
             return resolved;
         }
         queue.append(&mut deferred);
@@ -924,9 +942,7 @@ fn scan_token_mods(tokens: TokenStream, prefix: &[String], found: &mut TokenMods
                 if word != "mod" {
                     // `name!` followed by its delimited arguments: an
                     // invocation, whose own `mod`s land here.
-                    if word != "macro_rules"
-                        && matches!(iter.peek(), Some(TokenTree::Punct(p)) if p.as_char() == '!')
-                    {
+                    if word != "macro_rules" && crate::expansion::bang_follows(iter.peek()) {
                         let forward = (prefix.to_vec(), word.clone());
                         if !found.forwards.contains(&forward) {
                             found.forwards.push(forward);
@@ -1144,9 +1160,7 @@ fn queue_speculative(
             }
         }
     }
-    let stem = file_stem(name);
-    let as_file = base.join(format!("{stem}.rs"));
-    let as_dir = base.join(stem).join("mod.rs");
+    let (as_file, as_dir) = module_files(&base, name);
     if as_file.is_file() {
         candidates.push((as_file, false, true));
     } else if as_dir.is_file() {
@@ -1423,9 +1437,7 @@ fn collect_mod_decls(
                     }
                     continue;
                 }
-                let stem = file_stem(&name);
-                let as_file = under.base.join(format!("{stem}.rs"));
-                let as_dir = under.base.join(stem).join("mod.rs");
+                let (as_file, as_dir) = module_files(under.base, &name);
                 if as_file.is_file() {
                     walk.queue.push(Pending {
                         path: as_file,
@@ -1566,8 +1578,8 @@ fn exclude_subtree(
             (target.to_path_buf(), directory)
         }
         None => {
-            let stem = file_stem(name);
-            (child_base.join(format!("{stem}.rs")), child_base.join(stem))
+            let (file, as_dir) = module_files(child_base, name);
+            (file, parent_of(&as_dir).to_path_buf())
         }
     };
     excluded.push(normalize(&file));
@@ -1580,6 +1592,16 @@ fn exclude_subtree(
 /// probing `r#struct.rs` left the module unresolved and every check skipped.
 fn file_stem(name: &str) -> &str {
     name.strip_prefix("r#").unwrap_or(name)
+}
+
+/// The two files `mod name;` can live in under `base`: `name.rs` and
+/// `name/mod.rs`, raw identifiers unprefixed.
+fn module_files(base: &Path, name: &str) -> (PathBuf, PathBuf) {
+    let stem = file_stem(name);
+    (
+        base.join(format!("{stem}.rs")),
+        base.join(stem).join("mod.rs"),
+    )
 }
 
 /// Every file a `mod`'s attributes name, in the order they are written.

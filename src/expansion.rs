@@ -24,6 +24,230 @@ use std::collections::{HashMap, HashSet};
 use proc_macro2::{Spacing, TokenStream, TokenTree};
 use syn::visit::Visit;
 
+use crate::resolve::CrateUnit;
+use crate::{cfg, config, deps, metadata, modtree};
+
+/// Each package's dependency references, as `analyze_with` collects them.
+type References<'m, 'g> = [(&'m metadata::Package, deps::CrateReferences, cfg::Gates<'g>)];
+
+/// Count what other crates' macros write as mentions by the packages that
+/// invoke them: the path heads of a workspace `macro_rules!` body, and what a
+/// proc macro and its helper libraries can expand to, from the workspace or
+/// from the registry cache. `package_of_crate` and `proc_macro_crate` say
+/// which package each of `crates` belongs to and whether it is a proc macro.
+pub(crate) fn credit_macros(
+    meta: &metadata::Metadata,
+    config: &config::Config,
+    crates: &[CrateUnit],
+    package_of_crate: &[&str],
+    proc_macro_crate: &[bool],
+    references: &mut References<'_, '_>,
+) {
+    let (bodies, defined_by) = macro_bodies(crates, package_of_crate);
+    let none = HashSet::new();
+    for (package, package_references, _) in references.iter_mut() {
+        let own = defined_by.get(package.name.as_str()).unwrap_or(&none);
+        package_references.add_foreign_macros(&bodies, own);
+    }
+    workspace_proc_macros(meta, crates, package_of_crate, proc_macro_crate, references);
+    external_proc_macros(meta, config, references);
+}
+
+/// What a workspace proc macro, read with its workspace helper libraries,
+/// writes for the packages that use it.
+///
+/// A package uses one when its code mentions one of the macro's entry points
+/// and the proc-macro package is among its workspace dependencies, however
+/// indirectly — a derive is as often reached through a library's re-export
+/// (bevy's `ExtractComponent` through `bevy_render`) as depended on directly.
+/// The helpers are the workspace packages the macro depends on, however
+/// indirectly, that write code themselves ([`metadata::Package::writes_code`]):
+/// `bevy_macro_utils` builds the paths bevy's derives emit.
+fn workspace_proc_macros(
+    meta: &metadata::Metadata,
+    crates: &[CrateUnit],
+    package_of_crate: &[&str],
+    proc_macro_crate: &[bool],
+    references: &mut References<'_, '_>,
+) {
+    // Each package's crates, read once however many macros share a helper.
+    let mut libs: HashMap<&str, MacroSource> = HashMap::new();
+    let mut macros: HashMap<&str, MacroSource> = HashMap::new();
+    for ((unit, &package), &is_proc_macro) in
+        crates.iter().zip(package_of_crate).zip(proc_macro_crate)
+    {
+        // A library is a crate something can name; tests and bins are not.
+        let into = if is_proc_macro {
+            macros.entry(package).or_default()
+        } else if !unit.names.is_empty() {
+            libs.entry(package).or_default()
+        } else {
+            continue;
+        };
+        into.read_files(unit.files.iter().chain(&unit.spliced));
+    }
+    for (&proc_macro, source) in &mut macros {
+        for helper in meta.workspace_reach([proc_macro]) {
+            if meta
+                .member(helper)
+                .is_some_and(metadata::Package::writes_code)
+                && let Some(lib) = libs.get(helper)
+            {
+                source.absorb(lib);
+            }
+        }
+    }
+    if macros.is_empty() {
+        return;
+    }
+    for (package, package_references, _) in references.iter_mut() {
+        let reached = meta.workspace_reach([package.name.as_str()]);
+        for (proc_macro, source) in &macros {
+            if reached.contains(proc_macro) {
+                source.credit(package_references);
+            }
+        }
+    }
+}
+
+/// [`workspace_proc_macros`] for proc macros from outside the workspace, read
+/// from the source the full resolution points at: see
+/// [`metadata::ExternalMacro`].
+///
+/// Each source is resolved from its lib roots like a workspace crate, under
+/// the configured `cfg` matrix and with none of the project's `ignore`
+/// patterns, once however many macros share it, and anything it warns about
+/// is dropped: a file that cannot be read there costs a mention, never a
+/// finding.
+fn external_proc_macros(
+    meta: &metadata::Metadata,
+    config: &config::Config,
+    references: &mut References<'_, '_>,
+) {
+    let unconfigured = config::Config::default();
+    let mut read: HashMap<&std::path::Path, MacroSource> = HashMap::new();
+    for external in &meta.external_macros {
+        if !references
+            .iter()
+            .any(|(package, _, _)| external.users.contains(&package.name))
+        {
+            continue;
+        }
+        let mut source = MacroSource::default();
+        for package in &external.sources {
+            let one = read.entry(&package.manifest_path).or_insert_with(|| {
+                let gates = cfg::Gates::new(config.cfg(), package);
+                let mut one = MacroSource::default();
+                for target in package.targets.iter().filter(|target| target.is_lib()) {
+                    let mut ignored = Vec::new();
+                    let resolved = modtree::resolve(
+                        &target.src_path,
+                        unconfigured.ignore(),
+                        &gates,
+                        &mut ignored,
+                    );
+                    one.read_files(resolved.files.iter().chain(&resolved.spliced));
+                }
+                one
+            });
+            source.absorb(one);
+        }
+        for (package, package_references, _) in references.iter_mut() {
+            if external.users.contains(&package.name) {
+                source.credit(package_references);
+            }
+        }
+    }
+}
+
+/// Words by name: a macro's body words, or a package's defined macro names.
+type WordSets<K> = HashMap<K, HashSet<String>>;
+
+/// The path heads of every `macro_rules!` body in the workspace, by macro
+/// name, with the bodies of the macros each invokes folded in — and the names
+/// each package defines.
+fn macro_bodies<'p>(
+    crates: &[CrateUnit],
+    package_of_crate: &[&'p str],
+) -> (WordSets<String>, WordSets<&'p str>) {
+    fn items<'a>(found: &mut Vec<&'a syn::ItemMacro>, list: &'a [syn::Item]) {
+        for item in list {
+            match item {
+                syn::Item::Macro(mac) if mac.mac.path.is_ident("macro_rules") => found.push(mac),
+                syn::Item::Mod(module) => {
+                    if let Some((_, inner)) = &module.content {
+                        items(found, inner);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut direct: HashMap<String, (HashSet<String>, HashSet<String>)> = HashMap::new();
+    let mut defined_by: HashMap<&str, HashSet<String>> = HashMap::new();
+    for (unit, package) in crates.iter().zip(package_of_crate) {
+        for file in unit.files.iter().chain(&unit.spliced) {
+            let Some(ast) = &file.ast else { continue };
+            let mut found = Vec::new();
+            items(&mut found, &ast.items);
+            for mac in found {
+                let Some(name) = &mac.ident else { continue };
+                let name = name.to_string();
+                let (heads, invokes) = direct.entry(name.clone()).or_default();
+                path_heads(&mac.mac.tokens, heads);
+                invocations(&mac.mac.tokens, invokes);
+                defined_by.entry(package).or_default().insert(name);
+            }
+        }
+    }
+    let bodies = direct
+        .keys()
+        .map(|name| {
+            let mut all = HashSet::new();
+            let mut seen = HashSet::new();
+            let mut pending = vec![name.as_str()];
+            while let Some(next) = pending.pop() {
+                if !seen.insert(next) {
+                    continue;
+                }
+                if let Some((body, invokes)) = direct.get(next) {
+                    all.extend(body.iter().cloned());
+                    pending.extend(invokes.iter().map(String::as_str));
+                }
+            }
+            (name.clone(), all)
+        })
+        .collect();
+    (bodies, defined_by)
+}
+
+/// Whether `next`, the token after an identifier, makes it a macro
+/// invocation: `name!`.
+pub(crate) fn bang_follows(next: Option<&TokenTree>) -> bool {
+    matches!(next, Some(TokenTree::Punct(punct)) if punct.as_char() == '!')
+}
+
+/// Every `name!` invocation in `tokens`, at any depth.
+fn invocations(tokens: &TokenStream, into: &mut HashSet<String>) {
+    let mut iter = tokens.clone().into_iter().peekable();
+    while let Some(tree) = iter.next() {
+        match tree {
+            TokenTree::Ident(ident) if bang_follows(iter.peek()) => {
+                into.insert(ident.to_string());
+            }
+            TokenTree::Group(group) => invocations(&group.stream(), into),
+            _ => {}
+        }
+    }
+}
+
+/// The words of `text`: its runs of letters, digits and underscores.
+pub(crate) fn words(text: &str) -> impl Iterator<Item = &str> {
+    text.split(|c: char| !c.is_alphanumeric() && c != '_')
+        .filter(|word| !word.is_empty())
+}
+
 /// One proc-macro crate, or several read as one: an external macro's helper
 /// libraries (`tauri-codegen`, `tauri-utils`) write its output as much as the
 /// macro crate does.
@@ -55,9 +279,39 @@ impl MacroSource {
         self.entries.keys()
     }
 
-    /// Whether the crate defines any macro at all.
-    pub(crate) fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+    fn read_files<'f>(&mut self, files: impl Iterator<Item = &'f modtree::ParsedFile>) {
+        for file in files {
+            if let Some(ast) = &file.ast {
+                self.read(ast);
+            }
+        }
+    }
+
+    /// Add `other`'s macros and functions to this source: a macro calls into
+    /// its helper libraries by path, so they are read as one.
+    fn absorb(&mut self, other: &MacroSource) {
+        fn merge(
+            into: &mut HashMap<String, HashSet<String>>,
+            from: &HashMap<String, HashSet<String>>,
+        ) {
+            for (key, values) in from {
+                into.entry(key.clone())
+                    .or_default()
+                    .extend(values.iter().cloned());
+            }
+        }
+        merge(&mut self.entries, &other.entries);
+        merge(&mut self.words, &other.words);
+        merge(&mut self.calls, &other.calls);
+        self.global_words.extend(other.global_words.iter().cloned());
+        self.global_calls.extend(other.global_calls.iter().cloned());
+    }
+
+    /// Count what the macros `references`' package uses write as its
+    /// mentions.
+    fn credit(&self, references: &mut deps::CrateReferences) {
+        let words = self.words_for(self.entry_names().filter(|name| references.mentions(name)));
+        references.add_opaque_words(&words);
     }
 
     /// What using the macros named `used` may expand to: the words of the
@@ -244,12 +498,7 @@ fn literal_words(text: &str, into: &mut HashSet<String>) {
     if text.chars().any(char::is_whitespace) {
         return;
     }
-    for word in text
-        .split(|c: char| !c.is_alphanumeric() && c != '_')
-        .filter(|word| !word.is_empty())
-    {
-        into.insert(word.to_string());
-    }
+    into.extend(words(text).map(str::to_string));
 }
 
 #[cfg(test)]

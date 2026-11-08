@@ -477,7 +477,7 @@ pub fn analyze_with(
             }
             spliced.extend(remounted);
             package_of_crate.push(package.name.as_str());
-            proc_macro_crate.push(target.kind.iter().any(|kind| kind == "proc-macro"));
+            proc_macro_crate.push(target.is_proc_macro());
             crates.push(resolve::CrateUnit {
                 names,
                 // The same rule the dependency check places a mention by: a
@@ -619,24 +619,15 @@ pub fn analyze_with(
 
     add_dependency_aliases(&meta, &lib_of_package, &mut crates);
 
-    // A path in a `macro_rules!` body resolves in the crate that invokes it, so
-    // a dependency can be named only by another workspace crate's macro.
-    let (bodies, defined_by) = macro_bodies(&crates, &package_of_crate);
-    for (package, package_references, _) in &mut references {
-        let own = defined_by
-            .get(package.name.as_str())
-            .cloned()
-            .unwrap_or_default();
-        package_references.add_foreign_macros(&bodies, &own);
-    }
-    proc_macro_expansions(
+    // What other crates' macros write is code the invoking crate compiles.
+    expansion::credit_macros(
         &meta,
+        &config,
         &crates,
         &package_of_crate,
         &proc_macro_crate,
         &mut references,
     );
-    external_macro_expansions(&meta, &config, &mut references);
 
     // Usage resolution must see every file in the workspace: if module
     // resolution hit any problem, files (and the paths inside them) may be
@@ -987,268 +978,6 @@ fn feature_list(names: &[String]) -> String {
     }
 }
 
-/// Count what a workspace proc macro's expansion can name as a mention by
-/// every package that uses the macro.
-///
-/// A derive's output names crates the deriving package never writes: ruff's
-/// `#[derive(CacheKey)]` expands to `ruff_cache::CacheKey`, and bevy's
-/// `#[derive(ExtractComponent)]` — reached through a `bevy_render` re-export —
-/// looks `bevy_extract` up in the consumer's own manifest and names it. The
-/// expansion cannot be computed without running the macro, but the macro's
-/// source is in the workspace: every identifier its `quote!`-family
-/// invocations write, and every word of its string literals, is something the
-/// expansion may name. A package counts as using the crate's macros when its
-/// code mentions one of their names (a derive, its helper attributes, an
-/// attribute or function-like macro) and the proc-macro package is among its
-/// workspace dependencies, however indirectly.
-fn proc_macro_expansions(
-    meta: &metadata::Metadata,
-    crates: &[resolve::CrateUnit],
-    package_of_crate: &[&str],
-    proc_macro_crate: &[bool],
-    references: &mut [(&metadata::Package, deps::CrateReferences, cfg::Gates<'_>)],
-) {
-    let members: HashMap<&str, &metadata::Package> = meta
-        .packages
-        .iter()
-        .map(|package| (package.name.as_str(), package))
-        .collect();
-    // A macro's helper libraries write its output as much as it does
-    // (`bevy_macro_utils`): the workspace packages it depends on, however
-    // indirectly, that depend on `quote` themselves.
-    let helpers = |proc_macro: &str| -> HashSet<&str> {
-        let mut seen = HashSet::new();
-        let mut pending = vec![proc_macro];
-        while let Some(name) = pending.pop() {
-            let Some(member) = members.get(name) else {
-                continue;
-            };
-            for dependency in &member.dependencies {
-                if let Some((&next, _)) = members.get_key_value(dependency.name.as_str())
-                    && seen.insert(next)
-                {
-                    pending.push(next);
-                }
-            }
-        }
-        seen.retain(|name| {
-            members[name]
-                .dependencies
-                .iter()
-                .any(|dependency| dependency.name == "quote")
-        });
-        seen
-    };
-    let read_package = |expansion: &mut expansion::MacroSource, wanted: &str, libs_only: bool| {
-        for ((unit, package), &is_proc_macro) in
-            crates.iter().zip(package_of_crate).zip(proc_macro_crate)
-        {
-            // A library is a crate something can name; tests and bins are not.
-            if *package != wanted
-                || (libs_only && unit.names.is_empty())
-                || (!libs_only && !is_proc_macro)
-            {
-                continue;
-            }
-            for file in unit.files.iter().chain(&unit.spliced) {
-                if let Some(ast) = &file.ast {
-                    expansion.read(ast);
-                }
-            }
-        }
-    };
-    let mut expansions: HashMap<&str, expansion::MacroSource> = HashMap::new();
-    for (package, &is_proc_macro) in package_of_crate.iter().zip(proc_macro_crate) {
-        if !is_proc_macro || expansions.contains_key(package) {
-            continue;
-        }
-        let mut expansion = expansion::MacroSource::default();
-        read_package(&mut expansion, package, false);
-        for helper in helpers(package) {
-            read_package(&mut expansion, helper, true);
-        }
-        expansions.insert(package, expansion);
-    }
-    if expansions.is_empty() {
-        return;
-    }
-
-    for (package, package_references, _) in references.iter_mut() {
-        // Every workspace package this one depends on, however indirectly.
-        let mut reached: HashSet<&str> = HashSet::new();
-        let mut queue = vec![package.name.as_str()];
-        while let Some(name) = queue.pop() {
-            let Some(member) = members.get(name) else {
-                continue;
-            };
-            for dependency in &member.dependencies {
-                if let Some((&dep, _)) = members.get_key_value(dependency.name.as_str())
-                    && reached.insert(dep)
-                {
-                    queue.push(dep);
-                }
-            }
-        }
-        for (proc_macro, expansion) in &expansions {
-            if expansion.is_empty() || !reached.contains(proc_macro) {
-                continue;
-            }
-            let used = expansion
-                .entry_names()
-                .filter(|name| package_references.mentions(name));
-            let words = expansion.words_for(used);
-            package_references.add_opaque_words(&words);
-        }
-    }
-}
-
-/// [`proc_macro_expansions`] for proc macros from outside the workspace, read
-/// from the registry cache a build left: see [`metadata::ExternalMacro`].
-///
-/// Each source is resolved from its lib or proc-macro root like a workspace
-/// crate, under the configured `cfg` matrix and with none of the project's
-/// `ignore` patterns, and anything it warns about is dropped: a file that
-/// cannot be read there costs a mention, never a finding.
-fn external_macro_expansions(
-    meta: &metadata::Metadata,
-    config: &config::Config,
-    references: &mut [(&metadata::Package, deps::CrateReferences, cfg::Gates<'_>)],
-) {
-    if meta.external_macros.is_empty() {
-        return;
-    }
-    let unconfigured = config::Config::default();
-    for external in &meta.external_macros {
-        let users: Vec<usize> = references
-            .iter()
-            .enumerate()
-            .filter(|(_, (package, _, _))| external.users.contains(&package.name))
-            .map(|(index, _)| index)
-            .collect();
-        if users.is_empty() {
-            continue;
-        }
-        let mut source = expansion::MacroSource::default();
-        for package in &external.sources {
-            let gates = cfg::Gates::new(config.cfg(), package);
-            let roots = package.targets.iter().filter(|target| {
-                target
-                    .kind
-                    .iter()
-                    .any(|kind| matches!(kind.as_str(), "lib" | "rlib" | "proc-macro"))
-            });
-            for target in roots {
-                let mut ignored = Vec::new();
-                let resolved = modtree::resolve(
-                    &target.src_path,
-                    unconfigured.ignore(),
-                    &gates,
-                    &mut ignored,
-                );
-                for file in resolved.files.iter().chain(&resolved.spliced) {
-                    if let Some(ast) = &file.ast {
-                        source.read(ast);
-                    }
-                }
-            }
-        }
-        if source.is_empty() {
-            continue;
-        }
-        for index in users {
-            let package_references = &mut references[index].1;
-            let used = source
-                .entry_names()
-                .filter(|name| package_references.mentions(name));
-            let words = source.words_for(used);
-            package_references.add_opaque_words(&words);
-        }
-    }
-}
-
-/// Words by name: a macro's body words, or a package's defined macro names.
-type WordSets<K> = HashMap<K, HashSet<String>>;
-
-/// The words of every `macro_rules!` body in the workspace, by macro name,
-/// with the bodies of the macros each invokes folded in — and the names each
-/// package defines.
-fn macro_bodies<'p>(
-    crates: &[resolve::CrateUnit],
-    package_of_crate: &[&'p str],
-) -> (WordSets<String>, WordSets<&'p str>) {
-    use proc_macro2::{TokenStream, TokenTree};
-
-    fn words(tokens: &TokenStream, into: &mut HashSet<String>, invokes: &mut HashSet<String>) {
-        expansion::path_heads(tokens, into);
-        invoked(tokens, invokes);
-    }
-
-    fn invoked(tokens: &TokenStream, invokes: &mut HashSet<String>) {
-        let mut iter = tokens.clone().into_iter().peekable();
-        while let Some(tree) = iter.next() {
-            match tree {
-                TokenTree::Ident(ident) => {
-                    if matches!(iter.peek(), Some(TokenTree::Punct(p)) if p.as_char() == '!') {
-                        invokes.insert(ident.to_string());
-                    }
-                }
-                TokenTree::Group(group) => invoked(&group.stream(), invokes),
-                _ => {}
-            }
-        }
-    }
-
-    fn items<'a>(found: &mut Vec<&'a syn::ItemMacro>, list: &'a [syn::Item]) {
-        for item in list {
-            match item {
-                syn::Item::Macro(mac) if mac.mac.path.is_ident("macro_rules") => found.push(mac),
-                syn::Item::Mod(module) => {
-                    if let Some((_, inner)) = &module.content {
-                        items(found, inner);
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-
-    let mut direct: HashMap<String, (HashSet<String>, HashSet<String>)> = HashMap::new();
-    let mut defined_by: HashMap<&str, HashSet<String>> = HashMap::new();
-    for (unit, package) in crates.iter().zip(package_of_crate) {
-        for file in unit.files.iter().chain(&unit.spliced) {
-            let Some(ast) = &file.ast else { continue };
-            let mut found = Vec::new();
-            items(&mut found, &ast.items);
-            for mac in found {
-                let Some(name) = &mac.ident else { continue };
-                let name = name.to_string();
-                let entry = direct.entry(name.clone()).or_default();
-                words(&mac.mac.tokens, &mut entry.0, &mut entry.1);
-                defined_by.entry(package).or_default().insert(name);
-            }
-        }
-    }
-    let bodies = direct
-        .keys()
-        .map(|name| {
-            let mut all = HashSet::new();
-            let mut seen = HashSet::new();
-            let mut pending = vec![name.clone()];
-            while let Some(next) = pending.pop() {
-                if !seen.insert(next.clone()) {
-                    continue;
-                }
-                if let Some((body, invokes)) = direct.get(&next) {
-                    all.extend(body.iter().cloned());
-                    pending.extend(invokes.iter().cloned());
-                }
-            }
-            (name.clone(), all)
-        })
-        .collect();
-    (bodies, defined_by)
-}
-
 /// Which crates code Deadwood could not read may be naming, for the unused-pub
 /// check.
 ///
@@ -1279,25 +1008,7 @@ fn hidden_code_reach(
             ));
         }
     }
-    let members: HashMap<&str, &metadata::Package> = meta
-        .packages
-        .iter()
-        .map(|package| (package.name.as_str(), package))
-        .collect();
-    let mut surface: HashSet<&str> = HashSet::new();
-    let mut queue: Vec<&str> = whole.iter().copied().collect();
-    while let Some(name) = queue.pop() {
-        let Some(package) = members.get(name) else {
-            continue;
-        };
-        for dependency in &package.dependencies {
-            if let Some((&member, _)) = members.get_key_value(dependency.name.as_str())
-                && surface.insert(member)
-            {
-                queue.push(member);
-            }
-        }
-    }
+    let surface = meta.workspace_reach(whole.iter().copied());
     package_of_crate
         .iter()
         .map(|package| {
@@ -1445,12 +1156,7 @@ fn dead_file_roots(package: &metadata::Package, manifest_dir: &Path) -> Vec<Path
 /// crate names. The package name is kept as a fallback for the usual case
 /// where a package does not rename its lib target.
 fn crate_names(package: &metadata::Package, target: &metadata::Target) -> Vec<String> {
-    const LIB_KINDS: [&str; 6] = ["lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro"];
-    if !target
-        .kind
-        .iter()
-        .any(|kind| LIB_KINDS.contains(&kind.as_str()))
-    {
+    if !target.is_lib() {
         return Vec::new();
     }
     let mut names = vec![target.name.replace('-', "_")];
