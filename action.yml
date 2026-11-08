@@ -1,6 +1,6 @@
 # The repository doubles as a composite GitHub Action. By default the action
 # builds Deadwood from its own checked-out source, so the ref a workflow pins
-# (`rlorenzo/deadwood@main`, later a tag) *is* the tool version it runs — no
+# (`rlorenzo/deadwood-rs@main`, later a tag) *is* the tool version it runs — no
 # published release required, though dependencies still come from crates.io
 # as any build's do. The `version` input switches to installing a published
 # release instead.

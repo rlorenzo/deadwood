@@ -1,16 +1,16 @@
 # Configuration
 
-Deadwood needs no configuration, and with no `deadwood.toml` present it
-behaves exactly as the [README](../README.md) describes. The file exists to express what the
-analysis cannot infer: which files are not yours to fix, which checks you are
-ready to enforce, which crates have consumers Deadwood cannot see, which
-manifest entries are load bearing without being named in code, and which
-builds — features, targets, tests — you actually care about.
+Deadwood needs no configuration. With no `deadwood.toml` it behaves as the
+[README](../README.md) describes. The file expresses what the analysis cannot
+infer: which files are not yours to fix, which checks you are ready to enforce,
+which crates have consumers Deadwood cannot see, which manifest entries are load
+bearing without being named in code, and which builds (features, targets, tests)
+you care about.
 
-It is looked for by walking up from the analyzed path to the workspace root,
-and the nearest one wins; `--config PATH` overrides the search and fails if
-that file is missing. Relative patterns are resolved against the directory
-holding the file.
+Deadwood walks up from the analyzed path to the workspace root and uses the
+nearest `deadwood.toml`. `--config PATH` overrides the search and fails if that
+file is missing. Relative patterns resolve against the directory holding the
+file.
 
 ```toml
 # deadwood.toml — every setting, with its default behavior noted. The values
@@ -37,7 +37,6 @@ unused_pub_item = "warn"
 unused_reexport = "warn"
 unused_dependency = "deny"
 misplaced_dependency = "deny"
-unsatisfiable_cfg = "deny"
 test_only_item = "warn"     # `off` unless you ask; nothing else defaults to `off`
 # (`unused_pub_item` and `unused_reexport` above are `deny` unless a line like
 # these turns them down — the two spellings are what the setting is for.)
@@ -95,58 +94,51 @@ test = true
 baseline = ".deadwood/baseline.json"
 ```
 
-Five things are worth knowing about how these behave.
+Five things are worth knowing.
 
-**`ignore` suppresses findings, not evidence.** An ignored file is still read,
-and the paths in it still count as uses. Generated code that calls your
-`pub fn` is still calling it, and dropping that would make every `ignore` entry
-a source of false positives in the code beside it. The one thing `ignore` does
-reach into is module resolution: a `mod` declaration pointing at a *missing*
-file the patterns cover is skipped silently instead of warned about, so
-ignoring a generated module does not stop Deadwood checking the rest of its
-package.
+**`ignore` suppresses findings, not evidence.** An ignored file is still read
+and its paths still count as uses: generated code that calls your `pub fn` is
+still calling it. It does affect module resolution. A `mod` declaration pointing
+at a *missing* file the patterns cover is skipped silently instead of warned
+about, so ignoring a generated module does not stop Deadwood checking the rest
+of its package.
 
-**Severity is per kind, and only `deny` fails the run.** A `warn` finding is
-printed with its group marked `(warn)` and carries `"severity": "warn"` in the
-JSON, so a project can adopt a check as advisory before enforcing it. An `off`
-finding does not exist: it is absent from the output, the JSON, and the count —
-which is exactly what `test_only_item` is until a `[severity]` entry asks for
-it, and why adding that kind changed no output anywhere.
+**Severity is per kind, and only `deny` fails the run.** A `warn` finding is printed with its group marked
+`(warn)` and carries `"severity": "warn"` in the JSON, so a project can adopt a
+check as advisory before enforcing it. An `off` finding is absent from the
+output, the JSON and the count. `test_only_item` is `off` until a `[severity]`
+entry asks for it, which is why adding that kind changed no output anywhere.
 
-**`public-api` covers unused-pub items and unused re-exports alike**, since a
+**`public-api` covers unused-pub items and unused re-exports**, since a
 `pub use` is surface too. An allowlisted dependency entry that *is* referenced
-is not an error — the list means "do not judge this", not "assert this is
-unused".
+is not an error; the list means "do not judge this".
 
-**`cfg` narrows what is analyzed, not what is reported.** Code the matrix
-leaves out is not read, so it neither defines nor uses anything — and it is not
-a dead file either, because nothing reaches it only in the sense that this
-build does not contain it. That is the lever's real cost and its real value:
-`test = false` turns a test-only helper into an unused-pub finding, which is
-either the question you wanted answered or a page of noise, depending on the
-project. That overlaps `test_only_item` and does not replace it, in either
-direction. The matrix takes the tests out of the *build*, so it also takes
-them out of the evidence — a dev-dependency only the tests use becomes an
-unused-dependency finding, and a `#[cfg(test)]`-only file becomes a dead one —
-and what it reports is `unused_pub_item`, whose message says the item is dead.
-`test_only_item` keeps the tests in the build, changes no other check's
-answer, and says what to do instead. The matrix has the better recall (it does
-not care that an `assert_eq!` names the item); the kind has the narrower blast
-radius and the truer message. The `unsatisfiable_cfg` finding is the one thing the matrix does *not*
-affect — a gate is judged impossible against every build there could be, so
-narrowing the matrix never invents one and never silences one.
+**`cfg` narrows what is analyzed, not what is reported.** Code the matrix leaves
+out is not read, so it neither defines nor uses anything. It is not a dead file
+either, because nothing reaches it only in the sense that this build does not
+contain it. So `test = false` turns a test-only helper into an unused-pub
+finding, which is either the question you wanted answered or a page of noise,
+depending on the project.
 
-**`baseline` names a file, it does not switch a feature on.** A run reads the
-baseline whether or not the key is present — with it, from where it points;
-without it, from the default location if a file is there. What the key changes
-is the error contract: a path you wrote down must exist, while the default
-location may simply be empty. Note also that `ignore` and `severity = "off"`
-outrank the baseline, since a finding they remove never exists to be
-suppressed — which makes any baseline entry for it stale, and prunable.
+This overlaps `test_only_item` without replacing it. The matrix takes the tests
+out of the *build*, so it also takes them out of the evidence: a dev-dependency
+only the tests use becomes an unused-dependency finding, a `#[cfg(test)]`-only
+file becomes a dead one, and the item is reported as `unused_pub_item`, whose
+message says it is dead. `test_only_item` keeps the tests in the build, changes
+no other check's answer, and says what to do instead. The matrix has the better
+recall (it does not care that an `assert_eq!` names the item); the kind has the
+narrower blast radius and the truer message.
 
-Configuration mistakes are hard failures (exit 2), including unknown keys. A
-`deadwood.toml` that quietly does nothing because of a typo is worse than none
-at all, so a misspelled key names itself, its file, and the keys that do exist:
+**`baseline` names a file.** A run reads the baseline whether or not the key is
+present, from where the key points or else from the default location if a file
+is there. The key changes the error contract: a path you wrote down must exist,
+while the default location may be empty. `ignore` and `severity = "off"`
+outrank the baseline, since a finding they remove never exists to be suppressed,
+which makes any baseline entry for it stale and prunable.
+
+Configuration mistakes, including unknown keys, are hard failures (exit 2). A
+misspelled key names itself, its file, and the keys that do exist, so a typo
+cannot leave a `deadwood.toml` quietly doing nothing:
 
 ```console
 $ deadwood check

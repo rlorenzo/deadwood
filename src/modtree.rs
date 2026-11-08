@@ -118,7 +118,7 @@
 //! attributed to [`crate::resolve`]'s "counts on its own" referrer rather than
 //! to an enclosing definition the reachability walk could never reach.
 //!
-//! [#60]: https://github.com/rlorenzo/deadwood/issues/60
+//! [#60]: https://github.com/rlorenzo/deadwood-rs/issues/60
 //!
 //! Known simplifications, tracked for later:
 //! - `#[path]` is resolved relative to the declaring file's directory, which
@@ -744,7 +744,7 @@ struct Walk<'a> {
 /// share a file — tokio's `cfg_fs!` lives in `src/macros/cfg.rs` and is
 /// invoked from `src/lib.rs` ([#60]).
 ///
-/// [#60]: https://github.com/rlorenzo/deadwood/issues/60
+/// [#60]: https://github.com/rlorenzo/deadwood-rs/issues/60
 #[derive(Default)]
 struct MacroScan {
     /// What each `macro_rules!` definition whose body declares modules would
@@ -2164,7 +2164,7 @@ mod tests {
     /// even be defined for the claim to spare the file; a genuinely dead file
     /// beside it stays dead.
     ///
-    /// [#60]: https://github.com/rlorenzo/deadwood/issues/60
+    /// [#60]: https://github.com/rlorenzo/deadwood-rs/issues/60
     #[test]
     fn a_mod_declared_inside_a_macro_invocation_spares_its_file() {
         let names = reached(

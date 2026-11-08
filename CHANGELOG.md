@@ -1,250 +1,93 @@
 # Changelog
 
-Notable changes per release. The full phase-by-phase record — every decision,
-its rejected alternatives, the corpus measurements and mutation runs behind it
-— lives in
-[`docs/HISTORY.md`](https://github.com/rlorenzo/deadwood/blob/main/docs/HISTORY.md);
-this file is the short version, newest first.
+Notable changes per release, newest first. The full phase-by-phase record, with
+every decision, its rejected alternatives, and the corpus measurements and
+mutation runs behind it, is in
+[`docs/HISTORY.md`](https://github.com/rlorenzo/deadwood-rs/blob/main/docs/HISTORY.md).
 
 ## 1.0.0 — 2026-11-04
 
-First public release. The v1 check set is complete. Published as
+First public release. The v1 check set is complete. It is published as
 the `deadwood-rs` package, since the plain crates.io name belongs to an
-unrelated project; it installs a binary named `deadwood`.
+unrelated project, and it installs a binary named `deadwood`.
 
 ### Checks
 
-- **Dead files** — `.rs` files under `src/` unreachable from any target root
+- **Dead files**: `.rs` files under `src/` unreachable from any target root
   via `mod` declarations or a readable `include!`.
-- **Unused pub items** — fully-`pub` items nothing live in the workspace
-  reaches, decided by path resolution and a reachability walk, not by
-  counting identifiers: dead subsystems and dead cycles come out in one run.
-- **Unused re-exports** — `pub use` re-exports nothing goes through, inside
+- **Unused pub items**: fully-`pub` items nothing live in the workspace
+  reaches, decided by path resolution and a reachability walk rather than by
+  counting identifiers. Dead subsystems and dead cycles come out in one run.
+- **Unused re-exports**: `pub use` re-exports nothing goes through, inside
   the workspace or out.
-- **Unused dependencies** — manifest entries (normal, dev, build) whose crate
+- **Unused dependencies**: manifest entries (normal, dev, build) whose crate
   the declaring package's code never names.
-- **Misplaced dependencies** — entries declared in a table the code naming
-  them cannot see (e.g. a `[dependencies]` entry only tests use).
-- **Unsatisfiable `cfg` gates** — `#[cfg(...)]` gates that can hold in no
-  build of the package.
-- **Test-only public items** *(off by default)* — `pub` items the workspace
+- **Misplaced dependencies**: entries declared in a table the code naming
+  them cannot see, such as a `[dependencies]` entry only tests use.
+- **Test-only public items** (off by default): `pub` items the workspace
   reaches only through test code.
 
 ### Operation
 
-- `deadwood check [PATH]` with text or `--json` output; exit codes `0`
-  clean / `1` denied findings / `2` error, suitable for CI gates.
-- `deadwood.toml` configuration: `ignore` globs, per-kind severity,
-  `public-api` and dependency allowlists. Every default is the unconfigured
-  behavior.
-- Baseline adoption: `--write-baseline` records today's findings so later
-  runs fail only on what is new; `--prune-baseline` drops entries that no
-  longer occur. Entries survive file moves and renames of the paths around
-  them.
-- Workspace discovery via `cargo metadata --no-deps`; works offline; no
-  `unsafe` anywhere in the crate.
+- `deadwood check [PATH]` prints text or, with `--json`, JSON. Exit codes are
+  `0` clean, `1` denied findings, `2` error, so it works as a CI gate.
+- `deadwood.toml` sets `ignore` globs, per-kind severity, and `public-api` and
+  dependency allowlists. Every default is the unconfigured behavior.
+- `--write-baseline` records today's findings so later runs fail only on what
+  is new. `--prune-baseline` drops entries that no longer occur. Entries
+  survive file moves and renames of the paths around them.
+- Workspace discovery uses `cargo metadata --no-deps`, so it works offline.
+  The crate has no `unsafe`.
 
 ### Changed
 
-- Moved to `syn` 3, so the tree now holds one copy of it. Output is unchanged across
+- Moved to `syn` 3, so the tree holds one copy of it. Output is unchanged across
   427 crates and workspaces compared against the `syn` 2 build, apart from the
   wording of one parser error.
 
-### Fixed
+### Fixed before release
 
-Three bugs found by a full-codebase review:
+Bugs found while testing against bevy, ruff, helix, bun, serde, tokio, ripgrep
+and 1265 registry crates. Details are in `docs/HISTORY.md`.
 
-- `--prune-baseline` deleted entries for checks a run had skipped, and
-  `--write-baseline` could overwrite them the same way. Both now exit 2 and leave
-  the file alone when the run raised a warning.
-- A use through `cfg`-alternative glob imports reached only the first, so the other
-  was reported dead.
-- A `use real as alias;` in a function body was applied to the whole file, hiding
-  uses of a dependency named `alias` elsewhere in it.
-- A dependency named by `[features]` was reported unused or misplaced when its lib
-  target had a different name, because the feature's manifest key was compared
-  against the lib name.
-- A non-default optional dependency's custom lib name was not discovered, so the
-  entry was reported unused against code that uses it.
-- `ignore` patterns stopped matching when the workspace path was a symlink.
-- A file `#[path]` mounts as two modules could report live items dead. Its items no
-  longer take part in resolution.
+- `--prune-baseline` and `--write-baseline` leave entries for skipped checks
+  alone. Both exit 2 and leave the file untouched when the run raised a warning.
+- `ignore` patterns still match when the workspace path is a symlink.
+- Dependencies are no longer wrongly reported unused or misplaced when named by
+  `[features]`, an optional dependency's custom lib name, a `macro_rules!` body in
+  another workspace crate, or a proc macro's expansion. Deadwood reads macros
+  outside the workspace from the registry cache.
+- `use real as alias;` inside a function body no longer hides uses of a
+  dependency named `alias` elsewhere in the file.
+- Module resolution handles `mod r#struct;`, `#[path]` inside inline `mod`
+  blocks, `#[path]` targets that own their directory, and
+  `#[cfg_attr(cond, path = "..")]`. The condition is not evaluated: the first
+  arm naming a real file is the module and the others are spared.
+- Files mounted twice, or reached under two spellings through a symlinked
+  directory, no longer produce false dead-file or unused-item reports.
+- `macro_rules!` that declare modules are followed across crates and from inside
+  other macros.
+- The dead-file check walks the directories the lib and bin roots sit in, so a
+  crate with `[lib] path = "lib.rs"` is no longer skipped. It stops at nested
+  packages and at `tests/`, `examples/` and `benches/`.
+- Excluding a `cfg`-ruled-out module withholds only the directory the file
+  owns, which keeps live neighbours and the dependency check intact.
+- Glob imports reach every `cfg` alternative and see a sibling's private `use`
+  only from inside that module, so `pub use a::*; pub use b::*;` no longer
+  reports `b`'s items as unused. `use bun_core::{self, Output};` no longer cuts
+  later `bun_core::` paths short.
+- Paths and imports in files reached only through `include!` or a macro token
+  stream count as references. Doctests count as uses of the documented item,
+  but an item named only by its own doctest is still reported.
+- Proc-macro entry points are not reported, since the compiler invokes them.
+  Items under an attribute macro Deadwood cannot expand are not reported either,
+  since the macro may export them. The latter hides 37 findings over 11 registry
+  crates, 18 of them `#[async_trait]` items.
+- A package that `include!`s an unreadable file, such as a build-generated one,
+  keeps its `pub` items alive along with those of the workspace crates it
+  depends on, and a warning says so. `include!` paths built from `concat!` and
+  `env!` are followed where the tree or environment answers them.
 
-Eight false-positive classes found by running the release candidate over
-bevy, ruff, helix and bun, each checked finding by finding:
-
-- `mod r#struct;` was looked for at `r#struct.rs`, and the warning that raised
-  turned the unused-pub check off for the whole workspace.
-- An optional dependency only benches named was told to move to
-  `[dev-dependencies]`, where Cargo rejects `optional`. A bare `[features]`
-  entry naming an optional dependency's implicit feature now counts as naming
-  the dependency.
-- An item only a doctest named was reported unused. Fenced code in doc
-  comments now counts as a use by the documented item, so an item named only
-  by its own doctest, or by a dead item's, is still reported.
-- A package that `include!`s a file Deadwood cannot read, such as one generated
-  at build time, had its `pub` items reported although that code may call any of
-  them. `include!` paths built from `concat!` and `env!` are now followed where
-  the tree or the environment answers them (`CARGO_MANIFEST_DIR`, a built
-  `OUT_DIR`, any variable Deadwood runs with). Where they still can't be read,
-  the package's items are kept alive, along with the public items of the
-  workspace crates it depends on, and a warning says so.
-- A `macro_rules!` defined in one crate and invoked from another, or invoked
-  from inside another macro's rules, did not have its `mod` declarations
-  followed, so the files it declares were reported dead.
-- A dependency named only in another workspace crate's `macro_rules!` body
-  was reported unused by the crates invoking the macro.
-- A dependency named only by a proc macro's expansion — a derive reached
-  through a re-export, or tauri's `generate_context!` naming `serde_json` —
-  was reported unused. What each macro, and the helper libraries it builds
-  its output with, writes now counts for the packages that use it, read from
-  the registry cache for a macro outside the workspace.
-- A glob import that found a sibling module's private `use` first stopped
-  there, so a `pub use a::*; pub use b::*;` pair reported the item `b` defines
-  as unused when `a` imported it. A private `use` is now visible to a glob only
-  from its own module and the modules inside it.
-
-Eleven bugs, all found by running the analyzer over
-[bun](https://github.com/oven-sh/bun)'s Rust tree — a 108-crate, ~1M-line
-workspace, and the first in the corpus laid out flat, declared through macros,
-and entered from C++. Every rule below was settled by handing rustc the
-alternative spelling and watching it refuse to compile, not by reading the
-reference and hoping.
-
-**`#[path]` resolution.**
-
-- A `#[path]` written inside an inline `mod` block resolved from the declaring
-  file's directory rather than from the block's. `#[path = "Sub.rs"] mod sub;`
-  inside `mod outer { ... }` in `src/lib.rs` names `src/outer/Sub.rs`, not
-  `src/Sub.rs`. A `#[path]` on the inline block itself renames that directory,
-  and resolves one level out, from the declaring file's own directory.
-- A `#[path]` target only owned its parent directory when it was literally
-  named `mod.rs`. Every `#[path]` target owns it — rustc treats them all as
-  `mod.rs` files — so `mod child;` written in a `#[path = "body.rs"]` target
-  names a *sibling*, `src/child.rs`, and not `src/body/child.rs`.
-- `#[cfg_attr(cond, path = "..")]` was not read at all, though the macro token
-  scanner had always read it. serde declares the only module of
-  `serde_derive_internals` with a pair of them, one arm per build; the
-  condition is still not evaluated, the first arm naming a real file is the
-  module, and the others are spared rather than reported dead.
-
-**False positives — claims invented out of code that was read.**
-
-- Paths written in a file reached only through an `include!` or a macro token
-  stream were thrown away, so every item such a file was the sole caller of was
-  reported unused. Their *definitions* stay out of the symbol table, which is
-  the original rule and still right: a definition admitted at a guessed module
-  path invents claims of its own. A reference is the opposite trade — resolving
-  one can only mark definitions reached — so the two halves now separate.
-- A `macro_rules!` whose body says `#[path = $f] mod $m;` takes its file names
-  from the invocation's string literals, and its module names from idents that
-  say nothing about them: bun pairs `"toBeArrayOfSize.rs"` with
-  `to_be_array_of_size`, and no rule turns one into the other. Probing only the
-  idents missed all forty-eight matcher files. Such a macro defined *and*
-  invoked inside another macro's tokens — neither half an item the parser sees
-  — now settles itself from the one stream holding both.
-- One file reached under two spellings, because a symlinked directory gives it
-  two, was reported dead under the name its own package never claimed. serde
-  symlinks `serde/src/core` at `serde_core/src`.
-
-**Dead-file coverage.**
-
-- The check walked `<package>/src`, which is a convention rather than a rule:
-  the manifest says where a crate root lives, and `[lib] path = "lib.rs"` puts
-  it in the package directory. All 101 of bun's crates are laid out that way,
-  so the check found no directory to walk and reported nothing across a million
-  lines — silence, not a wrong answer, which is why it went unnoticed. It now
-  walks the directories the package's own lib and bin roots sit in, stopping at
-  a nested package and at the auto-discovered `tests/`, `examples/` and
-  `benches/` roots.
-- Whether a file is compiled is a question about the workspace, not one
-  package: `bun_runtime` mounts a file living in `bun_jsc`'s directory with
-  `#[path = "../jsc/generated_classes_list.rs"]`, and asking only `bun_jsc` —
-  whose module tree quite correctly never reaches it — reported a file the
-  build compiles.
-
-Every one of these was loud or silent rather than wrong in the first instance:
-unresolved modules raised warnings and skipped the affected checks, which is
-the conservative direction, but the coverage they cost was real. On bun,
-resolution now completes with 8 warnings instead of 183 — the remainder are
-`include!`s of build-generated files, unreadable without a build — and the run
-reports 818 findings instead of 472. On serde, resolving `serde_derive_internals`
-un-skipped the workspace-wide unused-pub check and surfaced five real items.
-tokio and ripgrep are unchanged, finding for finding.
-
-Excluding a `cfg`-ruled-out module keeps the narrower of the two `#[path]`
-rules on purpose: what leaves the build with a file is only the directory the
-file *owns*, not the one it merely resolves children from. Sweeping the shared
-directory would exclude live neighbours — for `#[path = "body.rs"] mod body;`
-in `src/lib.rs`, the whole crate — and an excluded file is withheld from the
-dependency check as well as the dead-file one, so over-reaching there would
-invent unused-dependency claims rather than merely lose findings.
-
-**Proc-macro entry points**, the eighth find from the same run. A
-`#[proc_macro]`, `#[proc_macro_derive]` or `#[proc_macro_attribute]` function
-is invoked by the compiler, never by a written path: code spells the derive,
-attribute, or macro the function registers, so no workspace will ever name
-the function itself, and deleting it — the advice the finding gives — breaks
-every crate using the macro. The three attributes already rooted what an
-entry point reaches; the entry point itself is now off the report beside
-`#[no_mangle]`, whose case this is — an export whose caller the analyzer
-cannot see. All 12 on bun's tree were false positives. Across the 1265
-unpacked registry crates on this machine (three `windows-0.x`
-generated-bindings crates skipped for size, none of them a proc-macro
-target), the change removes 244 findings over 82 proc-macro crates — every
-one an `unused_pub_item` on an entry-point function, nothing added, no other
-finding kind moved — and 62 of those crates, `clap_derive` and
-`serde_derive` among them, now run entirely clean.
-
-**Items an attribute macro may have exported**, the ninth. An attribute
-macro Deadwood cannot expand receives its item as tokens and may emit
-anything beside it — bun's `#[bun_jsc::host_fn]` writes an `extern "C"`
-shim around 800 times, handing the item to a caller outside Rust entirely —
-so an item under one is no longer reported. The analyzer already refuses to
-read through such a macro everywhere else (the item's mentions go to the
-opaque context, and its body already keeps alive what it names); the same
-refusal now covers the claim made about the item itself, so suppression is
-the whole change and nothing below the item moves. The cost is deliberate
-and measured: across the same registry sweep, 37 findings over 11 crates
-disappear — 18 of them `#[async_trait]` items, which that macro certainly
-does not export and the rule cannot know it — while `temporal_capi`, a
-diplomat-generated C-FFI crate of exactly bun's shape, and tokio now run
-entirely clean, with nothing added and no other finding kind moved. A
-`staticlib`/`cdylib` crate-type rule was considered and rejected: a mangled
-`pub fn` is not callable over the C ABI, and bun's `*_sys` crates carry
-genuinely-unreached blanket `pub` — findings the audit confirmed correct —
-that a crate-type rule would have silenced wholesale.
-
-**A `{self}` import is not its own meaning**, the tenth.
-`use bun_core::{self, Output};` binds the crate's name through a target
-spelled with that same name, and resolution let the import answer for its
-own head: the chase bottomed out at the alias depth cap and every later
-`bun_core::`-headed path in that module was cut short — with certainty
-rather than doubt, so nothing was even kept alive by name. The import now
-steps aside when resolving its own target, which is how rustc reads it, and
-the head lands on the extern crate: full precision restored, no
-conservatism spent. Four of the five hand-audited false positives behind
-ordinary functions were this.
-
-**A spliced file's imports are part of its references**, the eleventh. The
-earlier fix walked a spliced file's paths but not its `use` declarations,
-so a path leaning on one — `Output::enable_buffering_scope()` under
-`use bun_core::Output;` — resolved to a certain-sounding "absent" in a
-scope that was never fully read, and the item it names was reported dead.
-A spliced file's `use` declarations are now admitted as plain imports:
-resolution-only bindings, never reportable, at the module path the splice
-guessed. An import can only route a reference somewhere, so the worst a
-mis-guessed one does is mark the wrong definition used — a lost finding,
-never an invented one. The fifth audited false positive was this.
-
-Together on bun: all five items #77 hand-audited as live are quiet, 19
-findings removed in total, nothing added. Across the 1265-crate registry
-sweep, 35 findings over 8 crates disappear — backtrace, whose windows half
-hangs from exactly these import shapes, now runs entirely clean — and 5
-appear: every one a `pub` surface item nothing in its own workspace names
-(loom's `alloc::dealloc`, time's `refresh_tz` pair, in both unpacked
-versions), previously rescued by the blanket name-marking of a resolution
-that was failing beside a `pub(crate) use self::submodule::{...}` import.
-The masking-then-unmasking shape of #48 and #55 again: the imprecision
-that hid them was never what made the answer right, and each was
-hand-checked to have no caller in its workspace before being accepted.
+On bun, resolution now completes with 8 warnings instead of 183 and reports 818
+findings instead of 472. serde's `serde_derive_internals` now resolves and
+surfaces five real items. tokio and ripgrep are unchanged.

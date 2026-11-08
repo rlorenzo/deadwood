@@ -118,7 +118,7 @@
 //! entry that merely shares the alias's spelling is what made `serde_json`
 //! — `extern crate serde_core as serde;` beside a `serde` dev-dependency —
 //! look like a library naming its own dev-dependency
-//! ([#48](https://github.com/rlorenzo/deadwood/issues/48)).
+//! ([#48](https://github.com/rlorenzo/deadwood-rs/issues/48)).
 //!
 //! [`fold_aliases`] moves them, once per **target** rather than once per
 //! package. That is not an optimisation: a test target is a separate crate
@@ -168,7 +168,7 @@
 //! shift, a `[dev-dependencies]` entry named only from a `#[tokio::test] fn`
 //! was reported as belonging in `[dependencies]` — a finding invented against
 //! a manifest that compiles
-//! ([#49](https://github.com/rlorenzo/deadwood/issues/49)). The shift is for
+//! ([#49](https://github.com/rlorenzo/deadwood-rs/issues/49)). The shift is for
 //! runtime code only: expansion happens inside one crate, so whatever a macro
 //! leaves of an item in a dev target or a build script compiles into that same
 //! target, and the attribution written there holds whatever the macro does.
@@ -224,7 +224,7 @@
 //! by crate name, so both entries read one set — and the runtime mentions
 //! that justify the `[dependencies]` copy must not be held against the dev
 //! copy, whose own evidence is the dev mentions
-//! ([#55](https://github.com/rlorenzo/deadwood/issues/55)) *and the entry's
+//! ([#55](https://github.com/rlorenzo/deadwood-rs/issues/55)) *and the entry's
 //! own declaration*: a dev copy that turns on a feature the `[dependencies]`
 //! copy does not — or default features it opted out of — is load bearing
 //! whether or not any dev code names the crate, the way a `[features]`-listed
@@ -232,7 +232,7 @@
 //! outright, since with the feature off it is the only declaration there is. zed re-declares dependencies under `[dev-dependencies]` solely
 //! to add their `test-support` feature, in over a hundred manifests, and its
 //! dev code rarely names the crate directly
-//! ([#61](https://github.com/rlorenzo/deadwood/issues/61)). A doubled dev
+//! ([#61](https://github.com/rlorenzo/deadwood-rs/issues/61)). A doubled dev
 //! copy dev code names is therefore placed where it is; one that enables more
 //! is load bearing however silent the tests are; and only one with neither is
 //! a stale duplicate, claimed on the absence — the same footing as a
@@ -251,7 +251,7 @@
 //! itself, where it had two before. A third source was found after that
 //! measurement and is closed the other way: a mention under an attribute macro
 //! is not runtime evidence at all, but opaque
-//! ([#49](https://github.com/rlorenzo/deadwood/issues/49)).
+//! ([#49](https://github.com/rlorenzo/deadwood-rs/issues/49)).
 //!
 //! Two directions are still never reported. An entry nothing names is
 //! [`find_unused`]'s answer, not this one's; and an entry mentioned opaquely
@@ -279,7 +279,7 @@
 //! - A dependency named only by the code a derive expands to is kept alive by
 //!   its companion: a mentioned `X_derive`, `X_macros` or `X_impl` declared
 //!   beside `X` counts as evidence for `X`
-//!   ([#64](https://github.com/rlorenzo/deadwood/issues/64)), because the
+//!   ([#64](https://github.com/rlorenzo/deadwood-rs/issues/64)), because the
 //!   expansion names the base crate (`#[derive(Serialize)]` emits
 //!   `extern crate serde as _serde;`). The price is the mirror image: a
 //!   genuinely stale `X` beside a live companion is missed, never invented.
@@ -315,7 +315,7 @@
 //!   ([`crate::cfg::unexpandable_macro`]); the multi-segment spelling stays a
 //!   macro, derive or no derive. A test-confining single-segment macro on a
 //!   derive-carrying item would re-open
-//!   [#49](https://github.com/rlorenzo/deadwood/issues/49) in that corner; no
+//!   [#49](https://github.com/rlorenzo/deadwood-rs/issues/49) in that corner; no
 //!   such spelling has been seen (the known test-confining macros sit on bare
 //!   `fn`s).
 
@@ -435,7 +435,7 @@ pub struct CrateReferences {
     /// aliases one dependency to the *name of another* attributes every one of
     /// those mentions to the wrong entry: `serde_json` does exactly that with
     /// `extern crate serde_core as serde;` while carrying `serde` as a
-    /// dev-dependency ([#48](https://github.com/rlorenzo/deadwood/issues/48)).
+    /// dev-dependency ([#48](https://github.com/rlorenzo/deadwood-rs/issues/48)).
     aliases: HashMap<String, String>,
     /// Set when the package pulls in code Deadwood never sees, which would
     /// make any "never referenced" verdict a guess.
@@ -666,7 +666,7 @@ impl CrateReferences {
 /// manifest entry that merely shares the alias's spelling is what made
 /// `serde_json` — `extern crate serde_core as serde;` beside a `serde`
 /// dev-dependency — look like a library naming its own dev-dependency
-/// ([#48](https://github.com/rlorenzo/deadwood/issues/48)).
+/// ([#48](https://github.com/rlorenzo/deadwood-rs/issues/48)).
 ///
 /// The alias's own key is removed rather than emptied: after the fold nothing
 /// in *this* target names it, which is the truth. Another target naming it
@@ -1071,14 +1071,14 @@ fn misplacement(kind: DependencyKind, found: Contexts, doubled: Doubled) -> Opti
         // Unless the crate is doubled: then the runtime mentions are the
         // `[dependencies]` copy's evidence and prove nothing about this entry,
         // and the manifest compiles — the invented finding
-        // [#55](https://github.com/rlorenzo/deadwood/issues/55) filed. The
+        // [#55](https://github.com/rlorenzo/deadwood-rs/issues/55) filed. The
         // dev copy's own evidence is what remains, and it has two kinds: the
         // dev mentions, and the entry's own declaration. A copy dev code
         // names is placed right where it is. A copy that turns on a feature
         // the `[dependencies]` entry does not — zed re-declares a dependency
         // under `[dev-dependencies]` solely to add its `test-support` feature
         // for the tests, in over a hundred manifests
-        // ([#61](https://github.com/rlorenzo/deadwood/issues/61)) — is load
+        // ([#61](https://github.com/rlorenzo/deadwood-rs/issues/61)) — is load
         // bearing without being named, exactly as a `[features]`-listed entry
         // is, and claiming it would invent a finding against a manifest that
         // compiles. Only a copy with neither — nothing dev names it, and it
@@ -1135,7 +1135,7 @@ const COMPANION_SUFFIXES: &[&str] = &["_derive", "_macros", "_impl"];
 /// `extern crate serde as _serde;` — the base crate must be declared even
 /// though no source line names it, and cargo-machete special-cases the same
 /// pair for the same reason
-/// ([#64](https://github.com/rlorenzo/deadwood/issues/64)). The companion
+/// ([#64](https://github.com/rlorenzo/deadwood-rs/issues/64)). The companion
 /// must be *declared beside* the entry: a stray `serde_derive` in a doc
 /// comment of a package that never declared it proves nothing. The cost runs
 /// the safe way — a genuinely stale `serde` beside a live `serde_derive` is
@@ -1489,7 +1489,7 @@ impl Collector<'_, '_> {
     /// wrapper, and the doctests in those comments are the only place its
     /// `futures-concurrency` dev-dependency is named — data the crate ships,
     /// not data the macro consumes
-    /// ([#63](https://github.com/rlorenzo/deadwood/issues/63)).
+    /// ([#63](https://github.com/rlorenzo/deadwood-rs/issues/63)).
     fn tokens(&mut self, tokens: &TokenStream, strings: bool) {
         let mut iter = tokens.clone().into_iter().peekable();
         while let Some(tree) = iter.next() {
@@ -1839,7 +1839,7 @@ mod tests {
     /// spelled by the *lib* name in code — deno declares `md-5` and writes
     /// `md5::Md5Core`, declares `rustls-webpki` and writes `webpki::Error` —
     /// and both were reported unused against code that uses them
-    /// ([#62](https://github.com/rlorenzo/deadwood/issues/62)). With the lib
+    /// ([#62](https://github.com/rlorenzo/deadwood-rs/issues/62)). With the lib
     /// name known, the mention matches; without it (a cold cache), the
     /// package-name heuristic runs exactly as before.
     #[test]
@@ -1903,7 +1903,7 @@ mod tests {
     /// though no source line names it. tokio's `examples/` package hit this
     /// live: removing the "unused" `serde` breaks the build.
     ///
-    /// [#64]: https://github.com/rlorenzo/deadwood/issues/64
+    /// [#64]: https://github.com/rlorenzo/deadwood-rs/issues/64
     #[test]
     fn a_base_crate_is_kept_alive_by_its_mentioned_derive_companion() {
         let refs = references(&[
@@ -1948,7 +1948,7 @@ mod tests {
     /// `futures-concurrency` dev-dependency is named. The text of a
     /// `#[doc = "..."]` attribute is documentation wherever it sits, so its
     /// words count — as opaque mentions, alive and unjudged
-    /// ([#63](https://github.com/rlorenzo/deadwood/issues/63)).
+    /// ([#63](https://github.com/rlorenzo/deadwood-rs/issues/63)).
     #[test]
     fn a_doc_attribute_inside_a_macro_body_keeps_its_names_alive() {
         let refs = references(&[
@@ -2645,7 +2645,7 @@ mod tests {
     /// reported as belonging in `[dependencies]`, against a manifest that
     /// compiles.
     ///
-    /// [#49]: https://github.com/rlorenzo/deadwood/issues/49
+    /// [#49]: https://github.com/rlorenzo/deadwood-rs/issues/49
     #[test]
     fn an_attribute_macro_makes_its_items_mentions_opaque() {
         for attribute in [
@@ -2701,7 +2701,7 @@ mod tests {
     /// as belonging in `[dependencies]` was a finding invented against a
     /// manifest that compiles.
     ///
-    /// [#55]: https://github.com/rlorenzo/deadwood/issues/55
+    /// [#55]: https://github.com/rlorenzo/deadwood-rs/issues/55
     #[test]
     fn a_doubled_dev_copy_the_tests_name_is_left_alone() {
         let refs = references_from(&[
@@ -2768,7 +2768,7 @@ mod tests {
     /// is load bearing without being named, so claiming it would invent a
     /// finding against a manifest that compiles.
     ///
-    /// [#61]: https://github.com/rlorenzo/deadwood/issues/61
+    /// [#61]: https://github.com/rlorenzo/deadwood-rs/issues/61
     #[test]
     fn a_doubled_dev_copy_with_an_extra_feature_is_load_bearing() {
         let refs = references(&["pub fn go() { doubled::run(); }\n"]);
@@ -3068,7 +3068,7 @@ mod tests {
     /// the reasoning — such a manifest still does not compile — but the
     /// evidence: the refusal existed because the likelier explanation was a
     /// mis-attribution of ours, and the two that were left
-    /// ([#14](https://github.com/rlorenzo/deadwood/issues/14), then #44's
+    /// ([#14](https://github.com/rlorenzo/deadwood-rs/issues/14), then #44's
     /// `#[test]`) are closed. Measured over the corpus with them closed, this
     /// claim fires on nothing.
     #[test]

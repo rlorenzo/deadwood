@@ -65,7 +65,7 @@
 //!   fn twin` in two inline modules of one file differ in nothing else the key
 //!   looks at, so one entry used to suppress both — and a *third* `twin` added
 //!   later was suppressed before it existed
-//!   ([#16](https://github.com/rlorenzo/deadwood/issues/16)). The module path
+//!   ([#16](https://github.com/rlorenzo/deadwood-rs/issues/16)). The module path
 //!   is `crate`-rooted and crate-relative (`crate`, `crate::alpha`), it is what
 //!   [`crate::Finding::module`] carries, and — the property that makes it
 //!   admissible at all — it does not move when code above it does. That is the
@@ -75,7 +75,7 @@
 //!   `#[allow(non_snake_case)] pub fn Group(..)` beside it share a kind, a file,
 //!   a name *and* a module, so one entry covered both and a third same-named
 //!   item added to that module was suppressed before it existed
-//!   ([#30](https://github.com/rlorenzo/deadwood/issues/30)). What separates
+//!   ([#30](https://github.com/rlorenzo/deadwood-rs/issues/30)). What separates
 //!   those two is the namespace Rust binds each name in
 //!   ([`crate::Namespace`]), and it passes the same admissibility test the
 //!   module does: a definition does not change namespace because code around it
@@ -100,7 +100,7 @@
 //! `git mv src/legacy.rs src/legacy/mod.rs` changes no code and no item, and
 //! under the key above it turns every finding in the file into a new one and
 //! every entry recording them into a stale one. A pure rename failing the run
-//! is the defect ([#17](https://github.com/rlorenzo/deadwood/issues/17)).
+//! is the defect ([#17](https://github.com/rlorenzo/deadwood-rs/issues/17)).
 //!
 //! The fix is not rename detection, and nothing here computes a similarity
 //! signal. It is the observation that for an *item* the file is a second name
@@ -129,8 +129,7 @@
 //!   about the population. They are gone rather than set aside now.
 //!   Two unrelated dead files are indistinguishable
 //!   without a content signal, and this pass does not have one — so it does not
-//!   pretend to. The two dependency kinds and `unsatisfiable_cfg` are out for
-//!   the same reason, and a manifest path moves only when a whole package does,
+//!   pretend to. The two dependency kinds are out for the same reason, and a manifest path moves only when a whole package does,
 //!   which is a rarer event with no signal here either.
 //! - **It runs second, so it can never overrule the file.** A finding the exact
 //!   key matched is not left over, and neither is the entry that matched it. Two
@@ -176,7 +175,7 @@
 //!
 //! # The four kinds stay out, and that is now an answer rather than a residual
 //!
-//! [#32](https://github.com/rlorenzo/deadwood/issues/32) asked for the two
+//! [#32](https://github.com/rlorenzo/deadwood-rs/issues/32) asked for the two
 //! events this pass declines — a `dead_file` that moved, and a package
 //! directory that moved, which defeats even the item kinds because
 //! [`Packages::holding`] resolves a recorded path by containment and a path in
@@ -220,10 +219,9 @@
 //!
 //! # An absent qualifier is not a value: the fallback, in every direction
 //!
-//! Only three of the seven kinds have a module to name, and they are the same
-//! three that bind a name in a namespace. A dead file is not an item at all, the
-//! two dependency kinds name an entry in a manifest, and an unsatisfiable gate
-//! names the site the gate is written at rather than a definition — so the key
+//! Only three of the six kinds have a module to name, and they are the same
+//! three that bind a name in a namespace. A dead file is not an item at all, and
+//! the two dependency kinds name an entry in a manifest — so the key
 //! gained two fields most kinds can never fill, and every baseline written
 //! before each of them fills it for none of them.
 //!
@@ -354,8 +352,8 @@
 //! rather than a hope. Both are recorded on exactly the three kinds that name
 //! an item, and on no other — so every baseline that carries a `namespace`
 //! carries a `module`, and was already unreadable by anything older than that,
-//! while a file recording nothing but dead files, dependency entries or
-//! unsatisfiable gates carries neither and is byte-portable across all three
+//! while a file recording nothing but dead files or dependency entries carries
+//! neither and is byte-portable across all three
 //! versions. Both halves were measured against binaries built from `main` and
 //! from the commit before `module` existed, rather than read off the serde
 //! attribute, and `namespace_is_recorded_on_exactly_the_entries_module_is`
@@ -370,7 +368,7 @@
 //! read and applied by `main` and by the pre-`module` binary alike, and the
 //! same file with one extra key on each entry makes both of them exit 2 with
 //! ``unknown field `package` ``. That is the bill
-//! [#32](https://github.com/rlorenzo/deadwood/issues/32) was closed rather than
+//! [#32](https://github.com/rlorenzo/deadwood-rs/issues/32) was closed rather than
 //! pay.
 //!
 //! Relaxing the strictness would not fix any of it — the strict reader is the
@@ -1704,28 +1702,6 @@ mod tests {
         }
     }
 
-    /// An unsatisfiable gate names a site rather than a definition: it has a
-    /// name and no module, and half an identity is not one.
-    #[test]
-    fn a_gate_site_has_a_name_and_no_module_so_it_is_not_relocated() {
-        let before = finding(
-            FindingKind::UnsatisfiableCfg,
-            "src/lib.rs",
-            Some(3),
-            Some("mod imp"),
-        );
-        let after = finding(
-            FindingKind::UnsatisfiableCfg,
-            "src/moved.rs",
-            Some(3),
-            Some("mod imp"),
-        );
-
-        let (kept, report) = applied(&baseline(&[before]), vec![after]);
-        assert_eq!(reported(&kept), ["src/moved.rs"]);
-        assert_eq!(stale_of(&report).len(), 1, "{:?}", stale_of(&report));
-    }
-
     /// The kind is as load bearing in a relocation as it is in the key. An item
     /// and a re-export of it are different claims, and a file move is not a
     /// licence to swap one for the other.
@@ -1817,7 +1793,7 @@ mod tests {
     }
 
     /// The manifest half of the same event, which is the half
-    /// [#32](https://github.com/rlorenzo/deadwood/issues/32) called the cheap
+    /// [#32](https://github.com/rlorenzo/deadwood-rs/issues/32) called the cheap
     /// one — and whose refusal has a *different cause* than the item kinds'
     /// above, which is worth pinning because the issue's proposed fix turns on
     /// it.

@@ -23,9 +23,8 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-# Declared so the gates below are satisfiable in some build and the
-# `unsatisfiable_cfg` check stays quiet. Deadwood's matrix is the union of every
-# build, so both halves of each alternative are analyzed.
+# Declared so the gates below are satisfiable in some build. Deadwood's matrix
+# is the union of every build, so both halves of each alternative are analyzed.
 wide = []
 
 [workspace]

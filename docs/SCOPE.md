@@ -3,46 +3,47 @@
 ## Product direction
 
 A Fallow-style codebase health tool for Rust: point it at a workspace, get a
-prioritized, low-noise list of dead and unmaintained code. CLI first; output
-formats stable enough (JSON) that IDE/UI layers can be added later without
-reworking the core.
+prioritized, low-noise list of dead and unmaintained code. CLI first, with
+stable output (JSON) so IDE/UI layers can be added later without reworking the
+core.
 
 ## v0.1 — shipped in this baseline
 
 - Workspace discovery via `cargo metadata --no-deps` (all targets: lib, bins,
   tests, examples, benches, build scripts).
-- **Dead file detection**: `src/**.rs` unreachable from any target root
-  through `mod` resolution (inline mods, `mod.rs`/`name.rs` layouts,
-  `#[path]`).
-- **Unused pub item detection**: name-census heuristic over the whole
-  workspace; conservative (false negatives over false positives); attribute
-  and `fn main` escape hatches. (The census was replaced in phase 1 below;
-  the conservative bias and escape hatches carried over.)
+- **Dead file detection**: `src/**.rs` unreachable from any target root through
+  `mod` resolution (inline mods, `mod.rs`/`name.rs` layouts, `#[path]`).
+- **Unused pub item detection**: a conservative name-census heuristic over the
+  whole workspace (false negatives over false positives), with attribute and
+  `fn main` escape hatches. Phase 1 below replaced the census; the
+  conservative bias and escape hatches carried over.
 - Text + JSON reporting, CI-friendly exit codes (0 clean / 1 findings /
   2 error).
-- Quality gate: fmt + clippy `-D warnings` + tests + cargo-deny, locally
-  (`scripts/check.sh`) and in CI; mutation testing on changed code
-  (`scripts/mutants.sh`, informational in CI) and a semver check against
-  the previous tag at release time.
+- Quality gate: fmt + clippy `-D warnings` + tests + cargo-deny, run locally
+  (`scripts/check.sh`) and in CI. Also mutation testing on changed code
+  (`scripts/mutants.sh`, informational in CI) and a semver check against the
+  previous tag at release.
 
 ## Shipped phases
 
-Each phase is one slice, and each shipped with its decisions, rejected
-alternatives, corpus measurements and mutation runs written down in full in
-[`HISTORY.md`](HISTORY.md). This index is the short version.
+Each phase is one slice. [`HISTORY.md`](HISTORY.md) holds the full record of
+each: decisions, rejected alternatives, corpus measurements and mutation runs.
+This index is the short version.
 
 1. **Path-aware usage resolution** — the name census replaced by per-crate
    symbol-table resolution (`src/resolve.rs`): `use` trees and renames,
-   `crate::`/`self::`/`super::`, cross-crate paths between workspace members.
-   Unresolvable paths still count as uses of everything they could name.
+   `crate::`/`self::`/`super::`, and cross-crate paths between workspace
+   members. Unresolvable paths still count as uses of everything they could
+   name.
 2. **Unused dependency detection** — `unused_dependency`: a manifest entry
    whose crate name the declaring package's code never mentions, through any
    channel (`src/deps.rs`).
 3. **Configuration file** — `deadwood.toml` (`src/config.rs`): `ignore` globs,
-   per-kind severity, `public-api` and dependency allowlists; every default is
+   per-kind severity, `public-api` and dependency allowlists. Every default is
    the unconfigured behavior. Closes #4, #9.
 4. **`cfg` awareness** — gates evaluated against a build matrix instead of
-   always followed (`src/cfg.rs`); new `unsatisfiable_cfg` finding. Closes #5.
+   always followed (`src/cfg.rs`). Closes #5. Its `unsatisfiable_cfg` finding
+   was dropped before 1.0: rustc's `unexpected_cfgs` reports the same gates.
 5. **Misplaced dependency kinds** — `misplaced_dependency`: a `[dependencies]`
    entry only dev targets reference, a `[build-dependencies]` entry the build
    script never touches. Closes #10.
@@ -75,7 +76,7 @@ alternatives, corpus measurements and mutation runs written down in full in
     file, a name and a module stop sharing an entry. Closes #30.
 17. **The identity a moved dead file does not have** — #32 measured and closed
     as working as intended; the content-hash design is written down for
-    whoever picks it up. Found and filed #39 while measuring.
+    whoever picks it up. Measuring it turned up #39, which was filed.
 18. **The module tree an `include!` splices in** — a spliced file and the
     `mod` chains under it are not dead files; 246 false positives in
     `windows-sys` gone. Closes #39.
@@ -92,87 +93,79 @@ alternatives, corpus measurements and mutation runs written down in full in
     scoped to where the binding actually holds. Closes #48.
 23. **An item an attribute macro owns is macro input** — a runtime item under
     an attribute Deadwood cannot expand has its mentions moved to the opaque
-    context instead of read as library code, which closes the one shape in
-    which the placement check invented a finding. Closes #49.
+    context instead of read as library code, closing the one shape in which the
+    placement check invented a finding. Closes #49.
 24. **The opaque guard's population, counted** — #50 measured and closed as
     working as intended: zero missed findings in the canonical corpus, and
-    every blocked claim in a 330-crate sweep a suppression of noise. Found and
-    filed #55 while measuring. Closes #50.
+    every blocked claim in a 330-crate sweep suppressed noise. Measuring it
+    turned up #55, which was filed. Closes #50.
 25. **A claim is judged on the entry's own evidence** — a crate declared in
     both `[dependencies]` and `[dev-dependencies]` no longer has the library
-    mentions that justify the normal copy held against the dev copy; two live
+    mentions that justify the normal copy held against the dev copy. Two live
     invented findings in the extended registry gone. Closes #55.
 26. **One place, spelled two ways** — the baseline note prints its path as
-    configured on every platform: when the workspace root and a config-derived
+    configured on every platform. When the workspace root and a config-derived
     path disagree about a symlink (macOS's `/var`), the display strips against
     the canonical spelling of both. The macOS gate runs clean. Closes #53.
 27. **A doubled dev copy is judged on what it enables** — a dev copy that
-    turns on a feature the `[dependencies]` copy does not, default features
-    it opted out of, or that sits beside an `optional` normal copy, is load
-    bearing however silent the tests are; only a copy with neither dev
-    mentions nor anything extra to enable is a stale duplicate, and it is
-    worded as one rather than as a move. 42 invented findings in zed gone, 6
-    more re-worded to the claim that is actually true of them. Closes #61.
-
+    turns on a feature the `[dependencies]` copy does not, opts out of default
+    features, or sits beside an `optional` normal copy is load bearing however
+    silent the tests are. Only a copy with no dev mentions and nothing extra to
+    enable is a stale duplicate, and it is worded as one rather than as a move.
+    42 invented findings in zed gone, 6 more re-worded to the claim that is
+    actually true of them. Closes #61.
 28. **A `mod` declaration inside a macro token stream is a claim** — read
-    without expanding the macro and used only to spare files: literal `mod`s
-    in invocation arguments (tokio's `cfg_fs!`) and in `macro_rules!` bodies
-    resolved at every invocation site (serde's `crate_root!`), and the
-    invocation idents of a macro whose rules say `mod $x`
-    (`supported_targets!`), probed under the rules' inline-module prefix.
-    Spared files take the `include!` boundary: not dead, not resolved. 794
-    dead-file findings across five workspaces gone — tokio 381 → 0, rust
-    417 → 10, serde 36 → 1, rustdesk 6 → 0 — with every other finding kind
+    without expanding the macro and used only to spare files. This covers
+    literal `mod`s in invocation arguments (tokio's `cfg_fs!`), `mod`s in
+    `macro_rules!` bodies resolved at every invocation site (serde's
+    `crate_root!`), and the invocation idents of a macro whose rules say
+    `mod $x` (`supported_targets!`), probed under the rules' inline-module
+    prefix. Spared files take the `include!` boundary: not dead, not resolved.
+    794 dead-file findings across five workspaces gone (tokio 381 → 0, rust
+    417 → 10, serde 36 → 1, rustdesk 6 → 0), with every other finding kind
     byte-identical. Closes #60.
-
 29. **A reference that exists only for rustdoc claims nothing false** —
     `doctest` rides the `test` axis, so `#[cfg(doctest)]` confines to a test
-    build the way `#[cfg(test)]` always has; an item gated to rustdoc's
-    doctest build has rustdoc as its consumer and is exempt from item
-    findings (`ReadmeDoctests`); and the text of a `#[doc = "..."]` attribute
-    inside a macro body is documentation, mined for mentions like any doc
-    comment. Ten invented findings gone across regex, clap, tokio and
-    rust-lang/rust. Closes #63.
-
+    build the way `#[cfg(test)]` always has. An item gated to rustdoc's doctest
+    build has rustdoc as its consumer and is exempt from item findings
+    (`ReadmeDoctests`). The text of a `#[doc = "..."]` attribute inside a macro
+    body is documentation, mined for mentions like any doc comment. Ten
+    invented findings gone across regex, clap, tokio and rust-lang/rust.
+    Closes #63.
 30. **A derive's expansion names its base crate** — a mentioned `X_derive`,
     `X_macros` or `X_impl` declared beside `X` counts as evidence for `X`,
     because `#[derive(Serialize)]` emits `extern crate serde as _serde;` and
     the manifest must satisfy it. The invented finding in tokio's `examples`
-    package gone; the price is the mirror image, a genuinely stale base
-    beside a live companion, missed rather than invented. Closes #64.
-
-31. **A dependency is spelled by its lib target name** — code writes
-    `md5::` for the package `md-5` and `webpki::` for `rustls-webpki`, and
-    matching mentions against the package name reported both unused against
-    code that uses them. Lib names now come from a full
-    `cargo metadata --frozen` where a current lockfile and cached
-    resolution exist — any
-    checkout that has built once — from the `--no-deps` view for workspace
-    members always, and from the package-name heuristic, unchanged, where
-    neither can see. A `rename` still sets the extern name outright. Both
-    verified deno false positives gone; deno's third `rustls-webpki`
-    finding, in a package that names it nowhere, correctly remains.
-    Closes #62.
+    package is gone. The price is the mirror image: a genuinely stale base
+    beside a live companion is missed rather than invented. Closes #64.
+31. **A dependency is spelled by its lib target name** — code writes `md5::`
+    for the package `md-5` and `webpki::` for `rustls-webpki`, and matching
+    mentions against the package name reported both unused against code that
+    uses them. Lib names now come from a full `cargo metadata --frozen` where a
+    current lockfile and cached resolution exist (any checkout that has built
+    once), from the `--no-deps` view for workspace members always, and from the
+    package-name heuristic, unchanged, where neither can see. A `rename` still
+    sets the extern name outright. Both verified deno false positives gone;
+    deno's third `rustls-webpki` finding, in a package that names it nowhere,
+    correctly remains. Closes #62.
 
 ## Next (sequenced, one slice at a time)
 
-Nothing is queued. The issue list is empty and this index says the same
-thing, which is the invariant this section exists to keep: the next slice
-starts by being *filed*, with its population measured, so that neither the
-roadmap nor the tracker can quietly rot.
-
-The roadmap and the issue list say the same thing, so neither can quietly
-rot. What shipped is in the index above and in [`HISTORY.md`](HISTORY.md).
+Nothing is queued. The issue list is empty and this index says the same thing.
+This section exists to keep that invariant: the next slice starts by being
+*filed*, with its population measured, so neither the roadmap nor the tracker
+can quietly rot. What shipped is in the index above and in
+[`HISTORY.md`](HISTORY.md).
 
 ## Explicitly out of scope for now
 
 - **Duplicate/similar-logic detection** — needs token/AST fingerprinting and
   careful noise control; deferred until the dead-code core is trustworthy.
 - **Architecture analysis** (layering, cycles, module coupling metrics).
-- **IDE integration, LSP, or any UI/visual reporting** — the JSON output is
-  the seam where these will attach later.
-- **Plugin system** — every detector shares one analysis pass and one report;
-  nothing yet wants to be pluggable.
+- **IDE integration, LSP, or any UI/visual reporting** — these will attach at
+  the JSON output later.
+- **Plugin system** — every detector shares one analysis pass and one report,
+  and nothing yet wants to be pluggable.
 - **Semantic (type-level) analysis** via rustc internals or rust-analyzer —
   revisit once the syntactic approach hits its accuracy ceiling (tracked in
   `docs/ENVIRONMENT.md`).
@@ -183,12 +176,13 @@ rot. What shipped is in the index above and in [`HISTORY.md`](HISTORY.md).
 - Prefer false negatives to false positives; a noisy dead-code tool gets
   uninstalled.
 - Every limitation is documented where it lives (module docs) and in
-  [`LIMITATIONS.md`](LIMITATIONS.md) — and *filed*: an unfiled limitation is one nobody is counting, and
-  one (phase 22's #48) turned out to be masking a live false positive.
+  [`LIMITATIONS.md`](LIMITATIONS.md), and *filed*. An unfiled limitation is one
+  nobody is counting, and one (phase 22's #48) turned out to be masking a live
+  false positive.
 - New dependencies only for confirmed problems; std + `syn` + `proc-macro2` +
   `serde` + `serde_json` + `clap` + `anyhow` + `toml` is the current ceiling.
-  (Path resolution needed no new crate, only `syn`'s `visit` feature; unused
-  dependency detection needed none at all — `cargo metadata` already reports
-  the manifest. `toml` arrived with the config file in phase 3, parse-only, and
-  was the only addition: glob matching stayed in-tree, and `cfg` evaluation in
-  phase 4 was `syn` attribute walking.)
+  Path resolution needed no new crate, only `syn`'s `visit` feature. Unused
+  dependency detection needed none at all, since `cargo metadata` already
+  reports the manifest. `toml` arrived with the config file in phase 3,
+  parse-only, and was the only addition: glob matching stayed in-tree, and
+  `cfg` evaluation in phase 4 was `syn` attribute walking.
