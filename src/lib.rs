@@ -48,6 +48,7 @@ pub mod modtree;
 pub mod report;
 
 mod deps;
+mod expansion;
 mod glob;
 mod resolve;
 mod unused;
@@ -985,35 +986,6 @@ fn feature_list(names: &[String]) -> String {
     }
 }
 
-/// The identifiers `tokens` uses as the head of a path — `x` in `x::y` or
-/// `::x::y`, and in `extern crate x` — at any depth, which is how macro output
-/// names a crate. A bare identifier is far more often a local: `tokio::join!`
-/// binds one called `futures`, and counting it would hide every `futures`
-/// entry of every package that joins.
-fn path_heads(tokens: &proc_macro2::TokenStream, into: &mut HashSet<String>) {
-    use proc_macro2::{Spacing, TokenTree};
-    let trees: Vec<TokenTree> = tokens.clone().into_iter().collect();
-    for (index, tree) in trees.iter().enumerate() {
-        match tree {
-            TokenTree::Ident(ident) => {
-                let colons = matches!(
-                    (trees.get(index + 1), trees.get(index + 2)),
-                    (Some(TokenTree::Punct(a)), Some(TokenTree::Punct(b)))
-                        if a.as_char() == ':' && a.spacing() == Spacing::Joint && b.as_char() == ':'
-                );
-                let after_extern_crate = index >= 2
-                    && matches!(&trees[index - 1], TokenTree::Ident(c) if c == "crate")
-                    && matches!(&trees[index - 2], TokenTree::Ident(e) if e == "extern");
-                if colons || after_extern_crate {
-                    into.insert(ident.to_string());
-                }
-            }
-            TokenTree::Group(group) => path_heads(&group.stream(), into),
-            _ => {}
-        }
-    }
-}
-
 /// Count what a workspace proc macro's expansion can name as a mention by
 /// every package that uses the macro.
 ///
@@ -1035,94 +1007,7 @@ fn proc_macro_expansions(
     proc_macro_crate: &[bool],
     references: &mut [(&metadata::Package, deps::CrateReferences, cfg::Gates<'_>)],
 ) {
-    use proc_macro2::{TokenStream, TokenTree};
-    use syn::visit::Visit;
-
-    #[derive(Default)]
-    struct Expansion {
-        /// The names a consumer writes to invoke one of the crate's macros.
-        entry_points: HashSet<String>,
-        /// What the expansions may name.
-        words: HashSet<String>,
-    }
-
-    fn all_words(tokens: &TokenStream, into: &mut HashSet<String>) {
-        for tree in tokens.clone() {
-            match tree {
-                TokenTree::Ident(ident) => {
-                    into.insert(ident.to_string());
-                }
-                TokenTree::Group(group) => all_words(&group.stream(), into),
-                TokenTree::Literal(literal) => literal_words(&literal.to_string(), into),
-                TokenTree::Punct(_) => {}
-            }
-        }
-    }
-
-    /// The words of a string that could be a crate or path name —
-    /// `"bevy_extract"` for a manifest lookup, `"{}::Key"` for a `format!` —
-    /// and not of one with whitespace in it, which is prose: tokio-macros'
-    /// error messages say "futures" and would hide a `futures` entry.
-    fn literal_words(text: &str, into: &mut HashSet<String>) {
-        let text = text.trim_matches('"');
-        if text.chars().any(char::is_whitespace) {
-            return;
-        }
-        for word in text
-            .split(|c: char| !c.is_alphanumeric() && c != '_')
-            .filter(|word| !word.is_empty())
-        {
-            into.insert(word.to_string());
-        }
-    }
-
-    impl<'ast> Visit<'ast> for Expansion {
-        fn visit_macro(&mut self, node: &'ast syn::Macro) {
-            syn::visit::visit_macro(self, node);
-            // `quote!`, `quote_spanned!`, `parse_quote!` and the like.
-            if node
-                .path
-                .segments
-                .last()
-                .is_some_and(|segment| segment.ident.to_string().contains("quote"))
-            {
-                path_heads(&node.tokens, &mut self.words);
-                for tree in node.tokens.clone() {
-                    if let TokenTree::Literal(literal) = tree {
-                        literal_words(&literal.to_string(), &mut self.words);
-                    }
-                }
-            } else {
-                // `format!("{}::Key", krate)` and friends build paths too.
-                for tree in node.tokens.clone() {
-                    if let TokenTree::Literal(literal) = tree {
-                        literal_words(&literal.to_string(), &mut self.words);
-                    }
-                }
-            }
-        }
-
-        fn visit_lit_str(&mut self, node: &'ast syn::LitStr) {
-            literal_words(&node.value(), &mut self.words);
-        }
-
-        fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
-            for attr in &node.attrs {
-                let path = attr.path();
-                if path.is_ident("proc_macro") || path.is_ident("proc_macro_attribute") {
-                    self.entry_points.insert(node.sig.ident.to_string());
-                } else if path.is_ident("proc_macro_derive")
-                    && let syn::Meta::List(list) = &attr.meta
-                {
-                    // The derive's name and its `attributes(..)` helpers.
-                    all_words(&list.tokens, &mut self.entry_points);
-                }
-            }
-            syn::visit::visit_item_fn(self, node);
-        }
-    }
-
-    let mut expansions: HashMap<&str, Expansion> = HashMap::new();
+    let mut expansions: HashMap<&str, expansion::MacroSource> = HashMap::new();
     for ((unit, package), &is_proc_macro) in
         crates.iter().zip(package_of_crate).zip(proc_macro_crate)
     {
@@ -1132,10 +1017,9 @@ fn proc_macro_expansions(
         let expansion = expansions.entry(package).or_default();
         for file in unit.files.iter().chain(&unit.spliced) {
             if let Some(ast) = &file.ast {
-                expansion.visit_file(ast);
+                expansion.read(ast);
             }
         }
-        expansion.entry_points.remove("attributes");
     }
     if expansions.is_empty() {
         return;
@@ -1163,14 +1047,14 @@ fn proc_macro_expansions(
             }
         }
         for (proc_macro, expansion) in &expansions {
-            if reached.contains(proc_macro)
-                && expansion
-                    .entry_points
-                    .iter()
-                    .any(|name| package_references.mentions(name))
-            {
-                package_references.add_opaque_words(&expansion.words);
+            if expansion.is_empty() || !reached.contains(proc_macro) {
+                continue;
             }
+            let used = expansion
+                .entry_names()
+                .filter(|name| package_references.mentions(name));
+            let words = expansion.words_for(used);
+            package_references.add_opaque_words(&words);
         }
     }
 }
@@ -1188,7 +1072,7 @@ fn macro_bodies<'p>(
     use proc_macro2::{TokenStream, TokenTree};
 
     fn words(tokens: &TokenStream, into: &mut HashSet<String>, invokes: &mut HashSet<String>) {
-        path_heads(tokens, into);
+        expansion::path_heads(tokens, into);
         invoked(tokens, invokes);
     }
 
