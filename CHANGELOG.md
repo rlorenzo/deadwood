@@ -5,7 +5,7 @@ every decision, its rejected alternatives, and the corpus measurements and
 mutation runs behind it, is in
 [`docs/HISTORY.md`](https://github.com/rlorenzo/deadwood-rs/blob/main/docs/HISTORY.md).
 
-## 1.0.0 — 2026-11-04
+## 1.0.0 — 2026-11-08
 
 First public release. The v1 check set is complete. It is published as
 the `deadwood-rs` package, since the plain crates.io name belongs to an
