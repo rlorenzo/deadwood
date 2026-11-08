@@ -1323,15 +1323,24 @@ fn newest_out_dir(manifest_dir: &Path) -> Option<PathBuf> {
     }
     let manifest = fs::read_to_string(manifest_dir.join("Cargo.toml")).ok()?;
     let name = toml::from_str::<Manifest>(&manifest).ok()?.package?.name;
-    let target = std::env::var_os("CARGO_TARGET_DIR")
+    // Both places a build may have gone: a shared `CARGO_TARGET_DIR` holds
+    // nothing for a checkout built without it, and the reverse.
+    let targets = std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
-        .or_else(|| {
+        .into_iter()
+        .chain(
             manifest_dir
                 .ancestors()
                 .map(|ancestor| ancestor.join("target"))
-                .find(|target| target.is_dir())
-        })?;
+                .find(|target| target.is_dir()),
+        );
+    // `<package>-<16 hex digits>`, exactly: `tokio-` alone would match
+    // `tokio-macros-<hash>` too.
     let prefix = format!("{name}-");
+    let is_build_of_package = |dir: &str| {
+        dir.strip_prefix(&prefix)
+            .is_some_and(|hash| hash.len() == 16 && hash.chars().all(|c| c.is_ascii_hexdigit()))
+    };
     let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
     let mut consider = |build: PathBuf| {
         let Ok(entries) = fs::read_dir(&build) else {
@@ -1339,8 +1348,8 @@ fn newest_out_dir(manifest_dir: &Path) -> Option<PathBuf> {
         };
         for entry in entries.flatten() {
             let out = entry.path().join("out");
-            let named = entry.file_name().to_string_lossy().starts_with(&prefix);
-            if let (true, Ok(meta)) = (named, fs::metadata(&out))
+            if is_build_of_package(&entry.file_name().to_string_lossy())
+                && let Ok(meta) = fs::metadata(&out)
                 && let Ok(modified) = meta.modified()
                 && newest.as_ref().is_none_or(|(time, _)| modified > *time)
             {
@@ -1348,12 +1357,18 @@ fn newest_out_dir(manifest_dir: &Path) -> Option<PathBuf> {
             }
         }
     };
-    for profile in fs::read_dir(&target).ok()?.flatten() {
-        consider(profile.path().join("build"));
-        // `<target>/<triple>/<profile>/build`
-        if let Ok(nested) = fs::read_dir(profile.path()) {
-            for inner in nested.flatten() {
-                consider(inner.path().join("build"));
+    let is_dir = |entry: &fs::DirEntry| entry.file_type().is_ok_and(|kind| kind.is_dir());
+    for target in targets {
+        let Ok(profiles) = fs::read_dir(&target) else {
+            continue;
+        };
+        for profile in profiles.flatten().filter(is_dir) {
+            consider(profile.path().join("build"));
+            // `<target>/<triple>/<profile>/build`
+            if let Ok(nested) = fs::read_dir(profile.path()) {
+                for inner in nested.flatten().filter(is_dir) {
+                    consider(inner.path().join("build"));
+                }
             }
         }
     }

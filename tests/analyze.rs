@@ -4925,13 +4925,19 @@ fn an_include_path_built_from_env_is_followed_where_the_tree_answers_it() {
         "Signature: 8a477f597d28d172789f06886806bc55\n",
     );
     write(
-        "target/debug/build/envinclude-0ld/out/thunks.rs",
+        "target/debug/build/envinclude-00000000000000a1/out/thunks.rs",
         "fn main() {}\n",
     );
     std::thread::sleep(std::time::Duration::from_millis(20));
     write(
-        "target/debug/build/envinclude-n3w/out/thunks.rs",
+        "target/debug/build/envinclude-00000000000000b2/out/thunks.rs",
         "fn main() { crate::imp::from_thunk(); table(); }\n",
+    );
+    // Newer still, but another package's: its name only starts with this one's.
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    write(
+        "target/debug/build/envinclude-macros-00000000000000c3/out/thunks.rs",
+        "fn main() {}\n",
     );
 
     let analysis = analyze(&root, None).expect("analysis should succeed");

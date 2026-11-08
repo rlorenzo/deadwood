@@ -2487,6 +2487,9 @@ impl<'ast> Visit<'ast> for RefWalker<'_> {
     /// module's `helper`, so the enclosing scopes are set aside rather than
     /// merely shadowed.
     fn visit_item(&mut self, node: &'ast syn::Item) {
+        // Rustdoc ends an unterminated fence with the doc block it is in, so
+        // one item's docs start outside any fence whatever the last one left.
+        self.doc_fence = None;
         let values = std::mem::take(&mut self.value_scopes);
         let types = std::mem::take(&mut self.type_scopes);
         let pos = std::mem::replace(&mut self.pos, PathPos::Other);
@@ -2505,15 +2508,28 @@ impl<'ast> Visit<'ast> for RefWalker<'_> {
     /// A member of an `impl` or `trait` opens a scope for its own generics
     /// and parameters, on top of the block's — `impl<T> Foo<T>` is in scope
     /// throughout every method.
+    fn visit_field(&mut self, node: &'ast syn::Field) {
+        self.doc_fence = None;
+        syn::visit::visit_field(self, node);
+    }
+
+    fn visit_variant(&mut self, node: &'ast syn::Variant) {
+        self.doc_fence = None;
+        syn::visit::visit_variant(self, node);
+    }
+
     fn visit_impl_item(&mut self, node: &'ast syn::ImplItem) {
+        self.doc_fence = None;
         self.in_scope(|walker| syn::visit::visit_impl_item(walker, node));
     }
 
     fn visit_trait_item(&mut self, node: &'ast syn::TraitItem) {
+        self.doc_fence = None;
         self.in_scope(|walker| syn::visit::visit_trait_item(walker, node));
     }
 
     fn visit_foreign_item(&mut self, node: &'ast syn::ForeignItem) {
+        self.doc_fence = None;
         self.in_scope(|walker| syn::visit::visit_foreign_item(walker, node));
     }
 
@@ -4238,6 +4254,15 @@ mod tests {
             unused_in_root(source),
             vec!["prose", "shell", "tagged", "documented"]
         );
+
+        // An unterminated fence ends with its item's docs: the next item's
+        // balanced block is still read as code, and its prose as prose.
+        let source = "pub fn named() {}\npub fn prose_word() {}\n\
+            /// ```\n/// unclosed\npub fn first() {}\n\
+            /// ```\n/// krate::named();\n/// ```\n/// prose_word\npub fn second() {}\n";
+        let unused = unused_in_root(source);
+        assert!(!unused.contains(&"named".to_string()), "{unused:?}");
+        assert!(unused.contains(&"prose_word".to_string()), "{unused:?}");
 
         // An item only its own doctest names is still dead, and so is one
         // only a dead item's doctest names.

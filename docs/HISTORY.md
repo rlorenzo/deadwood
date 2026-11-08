@@ -2796,7 +2796,8 @@ history in the corpus and one private one: bevy, ruff, helix, bun's Rust tree
 (again, at a later commit) and triptape. A subagent checked every finding
 against the source, sampling only within large homogeneous clusters. Eight
 false-positive classes came out, and every one is fixed rather than
-documented, except the one that can't be fixed without expansion.
+documented. The one that first looked unfixable without expansion, a proc
+macro from outside the workspace, was closed later in the phase.
 
 ### What was wrong
 
@@ -2892,7 +2893,7 @@ way. triptape analyzes clean without its `allow-in` for
 
 | Workspace | Before | After | False positives fixed |
 | --- | --- | --- | --- |
-| bevy | 37 | 429 | 26 (9 dependency, 17 glob) |
+| bevy | 37 | 430 | 26 (9 dependency, 17 glob) |
 | ruff | 31 | 16 | 15 |
 | helix | 53 | 52 | 1 |
 | bun | 1,229 | 13 | about 1,160 |
@@ -2900,10 +2901,12 @@ way. triptape analyzes clean without its `allow-in` for
 | tokio | 7 | 6 | 1 (`tokio-test`, optional) |
 | serde, ripgrep | 5, 3 | 5, 3 | 0 |
 
-bevy's 429 are 28 of the first run's findings — its 24 true positives (the
+bevy's 430 are 28 of the first run's findings — its 24 true positives (the
 first pass's 25, less `bevy_log`) and the 4 wasm entries that are the
 documented transitive-feature case — plus 401 the re-enabled check found,
 all verified: 323 unused `bevy_color` palette constants, 73 other items and
-5 dependency findings in `benches`. Every remaining finding in the other workspaces was verified in
+5 dependency findings in `benches` — and `resource_exists_and_equals`, named
+only by its own doctest, which an unterminated fence in an earlier item's docs
+had hidden until fence state was reset at each item. Every remaining finding in the other workspaces was verified in
 the first pass.
 

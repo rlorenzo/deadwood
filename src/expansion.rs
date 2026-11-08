@@ -102,11 +102,34 @@ fn workspace_proc_macros(
     }
     for (package, package_references, _) in references.iter_mut() {
         let reached = meta.workspace_reach([package.name.as_str()]);
-        for (proc_macro, source) in &macros {
-            if reached.contains(proc_macro) {
-                source.credit(package_references);
-            }
-        }
+        let used: Vec<&MacroSource> = macros
+            .iter()
+            .filter(|(proc_macro, _)| reached.contains(*proc_macro))
+            .map(|(_, source)| source)
+            .collect();
+        credit_all(&used, package_references);
+    }
+}
+
+/// Credit `sources` to a package, deciding which of their macros it uses
+/// from its own code before adding any of their output. Crediting one source
+/// at a time let a word one added mark another's entry point as mentioned, so
+/// the answer depended on the order the sources came in; and settling that
+/// to a fixed point instead let helper-attribute names as plain as `texture`
+/// chain one derive's output into every other's.
+fn credit_all(sources: &[&MacroSource], references: &mut deps::CrateReferences) {
+    let words: Vec<HashSet<String>> = sources
+        .iter()
+        .map(|source| {
+            source.words_for(
+                source
+                    .entry_names()
+                    .filter(|name| references.mentions(name)),
+            )
+        })
+        .collect();
+    for words in &words {
+        references.add_opaque_words(words);
     }
 }
 
@@ -126,6 +149,7 @@ fn external_proc_macros(
 ) {
     let unconfigured = config::Config::default();
     let mut read: HashMap<&std::path::Path, MacroSource> = HashMap::new();
+    let mut sources: Vec<(&HashSet<String>, MacroSource)> = Vec::new();
     for external in &meta.external_macros {
         if !references
             .iter()
@@ -152,11 +176,15 @@ fn external_proc_macros(
             });
             source.absorb(one);
         }
-        for (package, package_references, _) in references.iter_mut() {
-            if external.users.contains(&package.name) {
-                source.credit(package_references);
-            }
-        }
+        sources.push((&external.users, source));
+    }
+    for (package, package_references, _) in references.iter_mut() {
+        let used: Vec<&MacroSource> = sources
+            .iter()
+            .filter(|(users, _)| users.contains(&package.name))
+            .map(|(_, source)| source)
+            .collect();
+        credit_all(&used, package_references);
     }
 }
 
@@ -305,13 +333,6 @@ impl MacroSource {
         merge(&mut self.calls, &other.calls);
         self.global_words.extend(other.global_words.iter().cloned());
         self.global_calls.extend(other.global_calls.iter().cloned());
-    }
-
-    /// Count what the macros `references`' package uses write as its
-    /// mentions.
-    fn credit(&self, references: &mut deps::CrateReferences) {
-        let words = self.words_for(self.entry_names().filter(|name| references.mentions(name)));
-        references.add_opaque_words(&words);
     }
 
     /// What using the macros named `used` may expand to: the words of the
@@ -554,6 +575,29 @@ mod tests {
             names,
             ["AsBindGroup", "SpecializerKey", "marked", "texture"]
         );
+    }
+
+    /// One macro's output naming another's entry point: whichever order the
+    /// sources come in, only what the package itself uses is credited.
+    #[test]
+    fn crediting_does_not_depend_on_the_order_the_macros_come_in() {
+        let outer = source(
+            "#[proc_macro_derive(Outer)]\n\
+             pub fn outer(i: TokenStream) -> TokenStream { emit_derive(\"Inner\") }\n",
+        );
+        let inner = source(
+            "#[proc_macro_derive(Inner)]\n\
+             pub fn inner(i: TokenStream) -> TokenStream { quote! { impl ::dep_b::Trait for X {} } }\n",
+        );
+        for order in [[&outer, &inner], [&inner, &outer]] {
+            let mut references = deps::CrateReferences::default();
+            references.add_opaque_words(&["Outer".to_string()]);
+            credit_all(&order, &mut references);
+            assert!(
+                !references.mentions("dep_b"),
+                "the package never uses `Inner`"
+            );
+        }
     }
 
     /// Path heads only: a bare identifier is a local, and `extern crate x`
