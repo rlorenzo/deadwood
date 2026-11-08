@@ -12,14 +12,14 @@ whole rust-lang/rust workspace in seconds.
 
 ## What it finds
 
-| Check | What it reports | `rustc` | Clippy | cargo-machete, cargo-udeps |
-| --- | --- | --- | --- | --- |
-| **Dead files** | `.rs` files no `mod` or `include!` reaches from a target root | Never compiled, so never linted | — | — |
-| **Unused `pub` items** | `pub` items nothing live in the workspace reaches | `dead_code` treats a library's `pub` items as used | — | — |
-| **Unused re-exports** | `pub use` nothing goes through and outside code can't reach | `unused_imports` treats a library's `pub use` as used | — | — |
-| **Unused dependencies** | `Cargo.toml` entries the package's code never names | `unused_crate_dependencies`, off by default | — | ✓ |
-| **Misplaced dependencies** | Entries in a table the code naming them can't use, such as a `[dependencies]` entry only tests use | — | — | — |
-| **Test-only `pub` items** (off by default) | `pub` items only test code reaches | — | — | — |
+| Check | What it reports | `rustc` | Clippy | cargo-machete, cargo-udeps | cargo-shear |
+| --- | --- | --- | --- | --- | --- |
+| Dead files | `.rs` files no `mod` or `include!` reaches from a target root | Never compiled, so never linted | No | No | Yes |
+| Unused `pub` items | `pub` items nothing live in the workspace reaches | `dead_code` treats a library's `pub` items as used | No | No | No |
+| Unused re-exports | `pub use` nothing goes through and outside code can't reach | `unused_imports` treats a library's `pub use` as used | No | No | No |
+| Unused dependencies | `Cargo.toml` entries the package's code never names | `unused_crate_dependencies`, off by default | No | Yes | Yes |
+| Misplaced dependencies | Entries in a table the code naming them can't use, such as a `[dependencies]` entry only tests use | No | No | No | Yes, except for `#[cfg(test)]` code |
+| Test-only `pub` items (off by default) | `pub` items only test code reaches | No | No | No | No |
 
 cargo-udeps needs nightly and a full build. Deadwood needs neither, and it can
 record a baseline so an existing codebase only fails on new findings.
@@ -81,27 +81,32 @@ Deadwood needs `cargo` on `PATH` and never touches the network.
 calls it. Inside a workspace that's often false: internal crates and items made
 `pub` out of habit are where dead code piles up.
 
-Three design choices matter before you run it:
+Three design choices shape what it reports.
 
-- **Reachability, not reference counting.** An item survives only if something
-  live names it. A dead subsystem comes out in one run rather than one layer per
-  run, and a mutually recursive pair nothing calls gets reported at all.
-- **False negatives over false positives.** Anything Deadwood can't resolve
-  (macro input, attribute strings, ambiguous paths) counts as a use. Every check
-  was measured against large workspaces, including rust-lang/rust, tokio, serde,
-  bevy, ruff, and bun. Each misfire there became a fix and a regression fixture,
-  recorded in
-  [`docs/HISTORY.md`](https://github.com/rlorenzo/deadwood-rs/blob/main/docs/HISTORY.md).
-- **Reporting only.** Deadwood never rewrites your code, and won't until its
-  precision is proven in the field.
+Deadwood walks references out from your entry points and reports any `pub`
+item the walk never reaches. A dead subsystem comes out in one run rather than
+one layer per run, and two functions that only call each other are reported
+too.
+
+It would rather miss a finding than report a wrong one. Anything Deadwood can't
+resolve (macro input, attribute strings, ambiguous paths) counts as a use. Every
+check was measured against large workspaces, including rust-lang/rust, tokio,
+serde, bevy, ruff, and bun, and each misfire there became a fix and a regression
+fixture, recorded in
+[`docs/HISTORY.md`](https://github.com/rlorenzo/deadwood-rs/blob/main/docs/HISTORY.md).
+
+It never rewrites your code, and won't until its precision is proven in the
+field.
 
 Some jobs belong to other tools. Copy-paste detection is [jscpd](https://jscpd.dev)'s
 ([out of scope](https://github.com/rlorenzo/deadwood-rs/blob/main/docs/SCOPE.md) for now),
 security advisories are [`cargo-audit`](https://crates.io/crates/cargo-audit)'s,
 and license policy is [`cargo-deny`](https://crates.io/crates/cargo-deny)'s. If
-unused dependencies are your only question,
+dependencies are your only question,
 [`cargo-machete`](https://github.com/bnjbvr/cargo-machete) answers it in
-milliseconds.
+milliseconds, and [`cargo-shear`](https://github.com/Boshen/cargo-shear) also
+fixes what it finds. Deadwood's part is the `pub` surface: items and re-exports
+nothing in the workspace reaches.
 
 ## Adopt it on an existing codebase
 
@@ -125,7 +130,7 @@ code you've since deleted are reported as stale, never as failures. See
 
 ```yaml
 - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-- uses: rlorenzo/deadwood-rs@<release-commit-sha> # v1.0.0
+- uses: rlorenzo/deadwood-rs@d887c6476b2c7dc40abd8cbc7d48e345344a9257 # v1.0.0
   with:
     path: .       # workspace to analyze (default `.`)
     args: ""      # extra arguments for `deadwood check`, e.g. `--json`
