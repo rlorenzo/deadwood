@@ -1,3 +1,8 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/deadwood-mark-dark.svg">
+  <img src="docs/assets/deadwood-mark-light.svg" alt="" width="96" height="96">
+</picture>
+
 # Deadwood
 
 Deadwood finds dead code in a Rust workspace that `rustc` and Clippy miss:
