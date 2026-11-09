@@ -5,6 +5,16 @@ every decision, its rejected alternatives, and the corpus measurements and
 mutation runs behind it, is in
 [`docs/HISTORY.md`](https://github.com/rlorenzo/deadwood-rs/blob/main/docs/HISTORY.md).
 
+## 1.0.1 — 2026-11-08
+
+Metadata only. No change to what Deadwood reports.
+
+- The GitHub Action is now named "Deadwood for Rust", since "Deadwood" was
+  taken on GitHub Marketplace, and its description fits the Marketplace's
+  125-character limit.
+- The action and crate descriptions no longer list the cfg-gate check, which
+  was removed before 1.0.0.
+
 ## 1.0.0 — 2026-11-08
 
 First public release. The v1 check set is complete. It is published as
