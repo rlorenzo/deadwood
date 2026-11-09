@@ -3,7 +3,7 @@
 # `deadwood-rs`; the library crate and the installed binary stay `deadwood`,
 # which is the name every doc and usage example is written against.
 name = "deadwood-rs"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2024"
 rust-version = "1.94"
 description = "Codebase health analyzer for Rust workspaces: dead files, unused pub items and re-exports, unused and misplaced dependencies"
