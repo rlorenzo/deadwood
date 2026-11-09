@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Deadwood: dead code finder for Rust</title>
+<meta name="description" content="Deadwood finds dead files, unused pub items and re-exports, and unused or misplaced dependencies in a Rust workspace, without compiling it.">
+<meta property="og:title" content="Deadwood">
+<meta property="og:description" content="Find dead code in Rust workspaces.">
+<meta property="og:image" content="https://rlorenzo.github.io/deadwood-rs/social-preview.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="deadwood-mark-dark.svg" type="image/svg+xml">
+<style>
+@font-face {
+  font-family: "Figtree";
+  src: url("fonts/figtree-latin-700.woff2") format("woff2");
+  font-weight: 700;
+  font-display: swap;
+}
+:root {
+  color-scheme: dark;
+  --bg: #16181d;
+  --panel: #1d2027;
+  --line: #2c3039;
+  --fg: #f2ede4;
+  --muted: #a3a9b0;
+  --dead: #f0883e;
+  --dead-ink: #16181d;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --display: "Figtree", var(--sans);
+}
+@media (prefers-color-scheme: light) {
+  :root {
+    color-scheme: light;
+    --bg: #ffffff;
+    --panel: #f5f6f8;
+    --line: #dde1e6;
+    --fg: #1f2328;
+    --muted: #57606a;
+    --dead: #b8470b;
+    --dead-ink: #ffffff;
+  }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 17px/1.6 var(--sans);
+}
+::selection { background: var(--dead); color: var(--dead-ink); }
+a { color: inherit; text-decoration-color: var(--dead); text-underline-offset: 0.2em; text-decoration-thickness: 1px; }
+a:hover { text-decoration-thickness: 2px; }
+:focus-visible { outline: 2px solid var(--dead); outline-offset: 3px; border-radius: 4px; }
+code, pre { font-family: var(--mono); font-size: 0.88em; }
+p code, td code, th code { white-space: nowrap; }
+.wrap { max-width: 1120px; margin: 0 auto; padding-inline: 24px; }
+
+/* First viewport */
+.hero {
+  display: grid;
+  grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
+  gap: 56px;
+  align-items: center;
+  min-height: min(100svh, 820px);
+  padding: 64px 0 56px;
+}
+.title { display: flex; align-items: center; gap: 0.25em; font-size: clamp(3rem, 6vw, 4.5rem); }
+/* The mark's leftmost node starts 19.5% into its 100-unit viewBox; pull it
+   back so the node lines up with the text below. */
+.mark { width: 1.15em; height: 1.15em; display: block; flex: none; margin-left: calc(-0.195 * 1.15em); }
+.mark-light { display: none; }
+@media (prefers-color-scheme: light) {
+  .mark-dark { display: none; }
+  .mark-light { display: block; }
+}
+h1, h2 { font-family: var(--display); font-weight: 700; letter-spacing: -0.02em; line-height: 1.1; margin: 0; text-wrap: balance; }
+h1 { font-size: 1em; letter-spacing: -0.03em; }
+.lede { font-size: 1.2rem; margin: 16px 0 0; max-width: 34ch; text-wrap: pretty; }
+.sub { color: var(--muted); margin: 12px 0 0; max-width: 40ch; }
+
+.cmd {
+  display: flex; align-items: center; gap: 12px;
+  margin-top: 28px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+  padding: 10px 10px 10px 16px;
+  max-width: 420px;
+}
+.cmd code { flex: 1; font-size: 1rem; white-space: nowrap; overflow-x: auto; }
+.cmd code::before { content: "$ "; color: var(--muted); user-select: none; }
+.copy {
+  display: inline-flex; align-items: center; gap: 6px;
+  font: 600 0.85rem/1 var(--sans);
+  color: var(--dead-ink); background: var(--dead);
+  border: 0; border-radius: 7px; padding: 9px 12px; cursor: pointer;
+  transition: filter 0.15s ease-out;
+}
+.copy:hover { filter: brightness(1.08); }
+.copy svg { width: 14px; height: 14px; }
+.copy[data-done] { background: var(--fg); color: var(--bg); }
+.links { display: flex; flex-wrap: wrap; gap: 8px 22px; margin: 20px 0 0; padding: 0; list-style: none; color: var(--muted); font-size: 0.95rem; }
+.links a { color: var(--muted); }
+.links a:hover { color: var(--fg); }
+
+/* Sample run */
+figure { margin: 0; }
+.run {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+  overflow: hidden;
+}
+.run pre {
+  margin: 0; padding: 20px 22px; overflow-x: auto;
+  line-height: 1.6; font-size: 0.82rem; color: var(--muted);
+  white-space: normal;
+}
+.run pre > span { display: block; }
+.run .f { padding-left: 4ch; text-indent: -2ch; }
+.run .gap { height: 0.8em; }
+.run .prompt { color: var(--fg); }
+.run .h { color: var(--fg); font-weight: 600; }
+.run .d { color: var(--dead); }
+figcaption { color: var(--muted); font-size: 0.88rem; margin-top: 12px; }
+
+/* Sections */
+section { padding: 72px 0; border-top: 1px solid var(--line); }
+h2 { font-size: clamp(1.8rem, 3.4vw, 2.5rem); }
+.intro { color: var(--muted); max-width: 62ch; margin: 14px 0 32px; }
+
+.table-scroll { overflow-x: auto; border: 1px solid var(--line); border-radius: 12px; scrollbar-color: var(--line) transparent; }
+table { border-collapse: collapse; width: 100%; min-width: 760px; font-size: 0.92rem; }
+th, td { text-align: left; vertical-align: top; padding: 14px 16px; border-bottom: 1px solid var(--line); }
+tr:last-child td { border-bottom: 0; }
+thead th { font-weight: 600; color: var(--muted); font-size: 0.82rem; background: var(--panel); }
+tbody th { font-weight: 600; white-space: nowrap; }
+td.yes { color: var(--fg); }
+td.no { color: var(--muted); }
+td.deadwood { color: var(--dead); font-weight: 600; }
+
+.ci { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 56px; align-items: start; }
+.ci p { color: var(--muted); max-width: 46ch; }
+.ci p:first-of-type { margin-top: 14px; }
+.snippet { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+.snippet .bar { display: flex; align-items: center; justify-content: space-between; padding: 8px 8px 8px 22px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 0.85rem; }
+.snippet pre {
+  margin: 0; padding: 18px 22px; overflow-x: auto;
+  font-size: 0.82rem; line-height: 1.65; color: var(--fg);
+  scrollbar-color: var(--line) transparent;
+}
+.snippet .c { color: var(--muted); }
+
+footer { border-top: 1px solid var(--line); padding: 32px 0 48px; color: var(--muted); font-size: 0.92rem; }
+footer .wrap { display: flex; flex-wrap: wrap; gap: 12px 28px; justify-content: space-between; }
+footer ul { display: flex; flex-wrap: wrap; gap: 8px 22px; margin: 0; padding: 0; list-style: none; }
+footer a { color: var(--muted); }
+footer a:hover { color: var(--fg); }
+
+@media (max-width: 880px) {
+  .hero, .ci { grid-template-columns: minmax(0, 1fr); gap: 40px; }
+  .hero { min-height: 0; padding: 48px 0; }
+  section { padding: 56px 0; }
+  .wrap { padding-inline: 16px; }
+}
+@media (max-width: 480px) {
+  .cmd .copy span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+  .cmd .copy { padding: 9px 10px; }
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+</head>
+<body>
+<main>
+  <div class="wrap hero">
+    <div>
+      <div class="title">
+        <img class="mark mark-dark" src="deadwood-mark-dark.svg" alt="" width="72" height="72">
+        <img class="mark mark-light" src="deadwood-mark-light.svg" alt="" width="72" height="72">
+        <h1>Deadwood</h1>
+      </div>
+      <p class="lede">Find the dead code in your Rust workspace that rustc and Clippy miss.</p>
+      <p class="sub">It reads your source without compiling it, so there's no build to wait for and no nightly toolchain. The whole rust-lang/rust workspace takes seconds.</p>
+      <div class="cmd">
+        <code id="install">cargo install deadwood-rs</code>
+        <button class="copy" type="button" data-copy="install" aria-label="Copy install command">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="5" y="5" width="9" height="9" rx="2"/><path d="M11 5V3.5A1.5 1.5 0 0 0 9.5 2h-6A1.5 1.5 0 0 0 2 3.5v6A1.5 1.5 0 0 0 3.5 11H5"/></svg>
+          <span>Copy</span>
+        </button>
+      </div>
+      <ul class="links">
+        <li><a href="#ci">GitHub Action</a></li>
+        <li><a href="https://github.com/rlorenzo/deadwood-rs">Source on GitHub</a></li>
+        <li><a href="https://github.com/rlorenzo/deadwood-rs/releases">Prebuilt binaries</a></li>
+      </ul>
+    </div>
+    <figure>
+      <div class="run">
+<pre><span class="l"><span class="prompt">$ deadwood check</span></span><span class="l"><span class="h">Dead files:</span></span><span class="f"><span class="d">src/csv_export.rs</span>: not reachable from any target of package `ledger` via `mod` declarations</span><span class="gap"></span><span class="l"><span class="h">Unused public items:</span></span><span class="f">src/lib.rs:10: pub fn `<span class="d">legacy_total</span>` is never referenced by any resolved path in this workspace</span><span class="gap"></span><span class="l"><span class="h">Unused dependencies:</span></span><span class="f">Cargo.toml: dependency `<span class="d">chrono</span>` is never referenced by any target of package `ledger`</span><span class="gap"></span><span class="l"><span class="h">Misplaced dependencies:</span></span><span class="f">Cargo.toml: dependency `<span class="d">tempfile</span>` is referenced only by the test, example and bench code of package `ledger`, so it belongs in `[dev-dependencies]` rather than `[dependencies]`</span><span class="gap"></span><span class="l">4 finding(s) in workspace `~/ledger`.</span></pre>
+      </div>
+      <figcaption>Real output from Deadwood 1.0.1 on a small sample crate. The workspace path is shortened.</figcaption>
+    </figure>
+  </div>
+
+  <section>
+    <div class="wrap">
+      <h2>What rustc and Clippy don't report</h2>
+      <p class="intro">The <code>dead_code</code> lint assumes a library's <code>pub</code> items are used by someone outside the crate. Inside a workspace that's often false, and that's where dead code piles up.</p>
+      <div class="table-scroll" tabindex="0" role="region" aria-label="Comparison with other tools">
+        <table>
+          <thead>
+            <tr><th scope="col">Check</th><th scope="col">What Deadwood reports</th><th scope="col">rustc</th><th scope="col">Clippy</th><th scope="col">cargo-machete, cargo-udeps</th><th scope="col">cargo-shear</th></tr>
+          </thead>
+          <tbody>
+            <tr><th scope="row">Dead files</th><td><code>.rs</code> files no <code>mod</code> or <code>include!</code> reaches from a target root</td><td class="no">Never compiled, so never linted</td><td class="no">No</td><td class="no">No</td><td class="yes">Yes</td></tr>
+            <tr><th scope="row">Unused <code>pub</code> items</th><td><code>pub</code> items nothing live in the workspace reaches</td><td class="no"><code>dead_code</code> treats a library's <code>pub</code> items as used</td><td class="no">No</td><td class="no">No</td><td class="no">No</td></tr>
+            <tr><th scope="row">Unused re-exports</th><td><code>pub use</code> nothing goes through and outside code can't reach</td><td class="no"><code>unused_imports</code> treats a library's <code>pub use</code> as used</td><td class="no">No</td><td class="no">No</td><td class="no">No</td></tr>
+            <tr><th scope="row">Unused dependencies</th><td><code>Cargo.toml</code> entries the package's code never names</td><td class="no"><code>unused_crate_dependencies</code>, off by default</td><td class="no">No</td><td class="yes">Yes</td><td class="yes">Yes</td></tr>
+            <tr><th scope="row">Misplaced dependencies</th><td>Entries in a table the code naming them can't use, such as a <code>[dependencies]</code> entry only tests use</td><td class="no">No</td><td class="no">No</td><td class="no">No</td><td class="yes">Yes, except for <code>#[cfg(test)]</code> code</td></tr>
+            <tr><th scope="row">Test-only <code>pub</code> items</th><td><code>pub</code> items only test code reaches (off by default)</td><td class="no">No</td><td class="no">No</td><td class="no">No</td><td class="no">No</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <section id="ci">
+    <div class="wrap ci">
+      <div>
+        <h2>Run it in CI</h2>
+        <p>Add the action to a workflow. Pin the full commit SHA of a release tag; the action builds Deadwood from that commit.</p>
+        <p>On an existing codebase, run <code>deadwood check --write-baseline</code> once and commit the file. After that, only new findings fail the build.</p>
+      </div>
+      <div class="snippet">
+        <div class="bar"><span>Workflow steps</span><button class="copy" type="button" data-copy="action" aria-label="Copy workflow steps">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="5" y="5" width="9" height="9" rx="2"/><path d="M11 5V3.5A1.5 1.5 0 0 0 9.5 2h-6A1.5 1.5 0 0 0 2 3.5v6A1.5 1.5 0 0 0 3.5 11H5"/></svg>
+          <span>Copy</span>
+        </button></div>
+<pre id="action">- uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 <span class="c"># v7.0.1</span>
+- uses: rlorenzo/deadwood-rs@65c159dcbf29ed50ee6f784467105f179716a76f <span class="c"># v1.0.1</span>
+  with:
+    path: .   <span class="c"># workspace to analyze</span></pre>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>Deadwood is MIT licensed.</span>
+    <ul>
+      <li><a href="https://github.com/rlorenzo/deadwood-rs#readme">Docs</a></li>
+      <li><a href="https://crates.io/crates/deadwood-rs">crates.io</a></li>
+      <li><a href="https://github.com/marketplace/actions/deadwood-for-rust">Marketplace</a></li>
+      <li><a href="https://github.com/rlorenzo/deadwood-rs/blob/main/CHANGELOG.md">Changelog</a></li>
+    </ul>
+  </div>
+</footer>
+<p class="sr-status" aria-live="polite" style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)"></p>
+
+<script>
+document.querySelectorAll("[data-copy]").forEach(function (btn) {
+  btn.addEventListener("click", function () {
+    var text = document.getElementById(btn.dataset.copy).textContent;
+    var label = btn.querySelector("span");
+    var status = document.querySelector(".sr-status");
+    navigator.clipboard.writeText(text).then(function () {
+      btn.setAttribute("data-done", "");
+      label.textContent = "Copied";
+      status.textContent = "Copied to clipboard";
+      setTimeout(function () {
+        btn.removeAttribute("data-done");
+        label.textContent = "Copy";
+        status.textContent = "";
+      }, 1800);
+    }, function () {
+      label.textContent = "Select and copy";
+    });
+  });
+});
+</script>
+</body>
+</html>
