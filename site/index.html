@@ -56,7 +56,7 @@ a:hover { text-decoration-thickness: 2px; }
 :focus-visible { outline: 2px solid var(--dead); outline-offset: 3px; border-radius: 4px; }
 code, pre { font-family: var(--mono); font-size: 0.88em; }
 p code, td code, th code { white-space: nowrap; }
-.wrap { max-width: 1120px; margin: 0 auto; padding: 0 24px; }
+.wrap { max-width: 1120px; margin: 0 auto; padding-inline: 24px; }
 
 /* First viewport */
 .hero {
@@ -67,14 +67,15 @@ p code, td code, th code { white-space: nowrap; }
   min-height: min(100svh, 820px);
   padding: 64px 0 56px;
 }
-.mark { width: 72px; height: 72px; display: block; margin-bottom: 20px; }
+.title { display: flex; align-items: center; gap: 0.25em; font-size: clamp(3rem, 6vw, 4.5rem); }
+.mark { width: 1.15em; height: 1.15em; display: block; flex: none; }
 .mark-light { display: none; }
 @media (prefers-color-scheme: light) {
   .mark-dark { display: none; }
   .mark-light { display: block; }
 }
 h1, h2 { font-family: var(--display); font-weight: 700; letter-spacing: -0.02em; line-height: 1.1; margin: 0; text-wrap: balance; }
-h1 { font-size: clamp(3rem, 6vw, 4.5rem); letter-spacing: -0.03em; }
+h1 { font-size: 1em; letter-spacing: -0.03em; }
 .lede { font-size: 1.2rem; margin: 16px 0 0; max-width: 34ch; text-wrap: pretty; }
 .sub { color: var(--muted); margin: 12px 0 0; max-width: 40ch; }
 
@@ -157,7 +158,7 @@ footer a:hover { color: var(--fg); }
   .hero, .ci { grid-template-columns: minmax(0, 1fr); gap: 40px; }
   .hero { min-height: 0; padding: 48px 0; }
   section { padding: 56px 0; }
-  .wrap { padding: 0 16px; }
+  .wrap { padding-inline: 16px; }
 }
 @media (max-width: 480px) {
   .cmd .copy span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
@@ -170,9 +171,11 @@ footer a:hover { color: var(--fg); }
 <main>
   <div class="wrap hero">
     <div>
-      <img class="mark mark-dark" src="deadwood-mark-dark.svg" alt="" width="72" height="72">
-      <img class="mark mark-light" src="deadwood-mark-light.svg" alt="" width="72" height="72">
-      <h1>Deadwood</h1>
+      <div class="title">
+        <img class="mark mark-dark" src="deadwood-mark-dark.svg" alt="" width="72" height="72">
+        <img class="mark mark-light" src="deadwood-mark-light.svg" alt="" width="72" height="72">
+        <h1>Deadwood</h1>
+      </div>
       <p class="lede">Find the dead code in your Rust workspace that rustc and Clippy miss.</p>
       <p class="sub">It reads your source without compiling it, so there's no build to wait for and no nightly toolchain. The whole rust-lang/rust workspace takes seconds.</p>
       <div class="cmd">
