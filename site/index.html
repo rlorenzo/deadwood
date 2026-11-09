@@ -68,7 +68,9 @@ p code, td code, th code { white-space: nowrap; }
   padding: 64px 0 56px;
 }
 .title { display: flex; align-items: center; gap: 0.25em; font-size: clamp(3rem, 6vw, 4.5rem); }
-.mark { width: 1.15em; height: 1.15em; display: block; flex: none; }
+/* The mark's leftmost node starts 19.5% into its 100-unit viewBox; pull it
+   back so the node lines up with the text below. */
+.mark { width: 1.15em; height: 1.15em; display: block; flex: none; margin-left: calc(-0.195 * 1.15em); }
 .mark-light { display: none; }
 @media (prefers-color-scheme: light) {
   .mark-dark { display: none; }
