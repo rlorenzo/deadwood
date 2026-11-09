@@ -7,10 +7,10 @@
 #
 # Inputs are passed to the shell through `env` rather than interpolated into
 # the script, so a value can never be read as code.
-name: Deadwood
+name: Deadwood for Rust
 description: >-
-  Find dead files, unused pub items and re-exports, unused and misplaced
-  dependencies, and cfg gates that can never hold in a Rust workspace.
+  Find dead files, unused pub items and re-exports, and unused or
+  misplaced dependencies in a Rust workspace.
 branding:
   icon: crosshair
   color: orange
