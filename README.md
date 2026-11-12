@@ -17,12 +17,12 @@ whole rust-lang/rust workspace in seconds.
 
 ## What it finds
 
-| Check | What it reports | `rustc` | Clippy | cargo-machete, cargo-udeps | cargo-shear |
+| Check | What it reports | `rustc`, Cargo | Clippy | cargo-machete, cargo-udeps | cargo-shear |
 | --- | --- | --- | --- | --- | --- |
 | Dead files | `.rs` files no `mod` or `include!` reaches from a target root | Never compiled, so never linted | No | No | Yes |
 | Unused `pub` items | `pub` items nothing live in the workspace reaches | `dead_code` treats a library's `pub` items as used | No | No | No |
 | Unused re-exports | `pub use` nothing goes through and outside code can't reach | `unused_imports` treats a library's `pub use` as used | No | No | No |
-| Unused dependencies | `Cargo.toml` entries the package's code never names | `unused_crate_dependencies`, off by default | No | Yes | Yes |
+| Unused dependencies | `Cargo.toml` entries the package's code never names | Cargo 1.100+ warns by default (`cargo::unused_dependencies`), but only for `[dependencies]` and only when every target is built; `rustc`'s `unused_crate_dependencies` is off by default | No | Yes | Yes |
 | Misplaced dependencies | Entries in a table the code naming them can't use, such as a `[dependencies]` entry only tests use | No | No | No | Yes, except for `#[cfg(test)]` code |
 | Test-only `pub` items (off by default) | `pub` items only test code reaches | No | No | No | No |
 

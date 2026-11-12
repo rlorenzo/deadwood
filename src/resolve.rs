@@ -1955,9 +1955,8 @@ impl SymbolTable {
         if let Outcome::Opaque(index) = outcome {
             // The tail we could not account for names anything of that name,
             // anywhere, and there is no telling what: an unconditional claim.
-            for index in index..path.segments.len() {
-                let name = path.segments[index].clone();
-                self.mark_name_used(&name);
+            for name in &path.segments[index..] {
+                self.mark_name_used(name);
             }
         }
     }

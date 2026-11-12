@@ -208,13 +208,13 @@ footer a:hover { color: var(--fg); }
       <div class="table-scroll" tabindex="0" role="region" aria-label="Comparison with other tools">
         <table>
           <thead>
-            <tr><th scope="col">Check</th><th scope="col">What Deadwood reports</th><th scope="col">rustc</th><th scope="col">Clippy</th><th scope="col">cargo-machete, cargo-udeps</th><th scope="col">cargo-shear</th></tr>
+            <tr><th scope="col">Check</th><th scope="col">What Deadwood reports</th><th scope="col">rustc, Cargo</th><th scope="col">Clippy</th><th scope="col">cargo-machete, cargo-udeps</th><th scope="col">cargo-shear</th></tr>
           </thead>
           <tbody>
             <tr><th scope="row">Dead files</th><td><code>.rs</code> files no <code>mod</code> or <code>include!</code> reaches from a target root</td><td class="no">Never compiled, so never linted</td><td class="no">No</td><td class="no">No</td><td class="yes">Yes</td></tr>
             <tr><th scope="row">Unused <code>pub</code> items</th><td><code>pub</code> items nothing live in the workspace reaches</td><td class="no"><code>dead_code</code> treats a library's <code>pub</code> items as used</td><td class="no">No</td><td class="no">No</td><td class="no">No</td></tr>
             <tr><th scope="row">Unused re-exports</th><td><code>pub use</code> nothing goes through and outside code can't reach</td><td class="no"><code>unused_imports</code> treats a library's <code>pub use</code> as used</td><td class="no">No</td><td class="no">No</td><td class="no">No</td></tr>
-            <tr><th scope="row">Unused dependencies</th><td><code>Cargo.toml</code> entries the package's code never names</td><td class="no"><code>unused_crate_dependencies</code>, off by default</td><td class="no">No</td><td class="yes">Yes</td><td class="yes">Yes</td></tr>
+            <tr><th scope="row">Unused dependencies</th><td><code>Cargo.toml</code> entries the package's code never names</td><td class="no">Cargo 1.100+ warns by default (<code>cargo::unused_dependencies</code>), but only for <code>[dependencies]</code> and only when every target is built; rustc's <code>unused_crate_dependencies</code> is off by default</td><td class="no">No</td><td class="yes">Yes</td><td class="yes">Yes</td></tr>
             <tr><th scope="row">Misplaced dependencies</th><td>Entries in a table the code naming them can't use, such as a <code>[dependencies]</code> entry only tests use</td><td class="no">No</td><td class="no">No</td><td class="no">No</td><td class="yes">Yes, except for <code>#[cfg(test)]</code> code</td></tr>
             <tr><th scope="row">Test-only <code>pub</code> items</th><td><code>pub</code> items only test code reaches (off by default)</td><td class="no">No</td><td class="no">No</td><td class="no">No</td><td class="no">No</td></tr>
           </tbody>
