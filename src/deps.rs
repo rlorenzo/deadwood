@@ -1722,6 +1722,22 @@ mod tests {
         references_from(&sources)
     }
 
+    /// A `macro_rules!` metavariable reaches `include!` wrapped in an
+    /// invisible group, and the path inside it is read through the group.
+    #[test]
+    fn an_include_path_inside_an_invisible_group_is_read() {
+        let literal: TokenStream = "\"gen.rs\"".parse().unwrap();
+        let grouped: TokenStream = TokenTree::Group(proc_macro2::Group::new(
+            proc_macro2::Delimiter::None,
+            literal,
+        ))
+        .into();
+        assert_eq!(
+            path_argument(&grouped, Path::new("/ws")),
+            Some("gen.rs".to_string())
+        );
+    }
+
     /// Several targets' worth of source, each with the target kind
     /// `cargo metadata` would report for it.
     fn references_from(sources: &[(&str, &str)]) -> CrateReferences {

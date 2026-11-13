@@ -4273,6 +4273,27 @@ mod tests {
         assert!(!unused.contains(&"named".to_string()), "{unused:?}");
         assert!(unused.contains(&"prose_word".to_string()), "{unused:?}");
 
+        // The same holds between the members of an item: variants, trait
+        // items and foreign items each start their docs outside any fence.
+        let unclosed = "/// ```\n/// unclosed\n";
+        let balanced = "/// ```\n/// krate::named();\n/// ```\n/// prose_word\n";
+        for (open, first, second, close) in [
+            ("pub enum E {\n", "A,\n", "B,\n", "}\n"),
+            ("pub trait T {\n", "fn a();\n", "fn b();\n", "}\n"),
+            ("extern \"C\" {\n", "fn a();\n", "fn b();\n", "}\n"),
+        ] {
+            let source = format!(
+                "pub fn named() {{}}\npub fn prose_word() {{}}\n\
+                 {open}{unclosed}{first}{balanced}{second}{close}"
+            );
+            let unused = unused_in_root(&source);
+            assert!(!unused.contains(&"named".to_string()), "{open}: {unused:?}");
+            assert!(
+                unused.contains(&"prose_word".to_string()),
+                "{open}: {unused:?}"
+            );
+        }
+
         // An item only its own doctest names is still dead, and so is one
         // only a dead item's doctest names.
         let source = "pub fn dead_helper() {}\n\

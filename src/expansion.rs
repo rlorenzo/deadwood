@@ -583,6 +583,32 @@ mod tests {
         }
     }
 
+    /// A helper method in an `impl` block is a function of its own: what it
+    /// writes is credited to the macros that call it, and to no other.
+    #[test]
+    fn a_helper_method_in_an_impl_block_writes_for_its_callers() {
+        let crate_source = source(
+            "#[proc_macro_derive(Emitted)]\n\
+             pub fn emitted(i: TokenStream) -> TokenStream { Emitter::emit(i) }\n\
+             #[proc_macro_derive(Plain)]\n\
+             pub fn plain(i: TokenStream) -> TokenStream { i }\n\
+             struct Emitter;\n\
+             impl Emitter { fn emit(i: TokenStream) -> TokenStream { quote! { ::impl_crate::X } } }\n",
+        );
+        let words = |used: &str| sorted(crate_source.words_for([used.to_string()].iter()));
+        assert_eq!(words("Emitted"), ["impl_crate"]);
+        assert!(words("Plain").is_empty());
+    }
+
+    /// Only `name!` is an invocation; an identifier without the bang is not.
+    #[test]
+    fn only_an_identifier_followed_by_a_bang_is_an_invocation() {
+        let mut found = HashSet::new();
+        let tokens: TokenStream = "outer!(x) plain { inner! [y] } z".parse().unwrap();
+        invocations(&tokens, &mut found);
+        assert_eq!(sorted(found), ["inner", "outer"]);
+    }
+
     /// Path heads only: a bare identifier is a local, and `extern crate x`
     /// names a crate without a `::`.
     #[test]
