@@ -610,12 +610,14 @@ mod tests {
     }
 
     /// Path heads only: a bare identifier is a local, and `extern crate x`
-    /// names a crate without a `::`.
+    /// names a crate without a `::`. A colon after some other punctuation, or
+    /// half of `extern crate`, makes no head.
     #[test]
     fn only_path_heads_count_from_quoted_code() {
         let mut found = HashSet::new();
         let tokens: TokenStream =
-            "let futures = 1; ::serde::Serialize; extern crate alloc as a; x : y; std::mem"
+            "let futures = 1; ::serde::Serialize; extern crate alloc as a; x : y; std::mem; \
+             w +: v; u ;: t; extern fn not_crate; other crate not_extern"
                 .parse()
                 .unwrap();
         path_heads(&tokens, &mut found);
