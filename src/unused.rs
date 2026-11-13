@@ -185,6 +185,8 @@ mod tests {
         CrateUnit {
             names: vec!["fixture".to_string()],
             test_code: false,
+            package: String::new(),
+            is_proc_macro: false,
             spliced: Vec::new(),
             files: sources
                 .iter()
@@ -549,6 +551,8 @@ mod tests {
         let binary = CrateUnit {
             names: Vec::new(),
             test_code: false,
+            package: String::new(),
+            is_proc_macro: false,
             spliced: Vec::new(),
             files: crate_of(&[
                 ("", "pub mod facade;\nfn main() {}\n"),
@@ -592,6 +596,8 @@ mod tests {
         let consumer = CrateUnit {
             names: Vec::new(),
             test_code: false,
+            package: String::new(),
+            is_proc_macro: false,
             spliced: Vec::new(),
             files: vec![ParsedFile {
                 path: PathBuf::from("/ws/src/main.rs"),

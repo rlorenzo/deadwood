@@ -323,10 +323,6 @@ pub fn analyze_with(
     // Package name to its library crate, so a dependency rename can be
     // attached to the crate the alias actually names.
     let mut lib_of_package: HashMap<&str, usize> = HashMap::new();
-    // The package each entry of `crates` came from, by index.
-    let mut package_of_crate: Vec<&str> = Vec::new();
-    // Whether each entry of `crates` is a proc-macro target.
-    let mut proc_macro_crate: Vec<bool> = Vec::new();
     // Crate names each package's code refers to, for the dependency check.
     // Packages whose module tree did not resolve are left out entirely.
     let mut references: Vec<(&metadata::Package, deps::CrateReferences, cfg::Gates<'_>)> =
@@ -457,14 +453,14 @@ pub fn analyze_with(
                 }
             }
             spliced.extend(remounted);
-            package_of_crate.push(package.name.as_str());
-            proc_macro_crate.push(target.is_proc_macro());
             crates.push(resolve::CrateUnit {
                 names,
                 // The same rule the dependency check places a mention by: a
                 // test, example or bench target is code `cargo test` builds and
                 // no consumer of the package runs.
                 test_code: deps::is_dev_target(target),
+                package: package.name.clone(),
+                is_proc_macro: target.is_proc_macro(),
                 files,
                 // Their paths count; their items stay out of the table. See
                 // `CrateUnit::spliced` for why those two halves separate.
@@ -601,20 +597,13 @@ pub fn analyze_with(
     add_dependency_aliases(&meta, &lib_of_package, &mut crates);
 
     // What other crates' macros write is code the invoking crate compiles.
-    expansion::credit_macros(
-        &meta,
-        &config,
-        &crates,
-        &package_of_crate,
-        &proc_macro_crate,
-        &mut references,
-    );
+    expansion::credit_macros(&meta, &config, &crates, &mut references);
 
     // Usage resolution must see every file in the workspace: if module
     // resolution hit any problem, files (and the paths inside them) may be
     // missing, and unseen paths would turn into false positives.
     if warnings.is_empty() {
-        let hidden = hidden_code_reach(&meta, &references, &package_of_crate, &mut warnings);
+        let hidden = hidden_code_reach(&meta, &references, &crates, &mut warnings);
         let items = unused::find_items(&crates, &hidden, config.public_api(), &mut warnings);
         findings.extend(items.unused.into_iter().map(|item| Finding {
             kind: if item.reexport {
@@ -898,7 +887,7 @@ fn misplacement_evidence(
 fn hidden_code_reach(
     meta: &metadata::Metadata,
     references: &[(&metadata::Package, deps::CrateReferences, cfg::Gates<'_>)],
-    package_of_crate: &[&str],
+    crates: &[resolve::CrateUnit],
     warnings: &mut Vec<String>,
 ) -> Vec<unused::Hidden> {
     let mut whole: HashSet<&str> = HashSet::new();
@@ -913,8 +902,9 @@ fn hidden_code_reach(
         }
     }
     let surface = meta.workspace_reach(whole.iter().copied());
-    package_of_crate
+    crates
         .iter()
+        .map(|unit| unit.package.as_str())
         .map(|package| {
             if whole.contains(package) {
                 unused::Hidden::Whole

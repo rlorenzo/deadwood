@@ -33,23 +33,20 @@ type References<'m, 'g> = [(&'m metadata::Package, deps::CrateReferences, cfg::G
 /// Count what other crates' macros write as mentions by the packages that
 /// invoke them: the path heads of a workspace `macro_rules!` body, and what a
 /// proc macro and its helper libraries can expand to, from the workspace or
-/// from the registry cache. `package_of_crate` and `proc_macro_crate` say
-/// which package each of `crates` belongs to and whether it is a proc macro.
+/// from the registry cache.
 pub(crate) fn credit_macros(
     meta: &metadata::Metadata,
     config: &config::Config,
     crates: &[CrateUnit],
-    package_of_crate: &[&str],
-    proc_macro_crate: &[bool],
     references: &mut References<'_, '_>,
 ) {
-    let (bodies, defined_by) = macro_bodies(crates, package_of_crate);
+    let (bodies, defined_by) = macro_bodies(crates);
     let none = HashSet::new();
     for (package, package_references, _) in references.iter_mut() {
         let own = defined_by.get(package.name.as_str()).unwrap_or(&none);
         package_references.add_foreign_macros(&bodies, own);
     }
-    workspace_proc_macros(meta, crates, package_of_crate, proc_macro_crate, references);
+    workspace_proc_macros(meta, crates, references);
     external_proc_macros(meta, config, references);
 }
 
@@ -66,18 +63,15 @@ pub(crate) fn credit_macros(
 fn workspace_proc_macros(
     meta: &metadata::Metadata,
     crates: &[CrateUnit],
-    package_of_crate: &[&str],
-    proc_macro_crate: &[bool],
     references: &mut References<'_, '_>,
 ) {
     // Each package's crates, read once however many macros share a helper.
     let mut libs: HashMap<&str, MacroSource> = HashMap::new();
     let mut macros: HashMap<&str, MacroSource> = HashMap::new();
-    for ((unit, &package), &is_proc_macro) in
-        crates.iter().zip(package_of_crate).zip(proc_macro_crate)
-    {
+    for unit in crates {
+        let package = unit.package.as_str();
         // A library is a crate something can name; tests and bins are not.
-        let into = if is_proc_macro {
+        let into = if unit.is_proc_macro {
             macros.entry(package).or_default()
         } else if !unit.names.is_empty() {
             libs.entry(package).or_default()
@@ -194,10 +188,7 @@ type WordSets<K> = HashMap<K, HashSet<String>>;
 /// The path heads of every `macro_rules!` body in the workspace, by macro
 /// name, with the bodies of the macros each invokes folded in — and the names
 /// each package defines.
-fn macro_bodies<'p>(
-    crates: &[CrateUnit],
-    package_of_crate: &[&'p str],
-) -> (WordSets<String>, WordSets<&'p str>) {
+fn macro_bodies(crates: &[CrateUnit]) -> (WordSets<String>, WordSets<&str>) {
     fn items<'a>(found: &mut Vec<&'a syn::ItemMacro>, list: &'a [syn::Item]) {
         for item in list {
             match item {
@@ -214,7 +205,8 @@ fn macro_bodies<'p>(
 
     let mut direct: HashMap<String, (HashSet<String>, HashSet<String>)> = HashMap::new();
     let mut defined_by: HashMap<&str, HashSet<String>> = HashMap::new();
-    for (unit, package) in crates.iter().zip(package_of_crate) {
+    for unit in crates {
+        let package = unit.package.as_str();
         for file in unit.files.iter().chain(&unit.spliced) {
             let Some(ast) = &file.ast else { continue };
             let mut found = Vec::new();
