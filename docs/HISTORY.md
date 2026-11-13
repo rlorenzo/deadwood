@@ -2926,3 +2926,49 @@ handling are gone. `cfg` evaluation stays: the configured matrix still decides
 what is in the analyzed build, and code behind a gate no build satisfies is
 still read, so its mentions keep counting as uses. The corpus run is unchanged
 apart from the findings of this kind, which none of the eight workspaces had.
+
+
+## Phase 34: post-1.0 cleanup, and three refactors not taken (shipped)
+
+The refactors the `/simplify` pass on PR #94 skipped came back after 1.0.
+None of them was meant to change findings, and none did: on bevy, ruff,
+helix, bun, tokio, serde, ripgrep and triptape, `--json` is byte-identical
+before and after, and run time is unchanged.
+
+What changed:
+
+- `CrateUnit` carries its `package` and `is_proc_macro`, replacing two
+  vectors in `analyze_with` that ran parallel to `crates` and were zipped in
+  several places.
+- The "an optional entry can't move to `[dev-dependencies]`" rule moved from
+  `find_misplaced` into `misplacement`, which now makes the whole placement
+  decision.
+- `MacroSource` keys code outside any function as `None` in the same maps
+  that key functions by name, so the two `global_*` fields went away.
+- `path_heads` checks the two trees before each token instead of collecting a
+  `Vec` at every group depth.
+- Tests now catch the 13 mutants #94's final run left alive, plus three more
+  the rerun found. `>` → `>=` in `newest_out_dir` is the one left: it only
+  matters when two builds have the same mtime, and then `read_dir` order
+  decides anyway.
+
+What was considered and left alone:
+
+- **One shared macro call graph.** Three places work out "macro A invokes B,
+  so A gets B's output": modtree's emission forwards, `macro_bodies`, and
+  `MacroSource`'s function calls. They look like one graph but aren't.
+  modtree's edges carry the inline-module prefix each forward sits under, and
+  are built during each target's resolution from cfg-gated token streams,
+  including `macro_rules!` defined inside other macros' tokens.
+  `macro_bodies` is built afterwards from item-level `macro_rules!` and stores
+  path heads. `MacroSource` links proc-macro *functions*, not macros. One
+  graph would have to change what at least two of them see, which is a
+  findings change dressed up as a refactor.
+- **Reusing ASTs across the two resolution passes.** Measured first. On bun,
+  the second pass re-resolves 8 targets in 0.9s against a 6.8s first pass.
+  bevy, ruff and tokio re-resolve nothing. Resuming a half-finished walk with
+  the foreign macros known would have to carry the walk's state across passes
+  for under a second on one workspace.
+- **Trimming `NON_RUST_FENCES`.** A tag taken off the list makes rustdoc
+  blocks in that language read as Rust code, which marks words used and can
+  hide findings. The 30-entry list costs nothing to keep.
