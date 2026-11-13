@@ -512,4 +512,64 @@ mod tests {
             serde_json::from_value(serde_json::json!({ "name": "plain" })).unwrap();
         assert!(dependency.uses_default_features);
     }
+
+    fn package(name: &str, kind: &str, dependencies: &[&str]) -> serde_json::Value {
+        serde_json::json!({
+            "id": name,
+            "name": name,
+            "manifest_path": format!("/ws/{name}/Cargo.toml"),
+            "targets": [{ "name": name, "kind": [kind], "src_path": format!("/ws/{name}/src/lib.rs") }],
+            "dependencies": dependencies.iter().map(|name| serde_json::json!({ "name": name })).collect::<Vec<_>>(),
+        })
+    }
+
+    fn parse(value: serde_json::Value) -> super::Package {
+        serde_json::from_value(value).unwrap()
+    }
+
+    /// A package is a proc macro by one of its targets, not by default.
+    #[test]
+    fn a_package_is_a_proc_macro_only_by_a_proc_macro_target() {
+        assert!(parse(package("derive", "proc-macro", &[])).is_proc_macro());
+        assert!(!parse(package("plain", "lib", &[])).is_proc_macro());
+    }
+
+    /// Writing code takes both halves: a `quote` dependency, and not being
+    /// one of the crates every macro builds on.
+    #[test]
+    fn writing_code_takes_quote_and_not_being_a_macro_building_block() {
+        assert!(parse(package("helper", "lib", &["quote"])).writes_code());
+        assert!(!parse(package("helper", "lib", &["serde"])).writes_code());
+        assert!(!parse(package("syn", "lib", &["quote"])).writes_code());
+    }
+
+    /// Only proc macros from outside the workspace count: a member proc macro
+    /// is read as workspace code, and an external plain library is not a
+    /// macro. The macro's helper that writes code is read with it.
+    #[test]
+    fn external_macros_are_the_non_member_proc_macros_members_reach() {
+        let node = |id: &str, deps: &[&str]| serde_json::json!({ "id": id, "dependencies": deps });
+        let full: super::Full = serde_json::from_value(serde_json::json!({
+            "packages": [
+                package("app", "lib", &[]),
+                package("ws_macro", "proc-macro", &[]),
+                package("ext_derive", "proc-macro", &[]),
+                package("ext_helper", "lib", &["quote"]),
+                package("ext_lib", "lib", &[]),
+                package("quote", "lib", &[]),
+            ],
+            "workspace_members": ["app", "ws_macro"],
+            "resolve": { "nodes": [
+                node("app", &["ws_macro", "ext_derive", "ext_lib"]),
+                node("ext_derive", &["ext_helper"]),
+                node("ext_helper", &["quote"]),
+            ]},
+        }))
+        .unwrap();
+        let macros = super::external_macros(full);
+        assert_eq!(macros.len(), 1);
+        let sources: Vec<&str> = macros[0].sources.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(sources, ["ext_derive", "ext_helper"]);
+        assert_eq!(macros[0].users, ["app".to_string()].into());
+    }
 }

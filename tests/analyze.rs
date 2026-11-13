@@ -4863,6 +4863,12 @@ fn an_include_path_built_from_env_is_followed_where_the_tree_answers_it() {
         "target/debug/build/envinclude-macros-00000000000000c3/out/thunks.rs",
         "fn main() {}\n",
     );
+    // Newer again, and hex, but not Cargo's sixteen digits: not a build.
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    write(
+        "target/debug/build/envinclude-00000000000d4/out/thunks.rs",
+        "fn main() {}\n",
+    );
 
     let analysis = analyze(&root, None).expect("analysis should succeed");
     assert!(analysis.warnings.is_empty(), "{:?}", analysis.warnings);

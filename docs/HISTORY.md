@@ -2926,3 +2926,18 @@ handling are gone. `cfg` evaluation stays: the configured matrix still decides
 what is in the analyzed build, and code behind a gate no build satisfies is
 still read, so its mentions keep counting as uses. The corpus run is unchanged
 apart from the findings of this kind, which none of the eight workspaces had.
+
+
+## Phase 34: post-1.0 cleanup (shipped)
+
+Internal refactors only; corpus `--json` is byte-identical before and after.
+Three were considered and dropped:
+
+- **One shared macro call graph.** modtree's forwards (prefixed, per-target,
+  from cfg-gated token streams), `macro_bodies` (item-level, path heads) and
+  `MacroSource` (proc-macro functions) differ in nodes, edges and timing.
+  Merging them would change findings.
+- **Reusing ASTs across resolution passes.** The second pass is 0.9s of bun's
+  run and zero elsewhere.
+- **Trimming `NON_RUST_FENCES`.** A dropped tag reads that language as Rust,
+  which can hide findings.

@@ -171,6 +171,10 @@ pub(crate) struct CrateUnit {
     /// consumer runs, so *everything* in one is test code — not only its
     /// `#[test]` functions. See [`EntryPoint`].
     pub test_code: bool,
+    /// The package the target belongs to.
+    pub package: String,
+    /// Whether the target is a proc-macro crate.
+    pub is_proc_macro: bool,
     pub files: Vec<ParsedFile>,
     /// Files reached only through an `include!` or a macro token stream, which
     /// contribute the paths they *write* but none of the items they define.
@@ -3361,6 +3365,8 @@ mod tests {
         CrateUnit {
             names: vec!["fixture".to_string()],
             test_code: false,
+            package: String::new(),
+            is_proc_macro: false,
             spliced: Vec::new(),
             files: sources
                 .iter()
@@ -3741,6 +3747,8 @@ mod tests {
         let crates = [CrateUnit {
             names: Vec::new(),
             test_code: false,
+            package: String::new(),
+            is_proc_macro: false,
             spliced: Vec::new(),
             files: unit(sources).files,
         }];
@@ -3795,6 +3803,8 @@ mod tests {
         let caller = CrateUnit {
             names: Vec::new(),
             test_code: false,
+            package: String::new(),
+            is_proc_macro: false,
             spliced: Vec::new(),
             files: unit(&[("", "fn go() { shared::contested(); }\n")]).files,
         };
@@ -4262,6 +4272,27 @@ mod tests {
         let unused = unused_in_root(source);
         assert!(!unused.contains(&"named".to_string()), "{unused:?}");
         assert!(unused.contains(&"prose_word".to_string()), "{unused:?}");
+
+        // The same holds between the members of an item: variants, trait
+        // items and foreign items each start their docs outside any fence.
+        let unclosed = "/// ```\n/// unclosed\n";
+        let balanced = "/// ```\n/// krate::named();\n/// ```\n/// prose_word\n";
+        for (open, first, second, close) in [
+            ("pub enum E {\n", "A,\n", "B,\n", "}\n"),
+            ("pub trait T {\n", "fn a();\n", "fn b();\n", "}\n"),
+            ("extern \"C\" {\n", "fn a();\n", "fn b();\n", "}\n"),
+        ] {
+            let source = format!(
+                "pub fn named() {{}}\npub fn prose_word() {{}}\n\
+                 {open}{unclosed}{first}{balanced}{second}{close}"
+            );
+            let unused = unused_in_root(&source);
+            assert!(!unused.contains(&"named".to_string()), "{open}: {unused:?}");
+            assert!(
+                unused.contains(&"prose_word".to_string()),
+                "{open}: {unused:?}"
+            );
+        }
 
         // An item only its own doctest names is still dead, and so is one
         // only a dead item's doctest names.
@@ -5134,6 +5165,8 @@ mod tests {
         let app = CrateUnit {
             names: vec!["app".to_string()],
             test_code: false,
+            package: String::new(),
+            is_proc_macro: false,
             spliced: Vec::new(),
             files: unit(&[("", "use fixture::{self, m};\nfn main() { m::f(); }\n")]).files,
         };
@@ -5174,6 +5207,8 @@ mod tests {
         let mut app = CrateUnit {
             names: vec!["app".to_string()],
             test_code: false,
+            package: String::new(),
+            is_proc_macro: false,
             spliced: Vec::new(),
             files: unit(&[("", "fn main() {}\n")]).files,
         };
@@ -5203,6 +5238,8 @@ mod tests {
         let mut app = CrateUnit {
             names: Vec::new(),
             test_code: false,
+            package: String::new(),
+            is_proc_macro: false,
             spliced: Vec::new(),
             files: unit(&[("", "pub fn kept() -> u32 { 1 }\nfn main() {}\n")]).files,
         };
@@ -5238,6 +5275,8 @@ mod tests {
         let app = CrateUnit {
             names: vec!["app".to_string()],
             test_code: false,
+            package: String::new(),
+            is_proc_macro: false,
             spliced: Vec::new(),
             files: unit(&[(
                 "",
@@ -5303,6 +5342,8 @@ mod tests {
         let crates = [CrateUnit {
             names: Vec::new(),
             test_code: false,
+            package: String::new(),
+            is_proc_macro: false,
             spliced: Vec::new(),
             files: unit(&[
                 ("", "mod a;\nfn main() {}\n"),
@@ -5447,6 +5488,8 @@ mod tests {
         let target = CrateUnit {
             names: Vec::new(),
             test_code: true,
+            package: String::new(),
+            is_proc_macro: false,
             spliced: Vec::new(),
             files: unit(&[("", "mod support;\nfn main() { support::from_target(); }\n")])
                 .files
@@ -5465,6 +5508,8 @@ mod tests {
         let target = CrateUnit {
             names: Vec::new(),
             test_code: false,
+            package: String::new(),
+            is_proc_macro: false,
             spliced: Vec::new(),
             files: unit(&[("", "mod support;\nfn main() { support::from_target(); }\n")])
                 .files

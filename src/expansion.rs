@@ -33,23 +33,20 @@ type References<'m, 'g> = [(&'m metadata::Package, deps::CrateReferences, cfg::G
 /// Count what other crates' macros write as mentions by the packages that
 /// invoke them: the path heads of a workspace `macro_rules!` body, and what a
 /// proc macro and its helper libraries can expand to, from the workspace or
-/// from the registry cache. `package_of_crate` and `proc_macro_crate` say
-/// which package each of `crates` belongs to and whether it is a proc macro.
+/// from the registry cache.
 pub(crate) fn credit_macros(
     meta: &metadata::Metadata,
     config: &config::Config,
     crates: &[CrateUnit],
-    package_of_crate: &[&str],
-    proc_macro_crate: &[bool],
     references: &mut References<'_, '_>,
 ) {
-    let (bodies, defined_by) = macro_bodies(crates, package_of_crate);
+    let (bodies, defined_by) = macro_bodies(crates);
     let none = HashSet::new();
     for (package, package_references, _) in references.iter_mut() {
         let own = defined_by.get(package.name.as_str()).unwrap_or(&none);
         package_references.add_foreign_macros(&bodies, own);
     }
-    workspace_proc_macros(meta, crates, package_of_crate, proc_macro_crate, references);
+    workspace_proc_macros(meta, crates, references);
     external_proc_macros(meta, config, references);
 }
 
@@ -66,18 +63,15 @@ pub(crate) fn credit_macros(
 fn workspace_proc_macros(
     meta: &metadata::Metadata,
     crates: &[CrateUnit],
-    package_of_crate: &[&str],
-    proc_macro_crate: &[bool],
     references: &mut References<'_, '_>,
 ) {
     // Each package's crates, read once however many macros share a helper.
     let mut libs: HashMap<&str, MacroSource> = HashMap::new();
     let mut macros: HashMap<&str, MacroSource> = HashMap::new();
-    for ((unit, &package), &is_proc_macro) in
-        crates.iter().zip(package_of_crate).zip(proc_macro_crate)
-    {
+    for unit in crates {
+        let package = unit.package.as_str();
         // A library is a crate something can name; tests and bins are not.
-        let into = if is_proc_macro {
+        let into = if unit.is_proc_macro {
             macros.entry(package).or_default()
         } else if !unit.names.is_empty() {
             libs.entry(package).or_default()
@@ -194,10 +188,7 @@ type WordSets<K> = HashMap<K, HashSet<String>>;
 /// The path heads of every `macro_rules!` body in the workspace, by macro
 /// name, with the bodies of the macros each invokes folded in — and the names
 /// each package defines.
-fn macro_bodies<'p>(
-    crates: &[CrateUnit],
-    package_of_crate: &[&'p str],
-) -> (WordSets<String>, WordSets<&'p str>) {
+fn macro_bodies(crates: &[CrateUnit]) -> (WordSets<String>, WordSets<&str>) {
     fn items<'a>(found: &mut Vec<&'a syn::ItemMacro>, list: &'a [syn::Item]) {
         for item in list {
             match item {
@@ -214,7 +205,8 @@ fn macro_bodies<'p>(
 
     let mut direct: HashMap<String, (HashSet<String>, HashSet<String>)> = HashMap::new();
     let mut defined_by: HashMap<&str, HashSet<String>> = HashMap::new();
-    for (unit, package) in crates.iter().zip(package_of_crate) {
+    for unit in crates {
+        let package = unit.package.as_str();
         for file in unit.files.iter().chain(&unit.spliced) {
             let Some(ast) = &file.ast else { continue };
             let mut found = Vec::new();
@@ -284,14 +276,12 @@ pub(crate) struct MacroSource {
     /// The names a consumer writes — a derive, its helper attributes, an
     /// attribute or function-like macro — to the functions implementing them.
     entries: HashMap<String, HashSet<String>>,
-    /// What each function writes, by function name.
-    words: HashMap<String, HashSet<String>>,
-    /// The functions each function calls, by name.
-    calls: HashMap<String, HashSet<String>>,
-    /// What code outside any function writes and calls — a `const`, a
-    /// `static` — counted for every entry, since any of them may use it.
-    global_words: HashSet<String>,
-    global_calls: HashSet<String>,
+    /// What each function writes, by function name. `None` is code outside
+    /// any function — a `const`, a `static` — counted for every entry, since
+    /// any of them may use it.
+    words: HashMap<Option<String>, HashSet<String>>,
+    /// The functions each function calls, by name, keyed like `words`.
+    calls: HashMap<Option<String>, HashSet<String>>,
     /// The functions being walked, innermost last.
     current: Vec<String>,
 }
@@ -318,9 +308,9 @@ impl MacroSource {
     /// Add `other`'s macros and functions to this source: a macro calls into
     /// its helper libraries by path, so they are read as one.
     fn absorb(&mut self, other: &MacroSource) {
-        fn merge(
-            into: &mut HashMap<String, HashSet<String>>,
-            from: &HashMap<String, HashSet<String>>,
+        fn merge<K: Clone + Eq + std::hash::Hash>(
+            into: &mut HashMap<K, HashSet<String>>,
+            from: &HashMap<K, HashSet<String>>,
         ) {
             for (key, values) in from {
                 into.entry(key.clone())
@@ -331,8 +321,6 @@ impl MacroSource {
         merge(&mut self.entries, &other.entries);
         merge(&mut self.words, &other.words);
         merge(&mut self.calls, &other.calls);
-        self.global_words.extend(other.global_words.iter().cloned());
-        self.global_calls.extend(other.global_calls.iter().cloned());
     }
 
     /// What using the macros named `used` may expand to: the words of the
@@ -340,47 +328,41 @@ impl MacroSource {
     /// indirectly, and of the code outside any function. Nothing when no
     /// macro is used.
     pub(crate) fn words_for<'a>(&self, used: impl Iterator<Item = &'a String>) -> HashSet<String> {
-        let mut pending: Vec<&str> = used
+        let mut pending: Vec<Option<&str>> = used
             .filter_map(|name| self.entries.get(name))
             .flatten()
-            .map(String::as_str)
+            .map(|function| Some(function.as_str()))
             .collect();
         if pending.is_empty() {
             return HashSet::new();
         }
-        pending.extend(self.global_calls.iter().map(String::as_str));
-        let mut out = self.global_words.clone();
+        pending.push(None);
+        let mut out = HashSet::new();
         let mut seen = HashSet::new();
         while let Some(function) = pending.pop() {
             if !seen.insert(function) {
                 continue;
             }
-            if let Some(words) = self.words.get(function) {
+            let key = function.map(str::to_owned);
+            if let Some(words) = self.words.get(&key) {
                 out.extend(words.iter().cloned());
             }
-            if let Some(calls) = self.calls.get(function) {
-                pending.extend(calls.iter().map(String::as_str));
+            if let Some(calls) = self.calls.get(&key) {
+                pending.extend(calls.iter().map(|call| Some(call.as_str())));
             }
         }
         out
     }
 
     fn sink(&mut self) -> &mut HashSet<String> {
-        match self.current.last() {
-            Some(function) => self.words.entry(function.clone()).or_default(),
-            None => &mut self.global_words,
-        }
+        self.words.entry(self.current.last().cloned()).or_default()
     }
 
     fn call(&mut self, name: String) {
-        match self.current.last() {
-            Some(function) => {
-                self.calls.entry(function.clone()).or_default().insert(name);
-            }
-            None => {
-                self.global_calls.insert(name);
-            }
-        }
+        self.calls
+            .entry(self.current.last().cloned())
+            .or_default()
+            .insert(name);
     }
 
     fn within(&mut self, function: String, body: impl FnOnce(&mut Self)) {
@@ -466,25 +448,26 @@ impl<'ast> Visit<'ast> for MacroSource {
 /// binds one called `futures`, and counting it would hide every `futures`
 /// entry of every package that joins.
 pub(crate) fn path_heads(tokens: &TokenStream, into: &mut HashSet<String>) {
-    let trees: Vec<TokenTree> = tokens.clone().into_iter().collect();
-    for (index, tree) in trees.iter().enumerate() {
-        match tree {
-            TokenTree::Ident(ident) => {
-                let colons = matches!(
-                    (trees.get(index + 1), trees.get(index + 2)),
-                    (Some(TokenTree::Punct(a)), Some(TokenTree::Punct(b)))
-                        if a.as_char() == ':' && a.spacing() == Spacing::Joint && b.as_char() == ':'
-                );
-                let after_extern_crate = index >= 2
-                    && matches!(&trees[index - 1], TokenTree::Ident(c) if c == "crate")
-                    && matches!(&trees[index - 2], TokenTree::Ident(e) if e == "extern");
-                if colons || after_extern_crate {
-                    into.insert(ident.to_string());
-                }
+    // The two trees before the current one, read backwards from where a path
+    // head is confirmed: `x` once `::` has closed after it, a crate name once
+    // `extern crate` stands before it.
+    let (mut before, mut last): (Option<TokenTree>, Option<TokenTree>) = (None, None);
+    for tree in tokens.clone() {
+        match (&before, &last, &tree) {
+            (Some(TokenTree::Ident(head)), Some(TokenTree::Punct(a)), TokenTree::Punct(b))
+                if a.as_char() == ':' && a.spacing() == Spacing::Joint && b.as_char() == ':' =>
+            {
+                into.insert(head.to_string());
             }
-            TokenTree::Group(group) => path_heads(&group.stream(), into),
+            (Some(TokenTree::Ident(e)), Some(TokenTree::Ident(c)), TokenTree::Ident(name))
+                if e == "extern" && c == "crate" =>
+            {
+                into.insert(name.to_string());
+            }
+            (_, _, TokenTree::Group(group)) => path_heads(&group.stream(), into),
             _ => {}
         }
+        before = last.replace(tree);
     }
 }
 
@@ -600,13 +583,41 @@ mod tests {
         }
     }
 
+    /// A helper method in an `impl` block is a function of its own: what it
+    /// writes is credited to the macros that call it, and to no other.
+    #[test]
+    fn a_helper_method_in_an_impl_block_writes_for_its_callers() {
+        let crate_source = source(
+            "#[proc_macro_derive(Emitted)]\n\
+             pub fn emitted(i: TokenStream) -> TokenStream { Emitter::emit(i) }\n\
+             #[proc_macro_derive(Plain)]\n\
+             pub fn plain(i: TokenStream) -> TokenStream { i }\n\
+             struct Emitter;\n\
+             impl Emitter { fn emit(i: TokenStream) -> TokenStream { quote! { ::impl_crate::X } } }\n",
+        );
+        let words = |used: &str| sorted(crate_source.words_for([used.to_string()].iter()));
+        assert_eq!(words("Emitted"), ["impl_crate"]);
+        assert!(words("Plain").is_empty());
+    }
+
+    /// Only `name!` is an invocation; an identifier without the bang is not.
+    #[test]
+    fn only_an_identifier_followed_by_a_bang_is_an_invocation() {
+        let mut found = HashSet::new();
+        let tokens: TokenStream = "outer!(x) plain { inner! [y] } z".parse().unwrap();
+        invocations(&tokens, &mut found);
+        assert_eq!(sorted(found), ["inner", "outer"]);
+    }
+
     /// Path heads only: a bare identifier is a local, and `extern crate x`
-    /// names a crate without a `::`.
+    /// names a crate without a `::`. A colon after some other punctuation, or
+    /// half of `extern crate`, makes no head.
     #[test]
     fn only_path_heads_count_from_quoted_code() {
         let mut found = HashSet::new();
         let tokens: TokenStream =
-            "let futures = 1; ::serde::Serialize; extern crate alloc as a; x : y; std::mem"
+            "let futures = 1; ::serde::Serialize; extern crate alloc as a; x : y; std::mem; \
+             w +: v; u ;: t; extern fn not_crate; other crate not_extern"
                 .parse()
                 .unwrap();
         path_heads(&tokens, &mut found);
