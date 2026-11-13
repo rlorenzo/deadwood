@@ -8,9 +8,13 @@
 tests/fixtures/**/target/
 tests/fixtures/**/Cargo.lock
 
-# Scratch report the code-review skill writes at the repository root while a
+# Scratch reports code-review-loop writes at the repository root while a
 # slice is under review. Input to that loop only, never to the build.
 agent-code-review.md
+agent-review-summary.md
+
+# Boost's local cache of compacted command output.
+/.boost/
 
 # Impeccable design-review captures
 /.impeccable/review/
