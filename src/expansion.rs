@@ -276,14 +276,12 @@ pub(crate) struct MacroSource {
     /// The names a consumer writes — a derive, its helper attributes, an
     /// attribute or function-like macro — to the functions implementing them.
     entries: HashMap<String, HashSet<String>>,
-    /// What each function writes, by function name.
-    words: HashMap<String, HashSet<String>>,
-    /// The functions each function calls, by name.
-    calls: HashMap<String, HashSet<String>>,
-    /// What code outside any function writes and calls — a `const`, a
-    /// `static` — counted for every entry, since any of them may use it.
-    global_words: HashSet<String>,
-    global_calls: HashSet<String>,
+    /// What each function writes, by function name. `None` is code outside
+    /// any function — a `const`, a `static` — counted for every entry, since
+    /// any of them may use it.
+    words: HashMap<Option<String>, HashSet<String>>,
+    /// The functions each function calls, by name, keyed like `words`.
+    calls: HashMap<Option<String>, HashSet<String>>,
     /// The functions being walked, innermost last.
     current: Vec<String>,
 }
@@ -310,9 +308,9 @@ impl MacroSource {
     /// Add `other`'s macros and functions to this source: a macro calls into
     /// its helper libraries by path, so they are read as one.
     fn absorb(&mut self, other: &MacroSource) {
-        fn merge(
-            into: &mut HashMap<String, HashSet<String>>,
-            from: &HashMap<String, HashSet<String>>,
+        fn merge<K: Clone + Eq + std::hash::Hash>(
+            into: &mut HashMap<K, HashSet<String>>,
+            from: &HashMap<K, HashSet<String>>,
         ) {
             for (key, values) in from {
                 into.entry(key.clone())
@@ -323,8 +321,6 @@ impl MacroSource {
         merge(&mut self.entries, &other.entries);
         merge(&mut self.words, &other.words);
         merge(&mut self.calls, &other.calls);
-        self.global_words.extend(other.global_words.iter().cloned());
-        self.global_calls.extend(other.global_calls.iter().cloned());
     }
 
     /// What using the macros named `used` may expand to: the words of the
@@ -332,47 +328,41 @@ impl MacroSource {
     /// indirectly, and of the code outside any function. Nothing when no
     /// macro is used.
     pub(crate) fn words_for<'a>(&self, used: impl Iterator<Item = &'a String>) -> HashSet<String> {
-        let mut pending: Vec<&str> = used
+        let mut pending: Vec<Option<&str>> = used
             .filter_map(|name| self.entries.get(name))
             .flatten()
-            .map(String::as_str)
+            .map(|function| Some(function.as_str()))
             .collect();
         if pending.is_empty() {
             return HashSet::new();
         }
-        pending.extend(self.global_calls.iter().map(String::as_str));
-        let mut out = self.global_words.clone();
+        pending.push(None);
+        let mut out = HashSet::new();
         let mut seen = HashSet::new();
         while let Some(function) = pending.pop() {
             if !seen.insert(function) {
                 continue;
             }
-            if let Some(words) = self.words.get(function) {
+            let key = function.map(str::to_owned);
+            if let Some(words) = self.words.get(&key) {
                 out.extend(words.iter().cloned());
             }
-            if let Some(calls) = self.calls.get(function) {
-                pending.extend(calls.iter().map(String::as_str));
+            if let Some(calls) = self.calls.get(&key) {
+                pending.extend(calls.iter().map(|call| Some(call.as_str())));
             }
         }
         out
     }
 
     fn sink(&mut self) -> &mut HashSet<String> {
-        match self.current.last() {
-            Some(function) => self.words.entry(function.clone()).or_default(),
-            None => &mut self.global_words,
-        }
+        self.words.entry(self.current.last().cloned()).or_default()
     }
 
     fn call(&mut self, name: String) {
-        match self.current.last() {
-            Some(function) => {
-                self.calls.entry(function.clone()).or_default().insert(name);
-            }
-            None => {
-                self.global_calls.insert(name);
-            }
-        }
+        self.calls
+            .entry(self.current.last().cloned())
+            .or_default()
+            .insert(name);
     }
 
     fn within(&mut self, function: String, body: impl FnOnce(&mut Self)) {
@@ -458,25 +448,26 @@ impl<'ast> Visit<'ast> for MacroSource {
 /// binds one called `futures`, and counting it would hide every `futures`
 /// entry of every package that joins.
 pub(crate) fn path_heads(tokens: &TokenStream, into: &mut HashSet<String>) {
-    let trees: Vec<TokenTree> = tokens.clone().into_iter().collect();
-    for (index, tree) in trees.iter().enumerate() {
-        match tree {
-            TokenTree::Ident(ident) => {
-                let colons = matches!(
-                    (trees.get(index + 1), trees.get(index + 2)),
-                    (Some(TokenTree::Punct(a)), Some(TokenTree::Punct(b)))
-                        if a.as_char() == ':' && a.spacing() == Spacing::Joint && b.as_char() == ':'
-                );
-                let after_extern_crate = index >= 2
-                    && matches!(&trees[index - 1], TokenTree::Ident(c) if c == "crate")
-                    && matches!(&trees[index - 2], TokenTree::Ident(e) if e == "extern");
-                if colons || after_extern_crate {
-                    into.insert(ident.to_string());
-                }
+    // The two trees before the current one, read backwards from where a path
+    // head is confirmed: `x` once `::` has closed after it, a crate name once
+    // `extern crate` stands before it.
+    let (mut before, mut last): (Option<TokenTree>, Option<TokenTree>) = (None, None);
+    for tree in tokens.clone() {
+        match (&before, &last, &tree) {
+            (Some(TokenTree::Ident(head)), Some(TokenTree::Punct(a)), TokenTree::Punct(b))
+                if a.as_char() == ':' && a.spacing() == Spacing::Joint && b.as_char() == ':' =>
+            {
+                into.insert(head.to_string());
             }
-            TokenTree::Group(group) => path_heads(&group.stream(), into),
+            (Some(TokenTree::Ident(e)), Some(TokenTree::Ident(c)), TokenTree::Ident(name))
+                if e == "extern" && c == "crate" =>
+            {
+                into.insert(name.to_string());
+            }
+            (_, _, TokenTree::Group(group)) => path_heads(&group.stream(), into),
             _ => {}
         }
+        before = last.replace(tree);
     }
 }
 

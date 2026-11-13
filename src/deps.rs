@@ -955,15 +955,7 @@ pub fn find_misplaced(
                 })
             })
             .flatten();
-        match misplacement(
-            dependency.dependency_kind(),
-            found,
-            doubled(dependency, normal_copy),
-        ) {
-            // Cargo rejects `optional = true` in `[dev-dependencies]`, so an
-            // optional entry only dev code names has nowhere to move to:
-            // whatever keeps it optional is a reason this check cannot see.
-            Some(Placement::MoveTo(DependencyKind::Development)) if dependency.optional => {}
+        match misplacement(dependency, found, doubled(dependency, normal_copy)) {
             Some(Placement::MoveTo(belongs_in)) => misplaced.push(MisplacedDependency {
                 name: dependency.manifest_name().to_string(),
                 declared: dependency.dependency_kind(),
@@ -1034,7 +1026,7 @@ enum Placement {
     StaleDuplicate,
 }
 
-/// The claim `found` supports about an entry declared as `kind`, or `None`
+/// The claim `found` supports about `dependency`, or `None`
 /// when the evidence does not support one.
 ///
 /// `doubled` says whether `[dependencies]` also declares the same crate —
@@ -1047,14 +1039,14 @@ enum Placement {
 ///
 /// Every `None` here is deliberate; see the module docs for the reasoning
 /// behind each.
-fn misplacement(kind: DependencyKind, found: Contexts, doubled: Doubled) -> Option<Placement> {
+fn misplacement(dependency: &Dependency, found: Contexts, doubled: Doubled) -> Option<Placement> {
     // Nothing names it: that is the unused-dependency check's question. And a
     // mention we could not attribute to a target proves a use without proving
     // where, which is exactly the evidence a placement claim needs.
     if found.is_empty() || found.contains(Contexts::OPAQUE) {
         return None;
     }
-    match kind {
+    let placement = match dependency.dependency_kind() {
         // Test, example and bench code links `[dev-dependencies]`, so an entry
         // only they name costs every consumer of the crate a build for nothing.
         DependencyKind::Normal if found == Contexts::DEV => {
@@ -1106,7 +1098,19 @@ fn misplacement(kind: DependencyKind, found: Contexts, doubled: Doubled) -> Opti
             }))
         }
         _ => None,
+    };
+    // Cargo rejects `optional = true` in `[dev-dependencies]`, so an optional
+    // entry only dev code names has nowhere to move to: whatever keeps it
+    // optional is a reason this check cannot see.
+    if dependency.optional
+        && matches!(
+            placement,
+            Some(Placement::MoveTo(DependencyKind::Development))
+        )
+    {
+        return None;
     }
+    placement
 }
 
 /// Surface one warning per skip reason, listing the entries it covers.
