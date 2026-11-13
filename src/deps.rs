@@ -2925,6 +2925,57 @@ mod tests {
         assert!(misplaced(&manifest, &refs).0.is_empty());
     }
 
+    /// `#[cfg(test)]` confines a member of a `trait` or an `extern` block
+    /// as it does an item: what the member names is test code.
+    #[test]
+    fn a_cfg_test_member_of_a_trait_or_extern_block_is_test_code() {
+        for source in [
+            "pub trait Held {\n #[cfg(test)]\n fn probe() { trait_dev::go(); }\n}\n",
+            "extern \"C\" {\n #[cfg(test)]\n static PROBE: trait_dev::Handle;\n}\n",
+        ] {
+            let refs = references(&[source]);
+            assert_eq!(
+                refs.names.get("trait_dev").copied(),
+                Some(Contexts::DEV),
+                "{source}"
+            );
+        }
+    }
+
+    /// The newest build's `out` directory is the one read, however many
+    /// builds of the package the target directory holds. The newest is
+    /// neither the first nor the last created, nor first or last by name, so
+    /// no listing order `read_dir` might use can stand in for the mtimes.
+    #[cfg(unix)]
+    #[test]
+    fn the_newest_out_dir_of_the_package_wins() {
+        let root = std::env::temp_dir().join(format!("deadwood-outdir-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"outdirs\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        let epoch = std::time::SystemTime::UNIX_EPOCH;
+        let out = |hash: &str| {
+            root.join(format!(
+                "target/debug/build/outdirs-{}/out",
+                hash.repeat(16)
+            ))
+        };
+        // Creation order, with each one's age in seconds since the epoch.
+        for (hash, age) in [("1", 100), ("4", 200), ("3", 900), ("5", 300), ("2", 400)] {
+            fs::create_dir_all(out(hash)).unwrap();
+            fs::File::open(out(hash))
+                .unwrap()
+                .set_modified(epoch + std::time::Duration::from_secs(age))
+                .unwrap();
+        }
+        assert_eq!(newest_out_dir(&root), Some(out("3")));
+        let _ = fs::remove_dir_all(&root);
+    }
+
     /// Doc examples are compiled as doctests, which link the dev-dependencies
     /// — and a word in a doc comment names no target at all. Either way it
     /// cannot place an entry, in any direction.
